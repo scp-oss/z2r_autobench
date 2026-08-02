@@ -1,0 +1,26 @@
+[Unit]
+Description=z2r autotune daemon (health-check + point re-tune)
+After=network-online.target zapret2.service
+Wants=network-online.target
+# Демон сам проверяет zapret2_running() в цикле и просто ждёт, если сервис
+# не поднят — но естественный порядок всё равно лучше при загрузке системы.
+Requires=zapret2.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bash /opt/z2r_autobench/autotune_daemon.sh
+Restart=on-failure
+RestartSec=10
+User=root
+# Логи демон и так дублирует в /opt/z2r_autobench/autotune_state/daemon.log,
+# но пусть заодно идут и в journal — удобно смотреть `journalctl -u autotune-daemon -f`
+StandardOutput=journal
+StandardError=journal
+
+# Переопределить настройки можно тут, например:
+# Environment=CHECK_INTERVAL=180
+# Environment=FAIL_THRESHOLD=2
+ Environment=SKIP_PROFILES="8 9"
+
+[Install]
+WantedBy=multi-user.target
