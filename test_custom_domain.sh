@@ -66,6 +66,8 @@ if ! zapret2_running; then
   exit 1
 fi
 
+acquire_tune_lock "test_custom_domain.sh" 10 || exit 1
+
 probe_domain_url() {
   # -L — следуем редиректам (напр. xvideos.com -> www.xvideos.com с
   # content-length: 0 на корне — без -L тест всегда бы проваливался

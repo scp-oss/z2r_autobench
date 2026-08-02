@@ -5,6 +5,12 @@ Wants=network-online.target
 # Демон сам проверяет zapret2_running() в цикле и просто ждёт, если сервис
 # не поднят — но естественный порядок всё равно лучше при загрузке системы.
 Requires=zapret2.service
+# Демон сам себя защищает от повторного запуска (flock на
+# autotune_state/daemon.singleton.lock), так что двойной старт тут не
+# страшен — но не даём systemd уходить в частый restart-loop, если
+# что-то пошло не так на самом старте.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -20,7 +26,8 @@ StandardError=journal
 # Переопределить настройки можно тут, например:
 # Environment=CHECK_INTERVAL=180
 # Environment=FAIL_THRESHOLD=2
- Environment=SKIP_PROFILES="8 9"
+# Environment=RETUNE_BACKOFF=3600
+Environment=SKIP_PROFILES="8 9"
 
 [Install]
 WantedBy=multi-user.target

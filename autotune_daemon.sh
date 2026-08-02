@@ -29,6 +29,17 @@
 #   FAIL_THRESHOLD=3         — провалов подряд до запуска re-tune
 #   RETUNE_PASSES=2          — проходов rank_strategies.sh при re-tune
 #   QUIC_CHECK_EVERY=3       — проверять профиль 5 раз в N циклов (дороже TLS)
+#   RETUNE_BACKOFF=1800      — после ретюна, который не нашёл НИ ОДНОЙ рабочей
+#                              стратегии, не пытаться снова этот профиль
+#                              раньше чем через столько секунд (защита от
+#                              бесконечного дорогого перебора впустую —
+#                              см. историю сессии с FB_TLS/rutracker.org:
+#                              тест бил не в тот профиль и молотил вхолостую
+#                              каждые несколько минут, пока не заметили)
+#   DEPCHECK_EVERY=6         — как часто (в циклах) перепроверять внешние
+#                              зависимости (yt-dlp, aioquic) — если появятся
+#                              позже, профиль сам вернётся из пропущенных
+#   DAEMON_LOG_MAX_BYTES=10485760 — ротация daemon.log при превышении
 
 set -uo pipefail
 
@@ -40,6 +51,9 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-300}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-3}"
 RETUNE_PASSES="${RETUNE_PASSES:-2}"
 QUIC_CHECK_EVERY="${QUIC_CHECK_EVERY:-3}"
+RETUNE_BACKOFF="${RETUNE_BACKOFF:-1800}"
+DEPCHECK_EVERY="${DEPCHECK_EVERY:-6}"
+DAEMON_LOG_MAX_BYTES="${DAEMON_LOG_MAX_BYTES:-10485760}"
 # Профили, которые демон НЕ проверяет и НЕ ретюнит. По умолчанию 8 и 9
 # (FB_TLS/FB_HTTP) — их тестовый домен (rutracker.org) уже входит в
 # TCP_RKN_list.txt, поэтому тест всегда бьёт не в тот профиль (реальным
@@ -58,6 +72,18 @@ fi
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
+# --- защита от двух одновременно запущенных демонов ---
+# systemd Restart=on-failure + случайный ручной `bash autotune_daemon.sh`
+# поверх уже работающей службы — оба будут независимо считать провалы и
+# независимо запускать ретюны, и будут перебивать стратегии друг у друга.
+# Неблокирующий захват: если лок уже занят — второй экземпляр сразу выходит,
+# а не встаёт в очередь (тут не нужно ждать, тут нужно не запускаться).
+exec {DAEMON_LOCK_FD}>"$STATE_DIR/daemon.singleton.lock"
+if ! flock -n "$DAEMON_LOCK_FD"; then
+  echo "Другой экземпляр autotune_daemon.sh уже запущен (лок $STATE_DIR/daemon.singleton.lock занят) — выхожу." >&2
+  exit 1
+fi
+
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/z2r_autobench_lib.sh"
 
@@ -73,18 +99,101 @@ declare -A PROFILE_URL=(
 # профиль 2 (GV) резолвится динамически через yt-dlp — см. check_profile_tls
 
 log() {
-  echo "[$(date -Iseconds)] $*" | tee -a "$STATE_DIR/daemon.log" >&2
+  local ts
+  ts="$(date -Iseconds)"
+  echo "[$ts] $*" >> "$STATE_DIR/daemon.log"
+  echo "[$ts] $*" >&2
+}
+
+# Ротация daemon.log — иначе демон, работающий месяцами, съедает диск сам
+# себя, как когда-то было с --debug логом nfqws2 в докер-варианте проекта.
+# Простое обрезание хвоста, без logrotate — не хотим тянуть внешнюю
+# зависимость ради одного файла.
+rotate_daemon_log() {
+  local f="$STATE_DIR/daemon.log"
+  [ -f "$f" ] || return 0
+  local size
+  size="$(stat -c%s "$f" 2>/dev/null || echo 0)"
+  if [ "$size" -gt "$DAEMON_LOG_MAX_BYTES" ]; then
+    tail -c "$((DAEMON_LOG_MAX_BYTES / 2))" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    log "daemon.log превысил ${DAEMON_LOG_MAX_BYTES} байт, обрезан до последней половины лимита"
+  fi
 }
 
 fail_count_file() { echo "$STATE_DIR/failcount_profile_$1"; }
 get_fail_count() { cat "$(fail_count_file "$1")" 2>/dev/null || echo 0; }
 set_fail_count() { echo "$2" > "$(fail_count_file "$1")"; }
 
-is_skipped() {
+# --- backoff после ретюна, который не нашёл рабочую стратегию ---
+# Если полный перебор (дорогой — десятки запросов, минуты работы) не находит
+# НИ ОДНОЙ рабочей стратегии, это почти никогда не "провайдер заблокировал
+# всё" — гораздо вероятнее сломан сам тест (см. историю FB_TLS/rutracker.org:
+# домен был уже в другом хостлисте, тест бил не туда, 30/30 провалов были
+# методологическим артефактом, не реальностью). Без backoff демон честно
+# запускал бы тот же дорогой холостой перебор снова через FAIL_THRESHOLD
+# циклов — навсегда. Backoff даёт паузу и явно оставляет след в status.txt,
+# что этот профиль требует ручного разбора, а не тихо жрёт ресурсы по кругу.
+backoff_file() { echo "$STATE_DIR/backoff_until_profile_$1"; }
+get_backoff_until() { cat "$(backoff_file "$1")" 2>/dev/null || echo 0; }
+set_backoff_until() { echo "$2" > "$(backoff_file "$1")"; }
+clear_backoff() { rm -f "$(backoff_file "$1")"; }
+in_backoff() { [ "$(get_backoff_until "$1")" -gt "$(date +%s)" ]; }
+
+# Профили, отключённые ВРЕМЕННО из-за отсутствующей внешней зависимости
+# (yt-dlp/aioquic), а не по воле оператора. Отдельно от SKIP_PROFILES, чтобы
+# в status.txt/логах было видно причину, и чтобы профиль сам вернулся в
+# работу, как только зависимость появится — без перезапуска демона.
+DEP_SKIP_PROFILES=""
+
+is_user_skipped() {
   case " $SKIP_PROFILES " in
     *" $1 "*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+is_dep_skipped() {
+  case " $DEP_SKIP_PROFILES " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_skipped() {
+  is_user_skipped "$1" || is_dep_skipped "$1"
+}
+
+# Проверяет внешние зависимости, от которых зависят тесты профилей 2 (GV_TLS,
+# через yt-dlp -> реальный videoplayback URL) и 5 (YT_QUIC_UDP, тот же yt-dlp
+# для URL + aioquic для самого QUIC/HTTP-3 запроса). Без yt-dlp get_gv_test_url()
+# молча откатывается на голый googlevideo.com/ (404 на 1.5КБ, см. комментарий
+# в z2r_autobench_lib.sh) — health-check профиля 2 будет проваливаться ВСЕГДА,
+# что бы ни стояло в locked.tsv, демон будет считать это "провайдер блокирует"
+# и молотить дорогие ретюны бесконечно вхолостую. Та же ловушка, что была с
+# FB_TLS/rutracker.org в этой сессии — только теперь ловим её на старте,
+# а не постфактум по логам.
+check_dependencies() {
+  local new_skip=""
+
+  if ! command -v yt-dlp >/dev/null 2>&1; then
+    new_skip="$new_skip 2 5"
+    if ! is_dep_skipped "2"; then
+      log "ЗАВИСИМОСТЬ: yt-dlp не найден — профили 2 (GV_TLS) и 5 (YT_QUIC_UDP) временно пропускаются (их тест не может резолвить реальный googlevideo URL, без него результат всегда ложно-отрицательный). Установи: pip install yt-dlp --break-system-packages"
+    fi
+  elif ! python3 -c "import aioquic" >/dev/null 2>&1; then
+    new_skip="$new_skip 5"
+    if ! is_dep_skipped "5"; then
+      log "ЗАВИСИМОСТЬ: пакет aioquic не найден — профиль 5 (YT_QUIC_UDP) временно пропускается. Установи: pip install aioquic --break-system-packages"
+    fi
+  fi
+
+  # Обратный переход: зависимость появилась — молча возвращаем профиль в
+  # работу (следующий health-check сам покажет, реально ли он работает).
+  if [ -z "$new_skip" ] && [ -n "$DEP_SKIP_PROFILES" ]; then
+    log "ЗАВИСИМОСТИ: yt-dlp/aioquic теперь на месте — возвращаю профили 2/5 в обычную проверку"
+  fi
+
+  DEP_SKIP_PROFILES="$new_skip"
 }
 
 write_status() {
@@ -105,8 +214,18 @@ write_status() {
       local cur
       cur="$(orch_locked_get "$pid" "$proto" 2>/dev/null || echo "?")"
       local skip_marker=""
-      is_skipped "$pid" && skip_marker=" (ПРОПУЩЕН, не проверяется)"
-      echo "  $pid $title: текущая стратегия=$cur, провалов подряд=$fc/$FAIL_THRESHOLD$skip_marker"
+      if is_dep_skipped "$pid"; then
+        skip_marker=" (ПРОПУЩЕН: нет зависимости yt-dlp/aioquic)"
+      elif is_user_skipped "$pid"; then
+        skip_marker=" (ПРОПУЩЕН: SKIP_PROFILES)"
+      fi
+      local backoff_marker=""
+      local until_ts
+      until_ts="$(get_backoff_until "$pid")"
+      if [ "$until_ts" -gt "$(date +%s)" ]; then
+        backoff_marker=" [backoff до $(date -d "@$until_ts" -Iseconds 2>/dev/null || echo "$until_ts")]"
+      fi
+      echo "  $pid $title: текущая стратегия=$cur, провалов подряд=$fc/$FAIL_THRESHOLD$skip_marker$backoff_marker"
     done
   } > "$STATE_DIR/status.txt"
 }
@@ -148,17 +267,34 @@ print(p)
 retune_profile() {
   local pid="$1"
   local title="${PROFILE_TITLE[$pid]:-YT_QUIC_UDP}"
-  log "RETUNE: запускаю точечный подбор для профиля $pid ($title), $RETUNE_PASSES проход(ов)"
 
-  if [ "$pid" = "5" ]; then
-    RETUNE_PASSES_ENV="$RETUNE_PASSES" bash "$SCRIPT_DIR/rank_quic.sh" --passes "$RETUNE_PASSES" >> "$STATE_DIR/daemon.log" 2>&1
-  else
-    bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$RETUNE_PASSES" >> "$STATE_DIR/daemon.log" 2>&1
+  if in_backoff "$pid"; then
+    log "RETUNE: profile=$pid ($title) в backoff'е ещё $(( $(get_backoff_until "$pid") - $(date +%s) ))s (прошлый полный перебор не нашёл рабочую стратегию) — пропускаю дорогой ретюн, жду"
+    return
   fi
 
+  log "RETUNE: запускаю точечный подбор для профиля $pid ($title), $RETUNE_PASSES проход(ов)"
+
+  local rc=0
   local ordered_file="$LOG_DIR/last_ordered_profile_$pid.txt"
+  # Убираем возможный устаревший файл от прошлого прогона — если этот запуск
+  # не сможет захватить общий лок (кто-то другой сейчас крутит стратегии) и
+  # завершится ошибкой, не хотим по ошибке применить чужой/старый результат.
+  rm -f "$ordered_file"
+
+  if [ "$pid" = "5" ]; then
+    RETUNE_PASSES_ENV="$RETUNE_PASSES" bash "$SCRIPT_DIR/rank_quic.sh" --passes "$RETUNE_PASSES" >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
+  else
+    bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$RETUNE_PASSES" >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    log "RETUNE: profile=$pid ($title) прогон завершился с ошибкой (код=$rc, возможно не смог захватить лок — кто-то другой крутил стратегии) — пробую в следующем цикле, счётчик провалов не сбрасываю"
+    return
+  fi
+
   local best
-  best="$(cat "$ordered_file" 2>/dev/null | awk '{print $1}')"
+  best="$(awk '{print $1; exit}' "$ordered_file" 2>/dev/null)"
 
   if [ -n "$best" ]; then
     if [ "$pid" = "5" ]; then
@@ -179,21 +315,48 @@ retune_profile() {
       done
     fi
     log "RETUNE: применена новая стратегия profile=$pid ($title) strategy=$best (locked.tsv + profile.lock)"
+    clear_backoff "$pid"
   else
-    log "RETUNE: !!! не нашлось НИ ОДНОЙ рабочей стратегии для profile=$pid ($title) — требуется ручное вмешательство"
+    # Полный перебор не нашёл НИ ОДНОЙ рабочей стратегии. Почти всегда это
+    # означает "тест бьёт не в тот канал/сломан", а не "провайдер заблокировал
+    # вообще всё" (см. историю FB_TLS/rutracker.org). Не долбим это дорогим
+    # перебором каждые несколько минут — уходим в backoff и явно просим
+    # разобраться руками.
+    local until_ts=$(( $(date +%s) + RETUNE_BACKOFF ))
+    set_backoff_until "$pid" "$until_ts"
+    log "RETUNE: !!! не нашлось НИ ОДНОЙ рабочей стратегии для profile=$pid ($title) — уходим в backoff на ${RETUNE_BACKOFF}s, требуется ручной разбор (см. $LOG_DIR/rank_${pid}_*.raw.tsv за этот запуск; частая причина — тестовый URL профиля бьёт не в тот канал, см. z2r_autobench_lib.sh/rank_strategies.sh)"
   fi
   set_fail_count "$pid" 0
 }
 
 if ! zapret2_running; then
   log "zapret2 (nfqws2) не запущен на старте — жду и буду перепроверять в цикле."
+else
+  # Лёгкая проверка стабильности на старте — не блокирует запуск, только
+  # предупреждает. В сессии был случай, когда процесс падал/пересоздавался
+  # каждые ~10с из-за гонки ручных systemctl-команд во время отладки — если
+  # это происходит НЕ по нашей вине, лучше узнать сразу в логе, чем гадать
+  # постфактум по чужим health-check провалам.
+  pid1="$(pidof nfqws2 2>/dev/null | awk '{print $1}')"
+  sleep 5
+  pid2="$(pidof nfqws2 2>/dev/null | awk '{print $1}')"
+  if [ -z "$pid2" ] || [ "$pid1" != "$pid2" ]; then
+    log "ВНИМАНИЕ: PID nfqws2 изменился/пропал за 5с на старте ($pid1 -> $pid2) — сервис нестабилен прямо сейчас (не наша операция). Здоровые проверки ниже могут ложно проваливаться, пока это не уляжется."
+  fi
 fi
 
-log "autotune_daemon.sh запущен. Профили: 1 2 3 4 5 8 9. CHECK_INTERVAL=${CHECK_INTERVAL}s FAIL_THRESHOLD=${FAIL_THRESHOLD}"
+check_dependencies
+
+log "autotune_daemon.sh запущен. Профили: 1 2 3 4 5 8 9 (кроме user-skip=$SKIP_PROFILES, dep-skip=${DEP_SKIP_PROFILES:-нет}). CHECK_INTERVAL=${CHECK_INTERVAL}s FAIL_THRESHOLD=${FAIL_THRESHOLD} RETUNE_BACKOFF=${RETUNE_BACKOFF}s"
 
 cycle=0
 while true; do
   cycle=$((cycle + 1))
+
+  rotate_daemon_log
+  if (( cycle % DEPCHECK_EVERY == 0 )); then
+    check_dependencies
+  fi
 
   if ! zapret2_running; then
     log "zapret2 не запущен, пропускаю цикл проверки."

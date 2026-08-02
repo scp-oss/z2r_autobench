@@ -46,6 +46,8 @@ if ! zapret2_running; then
   exit 1
 fi
 
+acquire_tune_lock "quic_tune.sh" 10 || exit 1
+
 echo "=== SELF-TEST: проверка, что quic_probe.py вообще способен провести QUIC/HTTP-3 handshake ==="
 echo "Пробуем публичный HTTP/3-сайт (cloudflare-quic.com), НЕ через zapret2-фильтруемый профиль —"
 echo "это только проверка механики скрипта, а не обхода DPI."

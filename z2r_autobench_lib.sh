@@ -9,6 +9,28 @@
 LIB_DIR="${LIB_DIR:-/opt/zapret2/z2r_lib}"
 ORCH_DIR="${ORCH_DIR:-/opt/zapret2/extra_strats/cache/orchestra}"
 
+# --- общий лок на "кто сейчас крутит стратегии" ---
+# Ретюн (свой или демона) переключает locked.tsv десятки раз за один прогон.
+# Если параллельно запустить второй прогон (например, ручной rank_strategies.sh
+# поверх работающего autotune_daemon.sh) — они будут писать поверх друг друга
+# и оба получат мусорные результаты. Лок не блокирует health-check (он не
+# трогает locked.tsv), только сам перебор.
+TUNE_LOCK_FILE="${TUNE_LOCK_FILE:-$ORCH_DIR/.tune.lock}"
+
+# Захватывает лок на текущий процесс (держится до выхода процесса/exec).
+# Использование: acquire_tune_lock "название" [таймаут_сек] || exit 1
+acquire_tune_lock() {
+  local who="${1:-tune}" timeout="${2:-10}"
+  mkdir -p "$(dirname "$TUNE_LOCK_FILE")"
+  # shellcheck disable=SC2034
+  exec {TUNE_LOCK_FD}>"$TUNE_LOCK_FILE"
+  if ! flock -w "$timeout" "$TUNE_LOCK_FD"; then
+    echo "Не удалось захватить $TUNE_LOCK_FILE за ${timeout}s — кто-то ещё сейчас крутит стратегии ($who подождёт до следующего раза)." >&2
+    return 1
+  fi
+  return 0
+}
+
 # netcheck.sh (и другие lib-файлы z2r) не рассчитаны на `set -u` и
 # ссылаются на переменные цвета до объявления. Задаём дефолты заранее.
 plain='\033[0m'
