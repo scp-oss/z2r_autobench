@@ -94,6 +94,22 @@ restart_zapret2() {
   fi
   "$ZAPRET2_INIT" start
   sleep "$RESTART_SETTLE_SECONDS"
+
+  # run_daemon() в /opt/zapret2/init.d/sysv/functions форкает nfqws2 и сразу
+  # считает старт успешным, не проверяя, что процесс реально пережил запуск
+  # (гонка: если старый процесс ещё не освободил NFQUEUE qnum=300, новый
+  # молча падает при биндинге, а pidfile всё равно пишется). Раз мы этот
+  # файл не трогаем (не наш, обновляется поверх нас), подстраховываемся
+  # тут: если nfqws2 не поднялся с первого раза — пробуем ещё раз.
+  if ! pidof nfqws2 >/dev/null; then
+    echo "restart_zapret2: nfqws2 не поднялся после start, пробую ещё раз" >&2
+    "$ZAPRET2_INIT" start
+    sleep "$RESTART_SETTLE_SECONDS"
+    if ! pidof nfqws2 >/dev/null; then
+      echo "restart_zapret2: nfqws2 не поднялся и со второй попытки" >&2
+      return 1
+    fi
+  fi
 }
 
 # профиль_id title proto_list url is_http (подмножество PROFILE_DEFS из night_tune.sh)
