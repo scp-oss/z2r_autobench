@@ -45,6 +45,12 @@ fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/z2r_autobench_lib.sh"
 
+# blob_tune.sh рестартует nfqws2 и параллельно крутит стратегии через
+# tune_profile() — если в этот момент демон или другой ручной прогон тоже
+# полезет менять locked.tsv/config, результат будет мусорным. Держим лок
+# на весь прогон (он и так редкий/ручной, ждать 10с не страшно).
+acquire_tune_lock "blob_tune.sh" 10 || exit 1
+
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/blob_tune_${RUN_TS}.tsv"

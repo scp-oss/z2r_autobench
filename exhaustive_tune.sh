@@ -38,6 +38,8 @@ if ! zapret2_running; then
   exit 1
 fi
 
+acquire_tune_lock "exhaustive_tune.sh" 10 || exit 1
+
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/exhaustive_${RUN_TS}.tsv"

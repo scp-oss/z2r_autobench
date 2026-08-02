@@ -46,6 +46,10 @@ if ! zapret2_running; then
   exit 1
 fi
 
+# См. rank_strategies.sh — тот же общий лок, чтобы демон и ручной запуск
+# не переключали профиль 5 одновременно вперемешку.
+acquire_tune_lock "rank_quic.sh" 10 || exit 1
+
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RAW_FILE="$LOG_DIR/rank_quic_${RUN_TS}.raw.tsv"

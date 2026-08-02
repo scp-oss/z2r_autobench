@@ -38,6 +38,11 @@ if ! zapret2_running; then
   exit 1
 fi
 
+# Не начинаем перебор, если кто-то другой (демон или второй ручной запуск)
+# уже крутит стратегии прямо сейчас — иначе оба прогона будут писать в
+# locked.tsv поверх друг друга и оба получат мусорные результаты.
+acquire_tune_lock "rank_strategies.sh --profile $PROFILE" 10 || exit 1
+
 case "$PROFILE" in
   1) TITLE="YT_TLS/HTTP"; PROTO="tls http"; URL="https://www.youtube.com/"; IS_HTTP=0 ;;
   2) TITLE="Googlevideo_TLS"; PROTO="tls"; URL="$(get_gv_test_url)"; IS_HTTP=0 ;;
