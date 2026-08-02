@@ -4,7 +4,12 @@ After=network-online.target zapret2.service
 Wants=network-online.target
 # Демон сам проверяет zapret2_running() в цикле и просто ждёт, если сервис
 # не поднят — но естественный порядок всё равно лучше при загрузке системы.
-Requires=zapret2.service
+# Именно Wants=, а не Requires=: zapret2.service штатно уходит в
+# inactive (dead) через пару секунд после старта (форкает nfqws2 в обход
+# systemd-cgroup, само по себе это не сбой). С Requires= это вызывало
+# каскадный рестарт autotune-daemon.service при каждом
+# `systemctl restart zapret2` — увидено на NETH-4 при проверке.
+Wants=zapret2.service
 # Демон сам себя защищает от повторного запуска (flock на
 # autotune_state/daemon.singleton.lock), так что двойной старт тут не
 # страшен — но не даём systemd уходить в частый restart-loop, если
