@@ -126,6 +126,18 @@ declare -A TITLES=(
   [9]="FB_HTTP"
 )
 
+# Протоколы каждого профиля — нужно знать, во сколько вызовов
+# set_strategy_cli.sh разложить применение лучшей стратегии (см. offer_apply_best).
+declare -A PROFILE_PROTO=(
+  [1]="tls http"
+  [2]="tls"
+  [3]="tls"
+  [4]="tls"
+  [5]="udp"
+  [8]="tls"
+  [9]="http"
+)
+
 read_last_ordered() {
   # $1 = profile id, печатает содержимое last_ordered_profile_<N>.txt или пусто
   local f="$LOG_DIR/last_ordered_profile_$1.txt"
@@ -233,6 +245,28 @@ get_locked_strategy() {
   echo "${val:-0}"
 }
 
+# Цвета для тегов в квадратных скобках ([ON]/[OFF]/[NONE]/[dev]/[бета]).
+# $'...' — байты экранирования уже в значении переменной, обычный echo/printf
+# без -e их и так выведет как есть.
+C_RESET=$'\033[0m'
+C_GREEN=$'\033[0;32m'
+C_RED=$'\033[0;31m'
+C_YELLOW=$'\033[0;33m'
+C_CYAN=$'\033[0;36m'
+C_GRAY=$'\033[0;90m'
+
+color_tag() {
+  local word="$1" color=""
+  case "$word" in
+    ON) color="$C_GREEN" ;;
+    OFF) color="$C_RED" ;;
+    NONE) color="$C_GRAY" ;;
+    dev) color="$C_YELLOW" ;;
+    бета|beta) color="$C_CYAN" ;;
+  esac
+  printf '%s[%s]%s' "$color" "$word" "$C_RESET"
+}
+
 show_menu() {
   echo "=== z0r ===" >&2
   echo "[Provider: $(get_provider)]" >&2
@@ -242,16 +276,16 @@ show_menu() {
   echo "111) Тестировать все профили" >&2
   echo "     (1 2 3 4 5 — полный тест; 6 — из кэша; 7 8 9 — заглушка)" >&2
   echo "     [#N] = выбранная стратегия, [#0] = auto" >&2
-  echo "     [dev] = заглушка, пока в разработке" >&2
+  echo "     $(color_tag dev) = заглушка, пока в разработке" >&2
   echo "     (можно перечислить несколько через запятую/пробел, например: 1,3,4)" >&2
   echo "" >&2
   for pid in 1 2 3 4 5; do
     printf "  %s) %-18s [#%s]\n" "$pid" "${TITLES[$pid]}" "$(get_locked_strategy "$pid")" >&2
   done
-  printf "  6) %-18s [бета] (требуется Discord_bot)\n" "${TITLES[6]}" >&2
-  printf "  7) %-18s [dev]\n" "${TITLES[7]}" >&2
-  printf "  8) %-18s [dev]\n" "${TITLES[8]}" >&2
-  printf "  9) %-18s [dev]\n" "${TITLES[9]}" >&2
+  printf "  6) %-18s %s (требуется Discord_bot)\n" "${TITLES[6]}" "$(color_tag бета)" >&2
+  printf "  7) %-18s %s\n" "${TITLES[7]}" "$(color_tag dev)" >&2
+  printf "  8) %-18s %s\n" "${TITLES[8]}" "$(color_tag dev)" >&2
+  printf "  9) %-18s %s\n" "${TITLES[9]}" "$(color_tag dev)" >&2
   echo "" >&2
   echo "=== Подбор стратегии ===" >&2
   echo "" >&2
@@ -263,17 +297,17 @@ show_menu() {
   echo "" >&2
   echo "=== Управление ===" >&2
   echo "" >&2
-  echo " 12) Zapret сервис [$(get_zapret_status)] (статус и перезапуск)" >&2
-  echo " 13) autotune-daemon [$(get_daemon_status)] (сервис автотестирования и подстройки)" >&2
-  echo " 14) Discord_bot [$(get_voice_bot_status)] (требуется для тестирования VOICE_UDP)" >&2
-  echo " 15) web_panel [dev] (управление через браузер)" >&2
+  echo " 12) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
+  echo " 13) autotune-daemon $(color_tag "$(get_daemon_status)") (сервис автотестирования и подстройки)" >&2
+  echo " 14) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
+  echo " 15) web_panel $(color_tag dev) (управление через браузер)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
   echo "" >&2
   echo " 16) Удалить z2r" >&2
   echo " 17) Удалить autotune-daemon" >&2
   echo " 18) Удалить Discord_bot" >&2
-  echo " 19) Удалить web_panel [dev]" >&2
+  echo " 19) Удалить web_panel $(color_tag dev)" >&2
   echo " 20) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
   echo "" >&2
   echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot)" >&2
@@ -282,6 +316,27 @@ show_menu() {
   echo "" >&2
   read -re -p "Выбор: " choice
   echo "$choice"
+}
+
+# После теста профиля предлагает применить лучшую (первую в ORDERED_SUCCESS)
+# стратегию — то же самое, что делает retune_profile() в autotune_daemon.sh,
+# но через set_strategy_cli.sh (не сорсим лишний раз всю lib внутри z0r).
+offer_apply_best() {
+  local pid="$1" ordered best proto
+  case "$pid" in 6|7) return 0 ;; esac
+  ordered="$(read_last_ordered "$pid")"
+  best="$(awk '{print $1; exit}' <<< "$ordered")"
+  [ -n "$best" ] || return 0
+
+  read -re -p "Профиль $pid (${TITLES[$pid]}): применить лучшую стратегию $best? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      for proto in ${PROFILE_PROTO[$pid]:-tls}; do
+        bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
+      done
+      ;;
+    *) echo "Пропускаю профиль $pid — стратегия не применена." ;;
+  esac
 }
 
 run_all() {
@@ -301,6 +356,10 @@ run_all() {
     local ordered
     ordered="$(read_last_ordered "$pid")"
     echo "$pid $title: ${ordered:-нет данных}"
+  done
+  echo ""
+  for pid in 1 2 3 4 5 8 9; do
+    offer_apply_best "$pid"
   done
 }
 
@@ -336,6 +395,11 @@ run_selected() {
     local ordered
     ordered="$(read_last_ordered "$pid")"
     echo "$pid ${TITLES[$pid]}: ${ordered:-нет данных}"
+  done
+  echo ""
+  for pid in $ids; do
+    [ -n "${TITLES[$pid]:-}" ] || continue
+    offer_apply_best "$pid"
   done
 }
 
