@@ -206,7 +206,7 @@ test_profile() {
   case "$pid" in
     1|2|3|4|8|9)
       echo "--- Тестирую $title (профиль $pid), $PASSES проход(ов) ---"
-      bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$PASSES"
+      bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$PASSES" --funnel
       local ordered
       ordered="$(read_last_ordered "$pid")"
       echo ""
@@ -214,7 +214,7 @@ test_profile() {
       ;;
     5)
       echo "--- Тестирую $title (профиль 5, QUIC), $PASSES проход(ов) ---"
-      bash "$SCRIPT_DIR/rank_quic.sh" --passes "$PASSES"
+      bash "$SCRIPT_DIR/rank_quic.sh" --passes "$PASSES" --funnel
       local ordered
       ordered="$(read_last_ordered "5")"
       echo ""
