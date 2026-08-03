@@ -328,6 +328,13 @@ offer_apply_best() {
   best="$(awk '{print $1; exit}' <<< "$ordered")"
   [ -n "$best" ] || return 0
 
+  # Не в интерактиве (например, z0r --profiles ... из cron/автоматизации,
+  # без TTY) — не виснем на read, просто сообщаем находку.
+  if [ ! -t 0 ]; then
+    echo "Профиль $pid (${TITLES[$pid]}): лучшая стратегия $best (не интерактив — не применяю автоматически, см. --apply-механизм демона для авто-режима)."
+    return 0
+  fi
+
   read -re -p "Профиль $pid (${TITLES[$pid]}): применить лучшую стратегию $best? [y/N]: " ans
   case "$ans" in
     y|Y)
@@ -345,6 +352,8 @@ run_all() {
   for pid in 1 2 3 4 5 6 7 8 9; do
     test_profile "$pid"
     echo ""
+    offer_apply_best "$pid"
+    echo ""
   done
   echo "=== ИТОГ ==="
   for pid in 1 2 3 4 5 6 7 8 9; do
@@ -356,10 +365,6 @@ run_all() {
     local ordered
     ordered="$(read_last_ordered "$pid")"
     echo "$pid $title: ${ordered:-нет данных}"
-  done
-  echo ""
-  for pid in 1 2 3 4 5 8 9; do
-    offer_apply_best "$pid"
   done
 }
 
@@ -383,6 +388,8 @@ run_selected() {
     fi
     test_profile "$pid"
     echo ""
+    offer_apply_best "$pid"
+    echo ""
   done
 
   echo "=== ИТОГ (выборочно) ==="
@@ -395,11 +402,6 @@ run_selected() {
     local ordered
     ordered="$(read_last_ordered "$pid")"
     echo "$pid ${TITLES[$pid]}: ${ordered:-нет данных}"
-  done
-  echo ""
-  for pid in $ids; do
-    [ -n "${TITLES[$pid]:-}" ] || continue
-    offer_apply_best "$pid"
   done
 }
 
