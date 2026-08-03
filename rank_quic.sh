@@ -76,16 +76,30 @@ RAW_FILE="$LOG_DIR/rank_quic_${RUN_TS}.raw.tsv"
 echo -e "pass\tstrategy\tattempt\tsuccess\tbytes" > "$RAW_FILE"
 autobench_backup_locks "$RUN_TS"
 
-# Резолвит GV_HOST/GV_PATH заново (новый эдж от yt-dlp) — или, если задан
-# --host, просто фиксирует ручные значения (тогда переразрезолв не нужен).
+# CDN "прилипает" к паре (video_id, наш IP) — переразрезолв ОДНОГО и того же
+# видео с одного и того же сервера стабильно возвращает ОДИН И ТОТ ЖЕ эдж
+# (проверено на NETH-4: 6 проходов подряд — один и тот же rr3---sn-...).
+# ISP блокирует не домен целиком, а конкретные эджи/подсети, поэтому для
+# реального разнообразия эджей меняем сам ролик между проходами, а не
+# просто дёргаем yt-dlp заново на тот же video_id.
+QUIC_TEST_VIDEO_IDS=(dQw4w9WgXcQ 9bZkp7q19f0 kJQP7kiw5Fk jNQXAC9IVRw 60ItHLz5WEA)
+
+pick_video_id() {
+  local idx="$1"
+  echo "${QUIC_TEST_VIDEO_IDS[$(( (idx - 1) % ${#QUIC_TEST_VIDEO_IDS[@]} ))]}"
+}
+
+# Резолвит GV_HOST/GV_PATH заново (новый эдж от yt-dlp, для видео $1) — или,
+# если задан --host, просто фиксирует ручные значения (переразрезолв не нужен).
 resolve_edge() {
+  local video_id="${1:-}"
   if [ -n "$GV_HOST_OVERRIDE" ]; then
     GV_HOST="$GV_HOST_OVERRIDE"
     GV_PATH="${GV_PATH_OVERRIDE:-/}"
     return 0
   fi
   local url
-  url="$(resolve_googlevideo_url)"
+  url="$(resolve_googlevideo_url "$video_id")"
   if [ -z "$url" ]; then
     return 1
   fi
@@ -105,8 +119,8 @@ if [ -n "$GV_HOST_OVERRIDE" ]; then
   resolve_edge
   echo "Эдж задан вручную: $GV_HOST"
 else
-  echo "Резолвлю реальный googlevideo videoplayback URL через yt-dlp..."
-  if ! resolve_edge; then
+  echo "Резолвлю реальный googlevideo videoplayback URL через yt-dlp (видео $(pick_video_id 1))..."
+  if ! resolve_edge "$(pick_video_id 1)"; then
     echo "Не удалось получить URL через yt-dlp." >&2
     exit 1
   fi
@@ -142,8 +156,8 @@ if [ "$FUNNEL" = "1" ]; then
       break
     fi
     if [ "$pass" -gt 1 ] && [ -z "$GV_HOST_OVERRIDE" ]; then
-      if resolve_edge; then
-        echo "  (эдж на этот проход: $GV_HOST)"
+      if resolve_edge "$(pick_video_id "$pass")"; then
+        echo "  (эдж на этот проход, видео $(pick_video_id "$pass"): $GV_HOST)"
       else
         echo "  не удалось переразрезолвить эдж, использую предыдущий: $GV_HOST" >&2
       fi
@@ -181,8 +195,8 @@ else
 
   for ((pass=1; pass<=PASSES; pass++)); do
     if [ "$pass" -gt 1 ] && [ -z "$GV_HOST_OVERRIDE" ]; then
-      if resolve_edge; then
-        echo "  (эдж на этот проход: $GV_HOST)"
+      if resolve_edge "$(pick_video_id "$pass")"; then
+        echo "  (эдж на этот проход, видео $(pick_video_id "$pass"): $GV_HOST)"
       else
         echo "  не удалось переразрезолвить эдж, использую предыдущий: $GV_HOST" >&2
       fi
