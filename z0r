@@ -20,6 +20,9 @@
 #   sudo ./z0r --install-service
 #                                — установить+включить autotune-daemon.service
 #                                  (без меню, для git clone && запусти-и-готово)
+#   sudo ./z0r --install-z2r    — поставить сам z2r (ядро DPI-обхода), если его нет
+#   sudo ./z0r --uninstall      — удалить autotune-daemon.service и/или z2r
+#                                  (с подтверждением на каждый найденный компонент)
 
 set -uo pipefail
 
@@ -32,6 +35,11 @@ SELECTED_PROFILES=""
 CUSTOM_DOMAIN=""
 APPLY_FLAG=""
 
+# Зеркала официального установщика z2r (не наш код — просто то, чем сейчас
+# ставят z2r вручную; второе зеркало для тех, у кого GitHub недоступен).
+Z2R_INSTALL_URL_PRIMARY="https://raw.githubusercontent.com/AloofLibra/z4r/z2r/z2r"
+Z2R_INSTALL_URL_FALLBACK="https://git.px.rkn.quest/z2r/plain/z2r?h=z2r"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) SINGLE_PROFILE="$2"; MODE="single"; shift 2 ;;
@@ -41,6 +49,8 @@ while [ $# -gt 0 ]; do
     --passes) PASSES="$2"; shift 2 ;;
     --apply) APPLY_FLAG="--apply"; shift ;;
     --install-service) MODE="install"; shift ;;
+    --install-z2r) MODE="install-z2r"; shift ;;
+    --uninstall) MODE="uninstall"; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -124,6 +134,8 @@ show_menu() {
   echo "  1,3,4 (через запятую/пробел) — выборочный тест нескольких профилей" >&2
   echo "  d) Тест конкретного домена (найти рабочие стратегии для своего сайта)" >&2
   echo "  i) Установить/включить сервис автотестирования-автоподстройки (autotune-daemon)" >&2
+  echo "  z) Установить/обновить сам z2r (ядро DPI-обхода)" >&2
+  echo "  u) Удалить z2r и/или autotune-daemon.service (с подтверждением)" >&2
   echo "  q) Выход" >&2
   echo "" >&2
   read -re -p "Выбор: " choice
@@ -239,6 +251,97 @@ install_daemon_service() {
   esac
 }
 
+# z2r (ядро DPI-обхода) ставится собственным установщиком автора, не нашим
+# кодом — мы только определяем, стоит ли он, и по запросу скачиваем/запускаем
+# тот же установщик, которым обычно ставят z2r руками.
+z2r_installed() {
+  [ -d /opt/zapret2 ] && [ -x /opt/zapret2/init.d/sysv/zapret2 ]
+}
+
+ensure_curl() {
+  command -v curl >/dev/null 2>&1 && return 0
+  echo "curl не найден, пробую поставить..." >&2
+  apt update || opkg update || apk update && apt install curl || opkg install curl || apk add curl
+  command -v curl >/dev/null 2>&1
+}
+
+install_z2r() {
+  if z2r_installed; then
+    read -re -p "z2r уже установлен (/opt/zapret2 есть). Переустановить/обновить поверх? [y/N]: " ans
+    case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+  fi
+
+  if ! ensure_curl; then
+    echo "curl не найден и не удалось поставить — установи z2r вручную." >&2
+    return 1
+  fi
+
+  echo "Сейчас будет скачан и ЗАПУЩЕН установочный скрипт z2r от его автора"
+  echo "(не наш код, выполняется с root). Убедись, что доверяешь источнику."
+  read -re -p "Продолжить установку z2r? [y/N]: " ans
+  case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+
+  echo "Пробую основное зеркало (GitHub)..."
+  if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" && sh z2r ); then
+    echo "z2r установлен (основное зеркало)."
+    return 0
+  fi
+
+  echo "Основное зеркало недоступно, пробую резервное (git.px.rkn.quest)..."
+  if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && sh /opt/z2r; then
+    echo "z2r установлен (резервное зеркало)."
+    return 0
+  fi
+
+  echo "Не удалось установить z2r ни с одного зеркала." >&2
+  return 1
+}
+
+# Удаляет наш демон-сервис и/или сам z2r — по одному подтверждению на каждый
+# реально найденный компонент, ничего не трогает молча.
+uninstall_stack() {
+  local did_something=0
+
+  if [ -f /etc/systemd/system/autotune-daemon.service ]; then
+    read -re -p "Найден autotune-daemon.service — удалить? [y/N]: " ans
+    case "$ans" in
+      y|Y)
+        systemctl disable --now autotune-daemon 2>/dev/null || true
+        rm -f /etc/systemd/system/autotune-daemon.service
+        systemctl daemon-reload
+        echo "autotune-daemon.service удалён."
+        did_something=1
+        ;;
+      *) echo "Пропускаю autotune-daemon.service." ;;
+    esac
+  else
+    echo "autotune-daemon.service не установлен — нечего удалять."
+  fi
+
+  echo ""
+  if z2r_installed; then
+    echo "ВНИМАНИЕ: удаление z2r сотрёт /opt/zapret2 целиком — это само ядро"
+    echo "DPI-обхода, а заодно кэш z2r_autobench (locked.tsv, бэкапы) в"
+    echo "extra_strats/cache/orchestra. У официального установщика z2r нет"
+    echo "известного нам штатного uninstall — удаляем вручную."
+    read -re -p "Точно удалить z2r? Наберите 'DELETE' для подтверждения: " ans
+    if [ "$ans" = "DELETE" ]; then
+      systemctl disable --now zapret2 2>/dev/null || true
+      rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service
+      systemctl daemon-reload
+      rm -rf /opt/zapret2
+      echo "z2r удалён."
+      did_something=1
+    else
+      echo "Отмена, z2r не тронут (нужно было ввести именно 'DELETE')."
+    fi
+  else
+    echo "z2r (/opt/zapret2) не найден — нечего удалять."
+  fi
+
+  [ "$did_something" = "1" ] || echo "Ничего не удалено."
+}
+
 if [ "$MODE" = "all" ]; then
   run_all
   exit 0
@@ -268,6 +371,22 @@ if [ "$MODE" = "install" ]; then
   exit 0
 fi
 
+if [ "$MODE" = "install-z2r" ]; then
+  install_z2r
+  exit $?
+fi
+
+if [ "$MODE" = "uninstall" ]; then
+  uninstall_stack
+  exit 0
+fi
+
+if [ -z "$MODE" ] && ! z2r_installed; then
+  echo "z2r (ядро DPI-обхода) не найден в /opt/zapret2." >&2
+  echo "Поставь его через пункт 'z' в меню или: sudo ./z0r --install-z2r" >&2
+  echo "" >&2
+fi
+
 # интерактивное меню
 while true; do
   choice="$(show_menu)"
@@ -280,6 +399,8 @@ while true; do
       [ -n "$dom" ] && run_domain_test "$dom"
       ;;
     i|I) install_daemon_service 0 ;;
+    z|Z) install_z2r ;;
+    u|U) uninstall_stack ;;
     *)
       # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
       # должны быть известными номерами профилей, иначе это опечатка
