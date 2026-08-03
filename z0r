@@ -23,6 +23,26 @@
 #   sudo ./z0r --install-z2r    — поставить сам z2r (ядро DPI-обхода), если его нет
 #   sudo ./z0r --uninstall      — удалить autotune-daemon.service и/или z2r
 #                                  (с подтверждением на каждый найденный компонент)
+#
+# Ниже используются bash-конструкции (declare -A, ${BASH_SOURCE[0]}), поэтому
+# скрипт требует bash. Но ставят z2r обычно через "sh z2r" (см. установщик
+# автора z2r) — по аналогии кто-нибудь запустит и нас через "sh z0r"/POSIX-sh,
+# где всё это упадёт синтаксической ошибкой ещё до первой содержательной
+# строки. Ловим это ДО любого башизма и перезапускаемся под bash, ставя его
+# при необходимости тем же способом, что и установщик z2r (apt/opkg/apk/...).
+if [ -z "${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  echo "z0r требует bash, а его нет в системе — пробую поставить..." >&2
+  apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+  apt-get install -y bash >/dev/null 2>&1 || opkg install bash >/dev/null 2>&1 || apk add bash >/dev/null 2>&1
+  if command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  echo "Не удалось поставить bash — z0r без него не запустится. Поставь bash вручную и перезапусти." >&2
+  exit 1
+fi
 
 set -uo pipefail
 
