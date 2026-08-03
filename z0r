@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_menu.sh — единая точка входа для тестирования всех профилей z2r.
+# z0r — единая точка входа для тестирования и автонастройки всех профилей z2r.
 #
 # ВАЖНО: подскрипты (rank_strategies.sh/rank_quic.sh) вызываются НАПРЯМУЮ,
 # без $(...)-захвата — иначе весь live-вывод (прогресс-бар, "проход N/M")
@@ -10,12 +10,16 @@
 # и "что вернуть как результат", не заставляя их конфликтовать.
 #
 # Запуск:
-#   sudo ./test_menu.sh                  — интерактивное меню
-#   sudo ./test_menu.sh --profile 1      — тест одного профиля, без меню
-#   sudo ./test_menu.sh --all            — все тестируемые профили подряд
-#   sudo ./test_menu.sh --all --passes 5 — тот же с другим числом проходов
-#   sudo ./test_menu.sh --domain example.com [--passes 3] [--apply]
-#                                         — тест конкретного домена (см. ниже)
+#   sudo ./z0r                  — интерактивное меню
+#   sudo ./z0r --profile 1      — тест одного профиля, без меню
+#   sudo ./z0r --profiles 1,3,4 — тест выборочного набора профилей
+#   sudo ./z0r --all            — все тестируемые профили подряд
+#   sudo ./z0r --all --passes 5 — тот же с другим числом проходов
+#   sudo ./z0r --domain example.com [--passes 3] [--apply]
+#                                — тест конкретного домена (см. ниже)
+#   sudo ./z0r --install-service
+#                                — установить+включить autotune-daemon.service
+#                                  (без меню, для git clone && запусти-и-готово)
 
 set -uo pipefail
 
@@ -24,16 +28,19 @@ LOG_DIR="/opt/z2r_autobench/logs"
 PASSES="${PASSES:-3}"
 MODE=""
 SINGLE_PROFILE=""
+SELECTED_PROFILES=""
 CUSTOM_DOMAIN=""
 APPLY_FLAG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) SINGLE_PROFILE="$2"; MODE="single"; shift 2 ;;
+    --profiles) SELECTED_PROFILES="$2"; MODE="selected"; shift 2 ;;
     --all) MODE="all"; shift ;;
     --domain) CUSTOM_DOMAIN="$2"; MODE="domain"; shift 2 ;;
     --passes) PASSES="$2"; shift 2 ;;
     --apply) APPLY_FLAG="--apply"; shift ;;
+    --install-service) MODE="install"; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -108,13 +115,15 @@ test_profile() {
 }
 
 show_menu() {
-  echo "=== z2r test_menu ===" >&2
+  echo "=== z0r ===" >&2
   echo "Профили:" >&2
   for pid in 1 2 3 4 5 6 7 8 9; do
     echo "  $pid) ${TITLES[$pid]}" >&2
   done
   echo "  0) Все тестируемые профили (1,2,3,4,5,8,9 полным тестом; 6 — из кэша; 7 — заглушка)" >&2
+  echo "  1,3,4 (через запятую/пробел) — выборочный тест нескольких профилей" >&2
   echo "  d) Тест конкретного домена (найти рабочие стратегии для своего сайта)" >&2
+  echo "  i) Установить/включить сервис автотестирования-автоподстройки (autotune-daemon)" >&2
   echo "  q) Выход" >&2
   echo "" >&2
   read -re -p "Выбор: " choice
@@ -147,6 +156,89 @@ run_domain_test() {
   bash "$SCRIPT_DIR/test_custom_domain.sh" --domain "$domain" --passes "$PASSES" $APPLY_FLAG
 }
 
+# Выборочный прогон набора профилей: "1,3,4" или "1 3 4"
+run_selected() {
+  local raw="$1" ids pid
+  ids="$(echo "$raw" | tr ',' ' ')"
+
+  echo "=== Выборочный прогон профилей: $ids ($PASSES проход(ов) на TLS/QUIC) ==="
+  echo ""
+  for pid in $ids; do
+    if [ -z "${TITLES[$pid]:-}" ]; then
+      echo "Пропускаю неизвестный профиль: $pid" >&2
+      continue
+    fi
+    test_profile "$pid"
+    echo ""
+  done
+
+  echo "=== ИТОГ (выборочно) ==="
+  for pid in $ids; do
+    [ -n "${TITLES[$pid]:-}" ] || continue
+    if [ "$pid" = "7" ]; then
+      echo "$pid ${TITLES[$pid]}: тестер не реализован (сделаем позже)"
+      continue
+    fi
+    local ordered
+    ordered="$(read_last_ordered "$pid")"
+    echo "$pid ${TITLES[$pid]}: ${ordered:-нет данных}"
+  done
+}
+
+# Установить и (по желанию) включить autotune-daemon.service — фоновый демон,
+# который сам тестирует профили по health-check-триггеру и подставляет лучшую
+# стратегию в locked.tsv/profile.lock (см. autotune_daemon.sh). $1=1 —
+# без интерактивного вопроса сразу enable --now (для --install-service).
+install_daemon_service() {
+  local noninteractive="${1:-0}"
+  local unit_src="$SCRIPT_DIR/autotune-daemon.service"
+  local unit_dst="/etc/systemd/system/autotune-daemon.service"
+
+  if [ ! -f "$unit_src" ]; then
+    echo "Не найден $unit_src — что-то не так с чекаутом репозитория." >&2
+    return 1
+  fi
+
+  echo "Устанавливаю $unit_dst <- $unit_src"
+  cp -f "$unit_src" "$unit_dst"
+  systemctl daemon-reload
+
+  echo ""
+  echo "Проверка внешних зависимостей (демон и сам это проверяет в рантайме и"
+  echo "временно пропускает соответствующие профили, если чего-то нет — но"
+  echo "лучше знать заранее):"
+  if command -v yt-dlp >/dev/null 2>&1; then
+    echo "  yt-dlp: OK ($(yt-dlp --version 2>/dev/null))"
+  else
+    echo "  yt-dlp: НЕ НАЙДЕН — профили 2 (GV_TLS) и 5 (YT_QUIC_UDP) будут временно пропущены."
+    echo "          Установи: pip install yt-dlp --break-system-packages"
+  fi
+  if python3 -c "import aioquic" >/dev/null 2>&1; then
+    echo "  aioquic: OK"
+  else
+    echo "  aioquic: НЕ НАЙДЕН — профиль 5 (YT_QUIC_UDP) будет временно пропущен."
+    echo "           Установи: pip install aioquic --break-system-packages"
+  fi
+  echo ""
+
+  if [ "$noninteractive" = "1" ]; then
+    systemctl enable --now autotune-daemon
+    sleep 2
+    systemctl status autotune-daemon --no-pager
+    return 0
+  fi
+
+  read -re -p "Включить и запустить autotune-daemon.service сейчас? [Y/n]: " ans
+  case "$ans" in
+    n|N) echo "Юнит установлен, но не запущен. Запустить вручную: systemctl enable --now autotune-daemon" ;;
+    *)
+      systemctl enable --now autotune-daemon
+      sleep 2
+      systemctl status autotune-daemon --no-pager
+      ;;
+  esac
+}
+
 if [ "$MODE" = "all" ]; then
   run_all
   exit 0
@@ -166,6 +258,16 @@ if [ "$MODE" = "single" ]; then
   exit 0
 fi
 
+if [ "$MODE" = "selected" ]; then
+  run_selected "$SELECTED_PROFILES"
+  exit 0
+fi
+
+if [ "$MODE" = "install" ]; then
+  install_daemon_service 1
+  exit 0
+fi
+
 # интерактивное меню
 while true; do
   choice="$(show_menu)"
@@ -177,7 +279,23 @@ while true; do
       read -re -p "Домен (например example.com, без https://): " dom
       [ -n "$dom" ] && run_domain_test "$dom"
       ;;
-    *) echo "Некорректный выбор." ;;
+    i|I) install_daemon_service 0 ;;
+    *)
+      # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
+      # должны быть известными номерами профилей, иначе это опечатка
+      norm="$(echo "$choice" | tr ',' ' ')"
+      valid=1
+      count=0
+      for tok in $norm; do
+        count=$((count + 1))
+        [ -n "${TITLES[$tok]:-}" ] || valid=0
+      done
+      if [ "$valid" = "1" ] && [ "$count" -ge 2 ]; then
+        run_selected "$choice"
+      else
+        echo "Некорректный выбор."
+      fi
+      ;;
   esac
   echo ""
 done
