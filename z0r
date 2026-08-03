@@ -69,6 +69,15 @@ INSTALL_DIR="/opt/z2r_autobench"
 INSTALLED_Z0R="$INSTALL_DIR/z0r"
 REPO_URL="https://github.com/scp-oss/z2r_autobench.git"
 LOG_DIR="/opt/z2r_autobench/logs"
+LOCKED_TSV="/opt/zapret2/extra_strats/cache/orchestra/locked.tsv"
+LOCKED_MANUAL_TSV="/opt/zapret2/extra_strats/cache/orchestra/locked.manual.tsv"
+PROVIDER_CACHE="$INSTALL_DIR/.provider_cache"
+# z2r_test-voice-bot — отдельный репозиторий (не часть z2r_autobench),
+# клонируем по требованию сюда. У него нет своего systemd-юнита — держим
+# свой (z2r-test-voice-bot.service, лежит рядом с autotune-daemon.service).
+VOICE_BOT_DIR="$INSTALL_DIR/z2r_test-voice-bot"
+VOICE_BOT_REPO_URL="https://github.com/scp-oss/z2r_test-voice-bot.git"
+VOICE_BOT_SERVICE="z2r-test-voice-bot"
 PASSES="${PASSES:-3}"
 MODE=""
 SINGLE_PROFILE=""
@@ -169,30 +178,107 @@ test_profile() {
   esac
 }
 
+# --- провайдер (для шапки меню) ---
+# Автоопределение по внешнему IP через две независимые бесплатные службы
+# (без токена) — если первая недоступна/заблокирована, пробуем вторую.
+# Результат кэшируем в файл: не хотим дёргать сеть при каждой отрисовке меню.
+detect_provider() {
+  local isp=""
+  isp="$(curl -s -m 5 'http://ip-api.com/line/?fields=isp' 2>/dev/null)"
+  if [ -z "$isp" ]; then
+    isp="$(curl -s -m 5 'https://ipinfo.io/org' 2>/dev/null | sed -E 's/^AS[0-9]+ //')"
+  fi
+  if [ -n "$isp" ]; then
+    echo "$isp" > "$PROVIDER_CACHE" 2>/dev/null || true
+    echo "$isp"
+  else
+    echo "не определён"
+  fi
+}
+
+get_provider() {
+  if [ -s "$PROVIDER_CACHE" ]; then
+    cat "$PROVIDER_CACHE"
+  else
+    detect_provider
+  fi
+}
+
+# --- живые статусы компонентов: ON / OFF / NONE ---
+# zapret2.service штатно "мёртв" в systemd даже когда nfqws2 реально
+# работает (форкает демона в обход cgroup, см. историю этой сессии),
+# поэтому проверяем сам процесс, а не юнит.
+get_zapret_status() {
+  z2r_installed || { echo "NONE"; return; }
+  pgrep -x nfqws2 >/dev/null 2>&1 && echo "ON" || echo "OFF"
+}
+
+get_daemon_status() {
+  [ -f /etc/systemd/system/autotune-daemon.service ] || { echo "NONE"; return; }
+  systemctl is-active --quiet autotune-daemon 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+get_voice_bot_status() {
+  [ -d "$VOICE_BOT_DIR" ] || { echo "NONE"; return; }
+  systemctl is-active --quiet "$VOICE_BOT_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+# Текущая залоченная стратегия профиля (для "[#N]" в списке профилей).
+# 8/9 (fallback) хранятся отдельно, в locked.manual.tsv.
+get_locked_strategy() {
+  local pid="$1" file="$LOCKED_TSV" val
+  case "$pid" in 8|9) file="$LOCKED_MANUAL_TSV" ;; esac
+  [ -f "$file" ] || { echo "0"; return; }
+  val="$(awk -v p="$pid" -F'\t' '$1==p {print $3; exit}' "$file" 2>/dev/null)"
+  echo "${val:-0}"
+}
+
 show_menu() {
   echo "=== z0r ===" >&2
-  echo "  0) Все тестируемые профили (1,2,3,4,5,8,9 полным тестом; 6 — из кэша; 7 — заглушка)" >&2
+  echo "[Provider: $(get_provider)]" >&2
+  echo "" >&2
+  echo "=== Тест профилей ===" >&2
+  echo "" >&2
+  echo "111) Тестировать все профили" >&2
+  echo "     (1,2,3,4,5 — полный тест; 6 — из кэша; 7 8 9 — заглушка)" >&2
+  echo "     [#N] = выбранная стратегия, [#0] = auto" >&2
+  echo "     [dev] = заглушка, пока в разработке" >&2
   echo "     (можно перечислить несколько через запятую/пробел, например: 1,3,4)" >&2
-  for pid in 1 2 3 4 5 6 7 8 9; do
-    local note=""
-    case "$pid" in
-      6) note="  [бета]" ;;
-      7|8|9) note="  [в разработке]" ;;
-    esac
-    echo "  $pid) ${TITLES[$pid]}$note" >&2
+  echo "" >&2
+  for pid in 1 2 3 4 5; do
+    printf "  %s) %-18s [#%s]\n" "$pid" "${TITLES[$pid]}" "$(get_locked_strategy "$pid")" >&2
   done
+  printf "  6) %-18s [бета] (требуется Discord_bot)\n" "${TITLES[6]}" >&2
+  printf "  7) %-18s [dev]\n" "${TITLES[7]}" >&2
+  printf "  8) %-18s [dev]\n" "${TITLES[8]}" >&2
+  printf "  9) %-18s [dev]\n" "${TITLES[9]}" >&2
   echo "" >&2
-  echo "  10) Тест конкретного домена (найти рабочие стратегии для своего сайта)" >&2
-  echo "  11) Установить/включить сервис автотестирования-автоподстройки (autotune-daemon)" >&2
-  echo "  12) Установить/обновить сам z2r (ядро DPI-обхода)" >&2
-  echo "  13) Запустить z2r (его собственное меню)" >&2
+  echo "=== Подбор стратегии ===" >&2
   echo "" >&2
-  echo "  14) Удалить z2r" >&2
-  echo "  15) Удалить autotune-daemon.service" >&2
-  echo "  16) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
-  echo "  99) Удалить всё (z2r + autotune-daemon.service + z2r_autobench)" >&2
+  echo " 10) Тест домена (найти рабочую стратегию для конкретного/ых домена/ов)" >&2
   echo "" >&2
-  echo "  q) Выход" >&2
+  echo "=== z2r ===" >&2
+  echo "" >&2
+  echo " 11) Запустить меню z2r" >&2
+  echo "" >&2
+  echo "=== Управление ===" >&2
+  echo "" >&2
+  echo " 12) Zapret сервис [$(get_zapret_status)] (статус и перезапуск)" >&2
+  echo " 13) autotune-daemon [$(get_daemon_status)] (сервис автотестирования и подстройки)" >&2
+  echo " 14) Discord_bot [$(get_voice_bot_status)] (требуется для тестирования VOICE_UDP)" >&2
+  echo " 15) web_panel [dev] (управление через браузер)" >&2
+  echo "" >&2
+  echo "=== Удаление ===" >&2
+  echo "" >&2
+  echo " 16) Удалить z2r" >&2
+  echo " 17) Удалить autotune-daemon" >&2
+  echo " 18) Удалить Discord_bot" >&2
+  echo " 19) Удалить web_panel [dev]" >&2
+  echo " 20) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
+  echo "" >&2
+  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot)" >&2
+  echo "" >&2
+  echo "  0) Выход" >&2
   echo "" >&2
   read -re -p "Выбор: " choice
   echo "$choice"
@@ -364,6 +450,125 @@ launch_z2r() {
   bash "$z2r_sh"
 }
 
+# Пункт 12: если z2r не установлен — предлагает поставить (install_z2r,
+# со своими подтверждениями); если установлен — показывает статус и
+# предлагает перезапустить (не переустановить — это разные вещи).
+manage_zapret() {
+  local st; st="$(get_zapret_status)"
+  echo "zapret2: $st"
+  if [ "$st" = "NONE" ]; then
+    install_z2r
+    return
+  fi
+  read -re -p "Перезапустить zapret2 сейчас? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl restart zapret2 2>/dev/null || /opt/zapret2/init.d/sysv/zapret2 restart
+      sleep 2
+      echo "zapret2 после перезапуска: $(get_zapret_status)"
+      ;;
+    *) echo "Ок, не трогаю." ;;
+  esac
+}
+
+# Пункт 13: если демон не установлен — предлагает поставить+включить; если
+# установлен, но остановлен — предлагает включить; если работает —
+# предлагает остановить (без удаления юнита, см. uninstall_daemon для этого).
+manage_daemon() {
+  local st; st="$(get_daemon_status)"
+  echo "autotune-daemon: $st"
+  case "$st" in
+    NONE)
+      read -re -p "Сервис не установлен. Поставить и включить сейчас? [y/N]: " ans
+      case "$ans" in y|Y) install_daemon_service 0 ;; *) echo "Отмена." ;; esac
+      ;;
+    OFF)
+      read -re -p "Сервис установлен, но не запущен. Включить сейчас? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl enable --now autotune-daemon; sleep 1; systemctl status autotune-daemon --no-pager ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+    ON)
+      read -re -p "Сервис работает. Остановить и отключить? [y/N]: " ans
+      case "$ans" in
+        y|Y)
+          systemctl disable --now autotune-daemon 2>/dev/null || true
+          echo "autotune-daemon остановлен и отключён (юнит остался — включить снова тем же пунктом 13)."
+          ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+  esac
+}
+
+# Пункт 14: Discord-бот для тестирования VOICE_UDP (профиль 6).
+# z2r_test-voice-bot — отдельный репозиторий, без своего systemd-юнита
+# (запускается как "venv/bin/python3 bot.py" через run.sh) — юнит для него
+# держим у себя (z2r-test-voice-bot.service).
+manage_voice_bot() {
+  local st; st="$(get_voice_bot_status)"
+  echo "Discord_bot: $st"
+  case "$st" in
+    NONE)
+      read -re -p "Склонировать и подготовить z2r_test-voice-bot в $VOICE_BOT_DIR? [y/N]: " ans
+      case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+
+      if ! command -v git >/dev/null 2>&1; then
+        echo "git не найден, пробую поставить..." >&2
+        apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+        apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+      fi
+      if ! git clone "$VOICE_BOT_REPO_URL" "$VOICE_BOT_DIR"; then
+        echo "Не удалось склонировать $VOICE_BOT_REPO_URL — GitHub недоступен?" >&2
+        return 1
+      fi
+
+      if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 не найден, пробую поставить..." >&2
+        apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+      fi
+      if ! ( cd "$VOICE_BOT_DIR" && python3 -m venv venv \
+             && venv/bin/pip install -q -r requirements.txt \
+             && venv/bin/pip install -q "discord.py[voice]" ); then
+        echo "Не удалось поставить зависимости бота — доразберись руками в $VOICE_BOT_DIR." >&2
+        return 1
+      fi
+      [ -f "$VOICE_BOT_DIR/.env" ] || cp "$VOICE_BOT_DIR/.env.example" "$VOICE_BOT_DIR/.env"
+
+      echo ""
+      echo "Склонирован и готов к настройке. Перед включением (пункт 14 ещё раз):"
+      echo "  1. Заполни реальными значениями: $VOICE_BOT_DIR/.env"
+      echo "     (DISCORD_TOKEN, GUILD_ID, TEST_VOICE_CHANNEL_ID, OWNER_USER_ID)"
+      echo "  2. Создай $VOICE_BOT_DIR/config/strategies.yaml — в самом репозитории"
+      echo "     сейчас нет даже config/strategies.example.yaml (хотя README его"
+      echo "     упоминает), так что писать придётся с нуля по формату из README."
+      ;;
+    OFF)
+      if [ ! -f "/etc/systemd/system/${VOICE_BOT_SERVICE}.service" ]; then
+        if [ ! -f "$SCRIPT_DIR/${VOICE_BOT_SERVICE}.service" ]; then
+          echo "Не найден $SCRIPT_DIR/${VOICE_BOT_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
+          return 1
+        fi
+        cp -f "$SCRIPT_DIR/${VOICE_BOT_SERVICE}.service" "/etc/systemd/system/${VOICE_BOT_SERVICE}.service"
+        systemctl daemon-reload
+      fi
+      read -re -p "Сервис установлен, но не запущен. Включить сейчас? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl enable --now "$VOICE_BOT_SERVICE"; sleep 2; systemctl status "$VOICE_BOT_SERVICE" --no-pager ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+    ON)
+      read -re -p "Сервис работает. Остановить и отключить? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl disable --now "$VOICE_BOT_SERVICE" 2>/dev/null || true; echo "Остановлен." ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+  esac
+}
+
 uninstall_daemon() {
   if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
     echo "autotune-daemon.service не установлен — нечего удалять."
@@ -402,14 +607,37 @@ uninstall_z2r() {
   fi
 }
 
+uninstall_voice_bot() {
+  if [ ! -d "$VOICE_BOT_DIR" ]; then
+    echo "Discord_bot ($VOICE_BOT_DIR) не найден — нечего удалять."
+    return 0
+  fi
+  read -re -p "Найден $VOICE_BOT_DIR — удалить? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl disable --now "$VOICE_BOT_SERVICE" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${VOICE_BOT_SERVICE}.service"
+      systemctl daemon-reload
+      rm -rf "$VOICE_BOT_DIR"
+      echo "Discord_bot удалён."
+      ;;
+    *) echo "Отмена, Discord_bot не тронут." ;;
+  esac
+}
+
+web_panel_stub() {
+  echo "web_panel: в разработке, пока нечего запускать/удалять." >&2
+}
+
 # Удаляет весь z2r_autobench (сам себя) — файл, из которого мы прямо сейчас
 # исполняемся, тоже пропадёт, поэтому сразу выходим после rm -rf, ничего
-# больше из скрипта не трогаем. z2r и autotune-daemon.service НЕ трогает —
-# для них отдельные пункты (14/15), чтобы не сносить что-то по ошибке заодно.
+# больше из скрипта не трогаем. z2r, autotune-daemon.service и Discord_bot
+# НЕ трогает — для них отдельные пункты (16/17/18), чтобы не сносить
+# что-то по ошибке заодно.
 uninstall_autobench_self() {
   echo "ВНИМАНИЕ: удалит весь $INSTALL_DIR — сам этот инструмент и все его файлы"
-  echo "(включая логи тестов). z2r и autotune-daemon.service не тронет — это"
-  echo "отдельные пункты (14/15), если тоже нужно."
+  echo "(включая логи тестов и Discord_bot внутри него, если он тут склонирован)."
+  echo "z2r и autotune-daemon.service не тронет — это отдельные пункты (16/17)."
   read -re -p "Точно удалить z2r_autobench? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
     echo "Удаляю $INSTALL_DIR..."
@@ -429,13 +657,16 @@ uninstall_stack() {
   uninstall_z2r
 }
 
-# Пункт меню 99 — пройтись по всем трём компонентам подряд (демон, z2r,
-# сам автобенч), каждый со своим подтверждением. uninstall_autobench_self
-# сам завершает процесс (exit), поэтому его вызываем последним.
+# Пункт меню 999 — пройтись по всем компонентам подряд (демон, z2r,
+# Discord_bot, сам автобенч), каждый со своим подтверждением.
+# uninstall_autobench_self сам завершает процесс (exit), поэтому его
+# вызываем последним.
 uninstall_everything() {
   uninstall_daemon
   echo ""
   uninstall_z2r
+  echo ""
+  uninstall_voice_bot
   echo ""
   uninstall_autobench_self
 }
@@ -545,20 +776,24 @@ fi
 while true; do
   choice="$(show_menu)"
   case "$choice" in
-    q|Q|"") echo "Выход."; exit 0 ;;
-    0) run_all ;;
+    q|Q|0|"") echo "Выход."; exit 0 ;;
+    111) run_all ;;
     1|2|3|4|5|6|7|8|9) test_profile "$choice" ;;
     10)
       read -re -p "Домен (например example.com, без https://): " dom
       [ -n "$dom" ] && run_domain_test "$dom"
       ;;
-    11) install_daemon_service 0 ;;
-    12) install_z2r ;;
-    13) launch_z2r ;;
-    14) uninstall_z2r ;;
-    15) uninstall_daemon ;;
-    16) uninstall_autobench_self ;;
-    99) uninstall_everything ;;
+    11) launch_z2r ;;
+    12) manage_zapret ;;
+    13) manage_daemon ;;
+    14) manage_voice_bot ;;
+    15) web_panel_stub ;;
+    16) uninstall_z2r ;;
+    17) uninstall_daemon ;;
+    18) uninstall_voice_bot ;;
+    19) web_panel_stub ;;
+    20) uninstall_autobench_self ;;
+    999) uninstall_everything ;;
     *)
       # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
       # должны быть известными номерами профилей, иначе это опечатка

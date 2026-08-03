@@ -1,2 +1,7 @@
 autotune_state/
 logs/
+# z2r_test-voice-bot — отдельный репозиторий, клонируется сюда z0r-ом
+# (manage_voice_bot()), не часть z2r_autobench. Содержит секреты (.env)
+# и venv — точно не должен попасть в этот репозиторий.
+z2r_test-voice-bot/
+.provider_cache

@@ -1,0 +1,18 @@
+[Unit]
+Description=z2r_test-voice-bot (Discord voice-test bot for VOICE_UDP strategies)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/z2r_autobench/z2r_test-voice-bot
+# repo не поставляет свой systemd-юнит, только run.sh ("venv/bin/python3
+# bot.py") — предполагает venv уже собран (см. manage_voice_bot() в z0r).
+ExecStart=/opt/z2r_autobench/z2r_test-voice-bot/run.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
