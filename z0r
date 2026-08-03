@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
-# z0r — единая точка входа для тестирования и автонастройки всех профилей z2r.
+# z0r — единая точка входа для z2r_autobench: тестирование профилей z2r,
+# автонастройка (демон) и bootstrap самого себя — по аналогии с тем, как
+# ставят сам z2r (curl -O .../z2r && sh z2r), можно точно так же:
+#
+#   curl -O https://raw.githubusercontent.com/scp-oss/z2r_autobench/main/z0r && sh z0r
+#
+# При запуске НЕ из установленного /opt/z2r_autobench (то есть при самом
+# первом запуске свежескачанного файла) z0r сам:
+#   - ставит z2r (ядро DPI-обхода), если его ещё нет;
+#   - клонирует полный z2r_autobench в /opt/z2r_autobench (если уже
+#     склонирован — просто обновляет через git pull);
+#   - предлагает поставить фоновый демон автотестирования-автоподстройки
+#     (autotune-daemon), если он ещё не установлен — отказался, ничего
+#     страшного: демон физически не появится, значит при следующем запуске
+#     z0r снова предложит поставить, без отдельного "запоминания отказа";
+#   - и наконец перезапускает себя уже из установленной копии.
+# При запуске ИЗ УЖЕ установленной копии (обычный "sudo ./z0r" внутри
+# /opt/z2r_autobench) — просто тихо подтягивает обновления (git pull, если
+# есть доступ к GitHub) и сразу открывает меню/выполняет переданные флаги.
 #
 # ВАЖНО: подскрипты (rank_strategies.sh/rank_quic.sh) вызываются НАПРЯМУЮ,
 # без $(...)-захвата — иначе весь live-вывод (прогресс-бар, "проход N/M")
@@ -47,6 +65,9 @@ fi
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="/opt/z2r_autobench"
+INSTALLED_Z0R="$INSTALL_DIR/z0r"
+REPO_URL="https://github.com/scp-oss/z2r_autobench.git"
 LOG_DIR="/opt/z2r_autobench/logs"
 PASSES="${PASSES:-3}"
 MODE=""
@@ -59,6 +80,10 @@ APPLY_FLAG=""
 # ставят z2r вручную; второе зеркало для тех, у кого GitHub недоступен).
 Z2R_INSTALL_URL_PRIMARY="https://raw.githubusercontent.com/AloofLibra/z4r/z2r/z2r"
 Z2R_INSTALL_URL_FALLBACK="https://git.px.rkn.quest/z2r/plain/z2r?h=z2r"
+
+# запоминаем исходные аргументы ДО разбора (который их shift'ит) — нужны
+# нетронутыми, если ниже придётся перезапускаться из установленной копии
+ORIG_ARGS=("$@")
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -362,6 +387,68 @@ uninstall_stack() {
   [ "$did_something" = "1" ] || echo "Ничего не удалено."
 }
 
+# --- bootstrap: свежескачанный файл (curl -O .../z0r && sh z0r) вне
+# /opt/z2r_autobench разворачивает полный автобенч и перезапускается уже
+# из установленной копии — тот же трюк, что в установщике z2r (сравнение
+# SCRIPT_PATH с BIN_PATH там же). Делаем это ДО диспетчера MODE ниже —
+# иначе флаг на самом первом запуске (например "sh z0r --install-service")
+# попытался бы выполниться раньше, чем появятся соседние файлы репозитория.
+if [ "$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")" != "$INSTALLED_Z0R" ]; then
+  echo "=== Первый запуск (не из $INSTALL_DIR) — разворачиваю z2r_autobench ==="
+  if ! z2r_installed; then
+    install_z2r || echo "z2r так и не установлен — часть тестов работать не будет, пока не поставишь (пункт 'z' в меню)." >&2
+  fi
+
+  if [ -d "$INSTALL_DIR/.git" ] && [ -f "$INSTALLED_Z0R" ]; then
+    ( cd "$INSTALL_DIR" && git pull --ff-only origin main >/dev/null 2>&1 ) \
+      || echo "GitHub недоступен или есть свои незакоммиченные правки — использую то, что уже есть."
+  else
+    if ! command -v git >/dev/null 2>&1; then
+      echo "git не найден, пробую поставить..." >&2
+      apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+      apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      echo "Не удалось поставить git — установи вручную и запусти z0r снова." >&2
+      exit 1
+    fi
+    if ! git clone "$REPO_URL" "$INSTALL_DIR"; then
+      echo "Не удалось склонировать z2r_autobench — GitHub недоступен?" >&2
+      exit 1
+    fi
+  fi
+
+  if [ ! -f "$INSTALLED_Z0R" ]; then
+    echo "$INSTALLED_Z0R не появился после установки — что-то пошло не так." >&2
+    exit 1
+  fi
+  chmod +x "$INSTALLED_Z0R"
+
+  if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
+    echo ""
+    echo "Сервис автотестирования-автоподстройки (autotune-daemon) ещё не установлен."
+    read -re -p "Установить и включить его сейчас? [y/N]: " ans
+    case "$ans" in
+      y|Y) bash "$INSTALLED_Z0R" --install-service ;;
+      *) echo "Пропускаю — предложу снова при следующем запуске." ;;
+    esac
+  fi
+
+  exec bash "$INSTALLED_Z0R" "${ORIG_ARGS[@]}"
+fi
+
+# мы точно /opt/z2r_autobench/z0r — обычный (не bootstrap) запуск: тихо
+# подтягиваем обновления, если есть доступ к GitHub, и продолжаем как обычно
+if [ -d "$INSTALL_DIR/.git" ]; then
+  ( cd "$INSTALL_DIR" && git pull --ff-only origin main >/dev/null 2>&1 ) || true
+fi
+
+if [ -z "$MODE" ] && ! z2r_installed; then
+  echo "z2r (ядро DPI-обхода) не найден в /opt/zapret2." >&2
+  echo "Поставь его через пункт 'z' в меню или: sudo ./z0r --install-z2r" >&2
+  echo "" >&2
+fi
+
 if [ "$MODE" = "all" ]; then
   run_all
   exit 0
@@ -399,12 +486,6 @@ fi
 if [ "$MODE" = "uninstall" ]; then
   uninstall_stack
   exit 0
-fi
-
-if [ -z "$MODE" ] && ! z2r_installed; then
-  echo "z2r (ядро DPI-обхода) не найден в /opt/zapret2." >&2
-  echo "Поставь его через пункт 'z' в меню или: sudo ./z0r --install-z2r" >&2
-  echo "" >&2
 fi
 
 # интерактивное меню
