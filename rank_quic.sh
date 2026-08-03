@@ -7,7 +7,17 @@
 # кандидатов, переживших предыдущий, вместо честного повтора всех стратегий.
 # Старый режим (без --funnel) не тронут.
 #
-# Запуск: sudo ./rank_quic.sh --passes 3 [--attempts N] [--settle SEC] [--range-bytes N] [--timeout SEC] [--funnel]
+# ВАЖНО про эджи: googlevideo раздаёт разные CDN-узлы на разные запросы, и
+# ISP обычно блокирует не домен целиком, а конкретные узлы/подсети. Поэтому
+# по умолчанию эдж переразрезолвливается через yt-dlp на каждый проход —
+# иначе можно случайно попасть на узел, который вообще не блокируется, и
+# получить ложные "100% у всех стратегий" (не отличает рабочие от нерабочих,
+# потому что различать нечего). --host/--path фиксируют конкретный эдж
+# вручную (например, снятый с реального трафика проблемного устройства —
+# TV-приложение YouTube почти всегда требует QUIC без TLS-фолбэка, поэтому
+# ломается там, где браузер на десктопе просто откатится на TLS).
+#
+# Запуск: sudo ./rank_quic.sh --passes 3 [--attempts N] [--settle SEC] [--range-bytes N] [--timeout SEC] [--funnel] [--host HOST [--path PATH]]
 
 set -uo pipefail
 
@@ -21,6 +31,8 @@ QUIC_TIMEOUT="${QUIC_TIMEOUT:-4}"
 PROFILE="5"
 PROTO="udp"
 FUNNEL=0
+GV_HOST_OVERRIDE=""
+GV_PATH_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +42,8 @@ while [ $# -gt 0 ]; do
     --range-bytes) RANGE_BYTES="$2"; shift 2 ;;
     --timeout) QUIC_TIMEOUT="$2"; shift 2 ;;
     --funnel) FUNNEL=1; shift ;;
+    --host) GV_HOST_OVERRIDE="$2"; shift 2 ;;
+    --path) GV_PATH_OVERRIDE="$2"; shift 2 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -62,14 +76,21 @@ RAW_FILE="$LOG_DIR/rank_quic_${RUN_TS}.raw.tsv"
 echo -e "pass\tstrategy\tattempt\tsuccess\tbytes" > "$RAW_FILE"
 autobench_backup_locks "$RUN_TS"
 
-echo "Резолвлю реальный googlevideo videoplayback URL через yt-dlp..."
-GV_URL="$(resolve_googlevideo_url)"
-if [ -z "$GV_URL" ]; then
-  echo "Не удалось получить URL через yt-dlp." >&2
-  exit 1
-fi
-GV_HOST="$(python3 -c "from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)" "$GV_URL")"
-GV_PATH="$(python3 -c "
+# Резолвит GV_HOST/GV_PATH заново (новый эдж от yt-dlp) — или, если задан
+# --host, просто фиксирует ручные значения (тогда переразрезолв не нужен).
+resolve_edge() {
+  if [ -n "$GV_HOST_OVERRIDE" ]; then
+    GV_HOST="$GV_HOST_OVERRIDE"
+    GV_PATH="${GV_PATH_OVERRIDE:-/}"
+    return 0
+  fi
+  local url
+  url="$(resolve_googlevideo_url)"
+  if [ -z "$url" ]; then
+    return 1
+  fi
+  GV_HOST="$(python3 -c "from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)" "$url")"
+  GV_PATH="$(python3 -c "
 from urllib.parse import urlsplit
 import sys
 u = urlsplit(sys.argv[1])
@@ -77,8 +98,20 @@ p = u.path
 if u.query:
     p += '?' + u.query
 print(p)
-" "$GV_URL")"
-echo "Хост: $GV_HOST"
+" "$url")"
+}
+
+if [ -n "$GV_HOST_OVERRIDE" ]; then
+  resolve_edge
+  echo "Эдж задан вручную: $GV_HOST"
+else
+  echo "Резолвлю реальный googlevideo videoplayback URL через yt-dlp..."
+  if ! resolve_edge; then
+    echo "Не удалось получить URL через yt-dlp." >&2
+    exit 1
+  fi
+  echo "Хост: $GV_HOST"
+fi
 
 max_strat="$(config_profile_max_strategy "$PROFILE" "")"
 if [ -z "$max_strat" ] || [ "$max_strat" -le 0 ]; then
@@ -108,7 +141,14 @@ if [ "$FUNNEL" = "1" ]; then
       echo "--- Проход $pass/$PASSES пропущен: не осталось кандидатов ---"
       break
     fi
-    echo "--- Проход $pass/$PASSES (кандидатов: $ncand) ---"
+    if [ "$pass" -gt 1 ] && [ -z "$GV_HOST_OVERRIDE" ]; then
+      if resolve_edge; then
+        echo "  (эдж на этот проход: $GV_HOST)"
+      else
+        echo "  не удалось переразрезолвить эдж, использую предыдущий: $GV_HOST" >&2
+      fi
+    fi
+    echo "--- Проход $pass/$PASSES (кандидатов: $ncand, эдж: $GV_HOST) ---"
     step=0
     next_candidates=""
     for s in $candidates; do
@@ -140,7 +180,14 @@ else
   current_step=0
 
   for ((pass=1; pass<=PASSES; pass++)); do
-    echo "--- Проход $pass/$PASSES ---"
+    if [ "$pass" -gt 1 ] && [ -z "$GV_HOST_OVERRIDE" ]; then
+      if resolve_edge; then
+        echo "  (эдж на этот проход: $GV_HOST)"
+      else
+        echo "  не удалось переразрезолвить эдж, использую предыдущий: $GV_HOST" >&2
+      fi
+    fi
+    echo "--- Проход $pass/$PASSES (эдж: $GV_HOST) ---"
     for ((s=1; s<=max_strat; s++)); do
       orch_locked_set "$PROFILE" "$PROTO" "$s"
       sleep "$SETTLE_SECONDS"
