@@ -48,6 +48,13 @@ case "$action" in
       exit 1
     fi
     if set_strategy "$profile" "$proto" "$strategy"; then
+      # set_strategy() пишет только locked.tsv (реальное поведение nfqws2).
+      # profile.lock (шапка меню z2r) синхронизируем отдельно, как это уже
+      # делает retune_profile() в autotune_daemon.sh — иначе locked.tsv и
+      # меню расходятся, ровно та путаница, что уже была в этой сессии.
+      if type profile_state_set >/dev/null 2>&1; then
+        profile_state_set "$profile" "$proto" "$strategy" 2>/dev/null || true
+      fi
       echo "OK: profile=$profile proto=$proto strategy=$strategy" >&2
       exit 0
     else
