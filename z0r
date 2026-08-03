@@ -138,6 +138,61 @@ declare -A PROFILE_PROTO=(
   [9]="http"
 )
 
+# Зависимости между профилями: 2 (GV_TLS) и 5 (YT_QUIC_UDP) резолвят тестовый
+# URL через yt-dlp -> youtube.com, а этот запрос идёт через ЖИВУЮ стратегию
+# профиля 1 (YT_TLS). Если у профиля 1 в моменте сломанная стратегия, тесты
+# 2 и 5 валятся со 100%-провалом не из-за собственных стратегий, а из-за
+# резолвинга. Поэтому при прогоне 2 и/или 5 профиль 1 всегда тестируется
+# первым, и его лучшая стратегия применяется СРАЗУ, без вопроса — иначе сам
+# смысл теста 2/5 теряется. 4 и 6 сознательно не рассматриваем (отдельная
+# история, не такая прямая зависимость).
+declare -A PROFILE_DEPENDS_ON=(
+  [2]="1"
+  [5]="1"
+)
+
+# Разворачивает список профилей ($1, через пробел), вставляя перед каждым
+# зависящим профилем его зависимость (один раз, в порядке появления).
+# "2" -> "1 2", "2 5" -> "1 2 5", "1 2 5" -> "1 2 5" (без дублей).
+expand_with_deps() {
+  local raw="$1" pid dep result=" "
+  for pid in $raw; do
+    dep="${PROFILE_DEPENDS_ON[$pid]:-}"
+    if [ -n "$dep" ]; then
+      case "$result" in
+        *" $dep "*) ;;
+        *) result="$result$dep " ;;
+      esac
+    fi
+    case "$result" in
+      *" $pid "*) ;;
+      *) result="$result$pid " ;;
+    esac
+  done
+  echo "$result"
+}
+
+# Из уже развёрнутого списка ($1) находит профили, которые в нём являются
+# чьей-то зависимостью — для них лучшую стратегию нужно применять сразу
+# и без вопроса (см. offer_apply_best/apply_best_auto ниже).
+compute_auto_ids() {
+  local ids="$1" pid dep auto=" "
+  for pid in $ids; do
+    dep="${PROFILE_DEPENDS_ON[$pid]:-}"
+    if [ -n "$dep" ]; then
+      case " $ids " in
+        *" $dep "*)
+          case "$auto" in
+            *" $dep "*) ;;
+            *) auto="$auto$dep " ;;
+          esac
+          ;;
+      esac
+    fi
+  done
+  echo "$auto"
+}
+
 read_last_ordered() {
   # $1 = profile id, печатает содержимое last_ordered_profile_<N>.txt или пусто
   local f="$LOG_DIR/last_ordered_profile_$1.txt"
@@ -346,13 +401,38 @@ offer_apply_best() {
   esac
 }
 
+# Без вопроса применяет лучшую стратегию профиля — используется вместо
+# offer_apply_best для профилей, которые в этом прогоне являются
+# зависимостью для другого протестированного профиля (см. PROFILE_DEPENDS_ON):
+# зависящий тест всё равно провалится, если не подставить рабочую стратегию
+# зависимости прямо сейчас, поэтому спрашивать тут нечего.
+apply_best_auto() {
+  local pid="$1" ordered best proto
+  ordered="$(read_last_ordered "$pid")"
+  best="$(awk '{print $1; exit}' <<< "$ordered")"
+  if [ -z "$best" ]; then
+    echo "Профиль $pid (${TITLES[$pid]}): рабочей стратегии не нашлось — зависящие от него профили ниже могут показать ложный провал."
+    return 0
+  fi
+  echo "Профиль $pid (${TITLES[$pid]}): применяю стратегию $best автоматически, без вопроса — от неё зависит корректность теста следующих профилей."
+  for proto in ${PROFILE_PROTO[$pid]:-tls}; do
+    bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
+  done
+}
+
 run_all() {
+  local all_ids="1 2 3 4 5 6 7 8 9" auto_ids
+  auto_ids="$(compute_auto_ids "$all_ids")"
+
   echo "=== Полный прогон всех тестируемых профилей ($PASSES проход(ов) на TLS/QUIC) ==="
   echo ""
-  for pid in 1 2 3 4 5 6 7 8 9; do
+  for pid in $all_ids; do
     test_profile "$pid"
     echo ""
-    offer_apply_best "$pid"
+    case " $auto_ids " in
+      *" $pid "*) apply_best_auto "$pid" ;;
+      *) offer_apply_best "$pid" ;;
+    esac
     echo ""
   done
   echo "=== ИТОГ ==="
@@ -376,8 +456,16 @@ run_domain_test() {
 
 # Выборочный прогон набора профилей: "1,3,4" или "1 3 4"
 run_selected() {
-  local raw="$1" ids pid
+  local raw="$1" ids auto_ids pid
   ids="$(echo "$raw" | tr ',' ' ')"
+  # Если среди запрошенных есть зависящий профиль (2 и/или 5), а его
+  # зависимость (1) сама не запрошена — добавляем её первой в очередь,
+  # иначе тест зависящего профиля будет проверять не то, что применят.
+  ids="$(expand_with_deps "$ids")"
+  auto_ids="$(compute_auto_ids "$ids")"
+  if [ -n "$(echo "$auto_ids" | tr -d ' ')" ]; then
+    echo "Профил(и) [$auto_ids] — зависимость для другого запрошенного профиля, тестируется первым и применяется без вопроса."
+  fi
 
   echo "=== Выборочный прогон профилей: $ids ($PASSES проход(ов) на TLS/QUIC) ==="
   echo ""
@@ -388,7 +476,10 @@ run_selected() {
     fi
     test_profile "$pid"
     echo ""
-    offer_apply_best "$pid"
+    case " $auto_ids " in
+      *" $pid "*) apply_best_auto "$pid" ;;
+      *) offer_apply_best "$pid" ;;
+    esac
     echo ""
   done
 
