@@ -171,16 +171,27 @@ test_profile() {
 
 show_menu() {
   echo "=== z0r ===" >&2
-  echo "Профили:" >&2
-  for pid in 1 2 3 4 5 6 7 8 9; do
-    echo "  $pid) ${TITLES[$pid]}" >&2
-  done
   echo "  0) Все тестируемые профили (1,2,3,4,5,8,9 полным тестом; 6 — из кэша; 7 — заглушка)" >&2
-  echo "  1,3,4 (через запятую/пробел) — выборочный тест нескольких профилей" >&2
-  echo "  d) Тест конкретного домена (найти рабочие стратегии для своего сайта)" >&2
-  echo "  i) Установить/включить сервис автотестирования-автоподстройки (autotune-daemon)" >&2
-  echo "  z) Установить/обновить сам z2r (ядро DPI-обхода)" >&2
-  echo "  u) Удалить z2r и/или autotune-daemon.service (с подтверждением)" >&2
+  echo "     (можно перечислить несколько через запятую/пробел, например: 1,3,4)" >&2
+  for pid in 1 2 3 4 5 6 7 8 9; do
+    local note=""
+    case "$pid" in
+      6) note="  [бета]" ;;
+      7|8|9) note="  [в разработке]" ;;
+    esac
+    echo "  $pid) ${TITLES[$pid]}$note" >&2
+  done
+  echo "" >&2
+  echo "  10) Тест конкретного домена (найти рабочие стратегии для своего сайта)" >&2
+  echo "  11) Установить/включить сервис автотестирования-автоподстройки (autotune-daemon)" >&2
+  echo "  12) Установить/обновить сам z2r (ядро DPI-обхода)" >&2
+  echo "  13) Запустить z2r (его собственное меню)" >&2
+  echo "" >&2
+  echo "  14) Удалить z2r" >&2
+  echo "  15) Удалить autotune-daemon.service" >&2
+  echo "  16) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
+  echo "  99) Удалить всё (z2r + autotune-daemon.service + z2r_autobench)" >&2
+  echo "" >&2
   echo "  q) Выход" >&2
   echo "" >&2
   read -re -p "Выбор: " choice
@@ -342,49 +353,91 @@ install_z2r() {
   return 1
 }
 
-# Удаляет наш демон-сервис и/или сам z2r — по одному подтверждению на каждый
-# реально найденный компонент, ничего не трогает молча.
-uninstall_stack() {
-  local did_something=0
+# Запускает собственное меню z2r (не наш z0r) — /opt/z2r.sh, куда его кладёт
+# официальный установщик.
+launch_z2r() {
+  local z2r_sh="/opt/z2r.sh"
+  if [ ! -f "$z2r_sh" ]; then
+    echo "$z2r_sh не найден — сначала поставь z2r (пункт 12)." >&2
+    return 1
+  fi
+  bash "$z2r_sh"
+}
 
-  if [ -f /etc/systemd/system/autotune-daemon.service ]; then
-    read -re -p "Найден autotune-daemon.service — удалить? [y/N]: " ans
-    case "$ans" in
-      y|Y)
-        systemctl disable --now autotune-daemon 2>/dev/null || true
-        rm -f /etc/systemd/system/autotune-daemon.service
-        systemctl daemon-reload
-        echo "autotune-daemon.service удалён."
-        did_something=1
-        ;;
-      *) echo "Пропускаю autotune-daemon.service." ;;
-    esac
-  else
+uninstall_daemon() {
+  if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
     echo "autotune-daemon.service не установлен — нечего удалять."
+    return 0
   fi
-
-  echo ""
-  if z2r_installed; then
-    echo "ВНИМАНИЕ: удаление z2r сотрёт /opt/zapret2 целиком — это само ядро"
-    echo "DPI-обхода, а заодно кэш z2r_autobench (locked.tsv, бэкапы) в"
-    echo "extra_strats/cache/orchestra. У официального установщика z2r нет"
-    echo "известного нам штатного uninstall — удаляем вручную."
-    read -re -p "Точно удалить z2r? Наберите 'DELETE' для подтверждения: " ans
-    if [ "$ans" = "DELETE" ]; then
-      systemctl disable --now zapret2 2>/dev/null || true
-      rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service
+  read -re -p "Найден autotune-daemon.service — удалить? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl disable --now autotune-daemon 2>/dev/null || true
+      rm -f /etc/systemd/system/autotune-daemon.service
       systemctl daemon-reload
-      rm -rf /opt/zapret2
-      echo "z2r удалён."
-      did_something=1
-    else
-      echo "Отмена, z2r не тронут (нужно было ввести именно 'DELETE')."
-    fi
-  else
-    echo "z2r (/opt/zapret2) не найден — нечего удалять."
-  fi
+      echo "autotune-daemon.service удалён."
+      ;;
+    *) echo "Отмена, autotune-daemon.service не тронут." ;;
+  esac
+}
 
-  [ "$did_something" = "1" ] || echo "Ничего не удалено."
+uninstall_z2r() {
+  if ! z2r_installed; then
+    echo "z2r (/opt/zapret2) не найден — нечего удалять."
+    return 0
+  fi
+  echo "ВНИМАНИЕ: удаление z2r сотрёт /opt/zapret2 целиком — это само ядро"
+  echo "DPI-обхода, а заодно кэш z2r_autobench (locked.tsv, бэкапы) в"
+  echo "extra_strats/cache/orchestra. У официального установщика z2r нет"
+  echo "известного нам штатного uninstall — удаляем вручную."
+  read -re -p "Точно удалить z2r? Наберите 'DELETE' для подтверждения: " ans
+  if [ "$ans" = "DELETE" ]; then
+    systemctl disable --now zapret2 2>/dev/null || true
+    rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service
+    systemctl daemon-reload
+    rm -rf /opt/zapret2
+    echo "z2r удалён."
+  else
+    echo "Отмена, z2r не тронут (нужно было ввести именно 'DELETE')."
+  fi
+}
+
+# Удаляет весь z2r_autobench (сам себя) — файл, из которого мы прямо сейчас
+# исполняемся, тоже пропадёт, поэтому сразу выходим после rm -rf, ничего
+# больше из скрипта не трогаем. z2r и autotune-daemon.service НЕ трогает —
+# для них отдельные пункты (14/15), чтобы не сносить что-то по ошибке заодно.
+uninstall_autobench_self() {
+  echo "ВНИМАНИЕ: удалит весь $INSTALL_DIR — сам этот инструмент и все его файлы"
+  echo "(включая логи тестов). z2r и autotune-daemon.service не тронет — это"
+  echo "отдельные пункты (14/15), если тоже нужно."
+  read -re -p "Точно удалить z2r_autobench? Наберите 'DELETE' для подтверждения: " ans
+  if [ "$ans" = "DELETE" ]; then
+    echo "Удаляю $INSTALL_DIR..."
+    rm -rf "$INSTALL_DIR"
+    echo "z2r_autobench удалён."
+    exit 0
+  else
+    echo "Отмена, z2r_autobench не тронут (нужно было ввести именно 'DELETE')."
+  fi
+}
+
+# Оставлен для --uninstall (CLI-флаг, без меню) — спрашивает про оба
+# компонента по очереди, как и раньше.
+uninstall_stack() {
+  uninstall_daemon
+  echo ""
+  uninstall_z2r
+}
+
+# Пункт меню 99 — пройтись по всем трём компонентам подряд (демон, z2r,
+# сам автобенч), каждый со своим подтверждением. uninstall_autobench_self
+# сам завершает процесс (exit), поэтому его вызываем последним.
+uninstall_everything() {
+  uninstall_daemon
+  echo ""
+  uninstall_z2r
+  echo ""
+  uninstall_autobench_self
 }
 
 # --- bootstrap: свежескачанный файл (curl -O .../z0r && sh z0r) вне
@@ -396,7 +449,7 @@ uninstall_stack() {
 if [ "$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")" != "$INSTALLED_Z0R" ]; then
   echo "=== Первый запуск (не из $INSTALL_DIR) — разворачиваю z2r_autobench ==="
   if ! z2r_installed; then
-    install_z2r || echo "z2r так и не установлен — часть тестов работать не будет, пока не поставишь (пункт 'z' в меню)." >&2
+    install_z2r || echo "z2r так и не установлен — часть тестов работать не будет, пока не поставишь (пункт 12 в меню)." >&2
   fi
 
   if [ -d "$INSTALL_DIR/.git" ] && [ -f "$INSTALLED_Z0R" ]; then
@@ -445,7 +498,7 @@ fi
 
 if [ -z "$MODE" ] && ! z2r_installed; then
   echo "z2r (ядро DPI-обхода) не найден в /opt/zapret2." >&2
-  echo "Поставь его через пункт 'z' в меню или: sudo ./z0r --install-z2r" >&2
+  echo "Поставь его через пункт 12 в меню или: sudo ./z0r --install-z2r" >&2
   echo "" >&2
 fi
 
@@ -495,13 +548,17 @@ while true; do
     q|Q|"") echo "Выход."; exit 0 ;;
     0) run_all ;;
     1|2|3|4|5|6|7|8|9) test_profile "$choice" ;;
-    d|D)
+    10)
       read -re -p "Домен (например example.com, без https://): " dom
       [ -n "$dom" ] && run_domain_test "$dom"
       ;;
-    i|I) install_daemon_service 0 ;;
-    z|Z) install_z2r ;;
-    u|U) uninstall_stack ;;
+    11) install_daemon_service 0 ;;
+    12) install_z2r ;;
+    13) launch_z2r ;;
+    14) uninstall_z2r ;;
+    15) uninstall_daemon ;;
+    16) uninstall_autobench_self ;;
+    99) uninstall_everything ;;
     *)
       # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
       # должны быть известными номерами профилей, иначе это опечатка
