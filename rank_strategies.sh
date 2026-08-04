@@ -4,7 +4,13 @@
 # полных проходов по всем стратегиям и усредняет, чтобы отличить реально
 # стабильно хорошие/плохие стратегии от разового сетевого шума.
 #
-# Запуск: sudo ./rank_strategies.sh --profile 1 --passes 3 [--attempts N] [--settle SEC]
+# --funnel: тот же смысл (несколько проходов, усреднение), но дешевле —
+# каждый следующий проход гоняет только тех кандидатов, кто пережил
+# предыдущий (хоть раз сработал), а не все стратегии заново. Старый режим
+# (без --funnel) остаётся как есть — им пользуются, если нужно честно
+# перепроверить вообще все стратегии на каждом проходе.
+#
+# Запуск: sudo ./rank_strategies.sh --profile 1 --passes 3 [--attempts N] [--settle SEC] [--funnel]
 
 set -uo pipefail
 
@@ -14,6 +20,8 @@ PASSES=3
 SETTLE_SECONDS="${SETTLE_SECONDS:-3}"
 ATTEMPTS_PER_STRATEGY="${ATTEMPTS_PER_STRATEGY:-2}"
 PROFILE="1"
+FUNNEL=0
+INCLUDE_CLONE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -21,9 +29,37 @@ while [ $# -gt 0 ]; do
     --passes) PASSES="$2"; shift 2 ;;
     --attempts) ATTEMPTS_PER_STRATEGY="$2"; shift 2 ;;
     --settle) SETTLE_SECONDS="$2"; shift 2 ;;
+    --funnel) FUNNEL=1; shift ;;
+    --include-clone-strategies) INCLUDE_CLONE=1; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
+
+# Стратегии 31,32,33,34,35,36,38,39,41,42 в общем TCP-шаблоне
+# z2r_tcp_tls_common (используется профилями 1/2/3/8) используют
+# --lua-desync=tls_client_hello_clone:blob=clone_deepseek|clone_hcaptcha:...
+# — этот blob не статический файл, а захватывается ДИНАМИЧЕСКИ из живого
+# TLS-хендшейка к chat.deepseek.com/hcaptcha.com. Если на этой машине
+# никто и никогда не заходил на эти домены через nfqws2 — blob навсегда
+# "unavailable", и стратегия молча передаёт пакеты БЕЗ обхода вообще
+# (LUA ERROR в консоли, "passing packet unmodified"). Это не баг подбора —
+# такая стратегия может даже показать "успех" в тесте, если ISP в моменте
+# не блокирует конкретный URL, и попасть в топ рейтинга как рабочая, хотя
+# реально не делает ничего. Проверено вживую на NETH-4 (strategy=36 на
+# профиле 1 сломала работавший доступ на телефоне). Исключаем по
+# умолчанию; --include-clone-strategies возвращает старое поведение
+# (например, если blob уже прогрет вручную и известно, что работает).
+CLONE_DEPENDENT_STRATEGIES="31 32 33 34 35 36 38 39 41 42"
+clone_dependent_profile() {
+  case "$1" in 1|2|3|8) return 0 ;; *) return 1 ;; esac
+}
+is_clone_dependent_strategy() {
+  local s="$1"
+  case " $CLONE_DEPENDENT_STRATEGIES " in
+    *" $s "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 if [ "$(id -u)" != "0" ]; then
   echo "Нужен root." >&2
@@ -71,42 +107,109 @@ for p in $PROTO; do
   PREV_STRATEGY["$p"]="$(get_strategy "$PROFILE" "$p")"
 done
 
+SKIP_CLONE=0
+if [ "$INCLUDE_CLONE" != "1" ] && clone_dependent_profile "$PROFILE"; then
+  SKIP_CLONE=1
+  echo "Профиль $PROFILE: пропускаю стратегии, зависящие от непрогретого clone-блоба ($CLONE_DEPENDENT_STRATEGIES) — --include-clone-strategies, чтобы всё же включить их."
+fi
+
 echo "=== rank_strategies.sh: старт $(date) ==="
-echo "Профиль=$PROFILE ($TITLE), стратегии=1..$max_strat, проходов=$PASSES, попыток на стратегию=$ATTEMPTS_PER_STRATEGY"
-echo "Итого запросов: $((max_strat * PASSES * ATTEMPTS_PER_STRATEGY))"
+if [ "$FUNNEL" = "1" ]; then
+  echo "Профиль=$PROFILE ($TITLE), стратегии=1..$max_strat, режим=funnel (до $PASSES проходов, отсеивание нерабочих), попыток на стратегию=$ATTEMPTS_PER_STRATEGY"
+  echo "Максимум запросов (если ничего не отсеется): $((max_strat * PASSES * ATTEMPTS_PER_STRATEGY)) — реально будет меньше"
+else
+  echo "Профиль=$PROFILE ($TITLE), стратегии=1..$max_strat, проходов=$PASSES, попыток на стратегию=$ATTEMPTS_PER_STRATEGY"
+  echo "Итого запросов: $((max_strat * PASSES * ATTEMPTS_PER_STRATEGY))"
+fi
 echo ""
 
-total_steps=$((max_strat * PASSES))
-current_step=0
-
-for ((pass=1; pass<=PASSES; pass++)); do
-  echo "--- Проход $pass/$PASSES ---"
+if [ "$FUNNEL" = "1" ]; then
+  # Воронка: проход 1 гоняет все стратегии, дальше — только тех, кто хоть
+  # раз сработал в предыдущем проходе. Дешевле по числу запросов, чем
+  # честный повтор всех стратегий на каждом проходе, а итоговая агрегация
+  # (см. ниже) сама учитывает, до какого прохода стратегия дожила.
+  candidates=""
   for ((s=1; s<=max_strat; s++)); do
-    for p in $PROTO; do
-      set_strategy "$PROFILE" "$p" "$s"
-    done
-    sleep "$SETTLE_SECONDS"
-
-    for ((attempt=1; attempt<=ATTEMPTS_PER_STRATEGY; attempt++)); do
-      success=0
-      bytes=0
-      if [ "$IS_HTTP" = "1" ]; then
-        if probe_http_url "$URL"; then success=1; fi
-      else
-        if probe_url "$URL"; then
-          success=1
-          b12=${TLS12_BYTES:-0}; b13=${TLS13_BYTES:-0}
-          bytes=$(( b12 > b13 ? b12 : b13 ))
-        fi
-      fi
-      printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "$bytes" >> "$RAW_FILE"
-    done
-    current_step=$((current_step + 1))
-    print_progress "$current_step" "$total_steps" "проход=$pass strategy=$s"
+    if [ "$SKIP_CLONE" = "1" ] && is_clone_dependent_strategy "$s"; then continue; fi
+    candidates="$candidates$s "
   done
-  print_progress_done
-  echo "  проход $pass завершён"
-done
+
+  for ((pass=1; pass<=PASSES; pass++)); do
+    ncand=$(echo "$candidates" | wc -w)
+    if [ "$ncand" -eq 0 ]; then
+      echo "--- Проход $pass/$PASSES пропущен: не осталось кандидатов ---"
+      break
+    fi
+    echo "--- Проход $pass/$PASSES (кандидатов: $ncand) ---"
+    step=0
+    next_candidates=""
+    for s in $candidates; do
+      for p in $PROTO; do
+        set_strategy "$PROFILE" "$p" "$s"
+      done
+      sleep "$SETTLE_SECONDS"
+
+      pass_ok=0
+      for ((attempt=1; attempt<=ATTEMPTS_PER_STRATEGY; attempt++)); do
+        success=0
+        bytes=0
+        if [ "$IS_HTTP" = "1" ]; then
+          if probe_http_url "$URL"; then success=1; fi
+        else
+          if probe_url "$URL"; then
+            success=1
+            b12=${TLS12_BYTES:-0}; b13=${TLS13_BYTES:-0}
+            bytes=$(( b12 > b13 ? b12 : b13 ))
+          fi
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "$bytes" >> "$RAW_FILE"
+        [ "$success" = "1" ] && pass_ok=1
+      done
+      [ "$pass_ok" = "1" ] && next_candidates="$next_candidates$s "
+      step=$((step + 1))
+      print_progress "$step" "$ncand" "проход=$pass strategy=$s"
+    done
+    print_progress_done
+    candidates="$next_candidates"
+    echo "  проход $pass завершён, выжило кандидатов: $(echo "$candidates" | wc -w)"
+  done
+else
+  total_steps=$((max_strat * PASSES))
+  current_step=0
+
+  for ((pass=1; pass<=PASSES; pass++)); do
+    echo "--- Проход $pass/$PASSES ---"
+    for ((s=1; s<=max_strat; s++)); do
+      if [ "$SKIP_CLONE" = "1" ] && is_clone_dependent_strategy "$s"; then
+        current_step=$((current_step + 1))
+        continue
+      fi
+      for p in $PROTO; do
+        set_strategy "$PROFILE" "$p" "$s"
+      done
+      sleep "$SETTLE_SECONDS"
+
+      for ((attempt=1; attempt<=ATTEMPTS_PER_STRATEGY; attempt++)); do
+        success=0
+        bytes=0
+        if [ "$IS_HTTP" = "1" ]; then
+          if probe_http_url "$URL"; then success=1; fi
+        else
+          if probe_url "$URL"; then
+            success=1
+            b12=${TLS12_BYTES:-0}; b13=${TLS13_BYTES:-0}
+            bytes=$(( b12 > b13 ? b12 : b13 ))
+          fi
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "$bytes" >> "$RAW_FILE"
+      done
+      current_step=$((current_step + 1))
+      print_progress "$current_step" "$total_steps" "проход=$pass strategy=$s"
+    done
+    print_progress_done
+    echo "  проход $pass завершён"
+  done
+fi
 
 echo ""
 echo "Возврат к исходной стратегии (скрипт только измеряет, решение — за тобой):"
@@ -128,8 +231,9 @@ awk -F'\t' '
   BEGIN { nstrat = 0 }
   NR==1 { next }
   {
-    strat = $2; succ = $4; bytes = $5
+    pass = $1; strat = $2; succ = $4; bytes = $5
     total[strat]++
+    if (pass+0 > maxpass[strat]+0) maxpass[strat] = pass+0
     if (succ == 1) {
       successes[strat]++
       sumbytes[strat] += bytes
@@ -137,7 +241,7 @@ awk -F'\t' '
     }
   }
   END {
-    printf "%-10s %-12s %-15s %-10s\n", "Стратегия", "Успех", "Ср.байт", "Надёжность"
+    printf "%-10s %-12s %-15s %-10s %-6s\n", "Стратегия", "Успех", "Ср.байт", "Надёжность", "Раунд"
     n = 0
     max_s = 0
     for (s in total) { if (s+0 > max_s) max_s = s+0 }
@@ -146,23 +250,25 @@ awk -F'\t' '
       if ((s in total) && (s in successes) && successes[s] > 0) {
         rate = successes[s] / total[s]
         avgb = sumbytes[s] / cntbytes[s]
-        order[n] = s SUBSEP rate SUBSEP avgb
+        order[n] = s SUBSEP rate SUBSEP avgb SUBSEP maxpass[s]
         n++
       }
     }
-    # сортировка: по надёжности убыв., затем по среднему байту убыв.
+    # сортировка: сначала кто дольше пережил воронку (при --funnel; в
+    # обычном режиме maxpass у всех одинаков и не влияет), затем по
+    # надёжности убыв., затем по среднему байту убыв.
     for (i = 0; i < n; i++) {
       for (j = i+1; j < n; j++) {
         split(order[i], a, SUBSEP); split(order[j], b, SUBSEP)
-        if (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 > a[3]+0)) {
+        if (b[4]+0 > a[4]+0 || (b[4]+0 == a[4]+0 && (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 > a[3]+0)))) {
           tmp = order[i]; order[i] = order[j]; order[j] = tmp
         }
       }
     }
     for (i = 0; i < n; i++) {
       split(order[i], a, SUBSEP)
-      s = a[1]; rate = a[2]; avgb = a[3]
-      printf "%-10s %-12s %-15.0f %-10s\n", s, successes[s]"/"total[s], avgb, sprintf("%.0f%%", rate*100)
+      s = a[1]; rate = a[2]; avgb = a[3]; mp = a[4]
+      printf "%-10s %-12s %-15.0f %-10s %-6s\n", s, successes[s]"/"total[s], avgb, sprintf("%.0f%%", rate*100), mp
     }
     print ""
     print "Провалились во всех попытках всех проходов:"
@@ -193,9 +299,10 @@ awk -F'\t' '
   BEGIN { nstrat = 0 }
   NR==1 { next }
   {
-    strat = $2; succ = $4; bytes = $5
+    pass = $1; strat = $2; succ = $4; bytes = $5
     if (!(strat in total)) { stratlist[nstrat] = strat; nstrat++ }
     total[strat]++
+    if (pass+0 > maxpass[strat]+0) maxpass[strat] = pass+0
     if (succ == 1) { successes[strat]++; sumbytes[strat] += bytes; cntbytes[strat]++ }
   }
   END {
@@ -205,14 +312,14 @@ awk -F'\t' '
       if ((s in successes) && successes[s] > 0) {
         rate = successes[s] / total[s]
         avgb = sumbytes[s] / cntbytes[s]
-        order[n] = s SUBSEP rate SUBSEP avgb
+        order[n] = s SUBSEP rate SUBSEP avgb SUBSEP maxpass[s]
         n++
       }
     }
     for (i = 0; i < n; i++) {
       for (j = i+1; j < n; j++) {
         split(order[i], a, SUBSEP); split(order[j], b, SUBSEP)
-        if (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 > a[3]+0)) {
+        if (b[4]+0 > a[4]+0 || (b[4]+0 == a[4]+0 && (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 > a[3]+0)))) {
           tmp = order[i]; order[i] = order[j]; order[j] = tmp
         }
       }

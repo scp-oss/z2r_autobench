@@ -283,9 +283,9 @@ retune_profile() {
   rm -f "$ordered_file"
 
   if [ "$pid" = "5" ]; then
-    RETUNE_PASSES_ENV="$RETUNE_PASSES" bash "$SCRIPT_DIR/rank_quic.sh" --passes "$RETUNE_PASSES" >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
+    RETUNE_PASSES_ENV="$RETUNE_PASSES" bash "$SCRIPT_DIR/rank_quic.sh" --passes "$RETUNE_PASSES" --funnel >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
   else
-    bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$RETUNE_PASSES" >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
+    bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$RETUNE_PASSES" --funnel >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
   fi
 
   if [ "$rc" -ne 0 ]; then
