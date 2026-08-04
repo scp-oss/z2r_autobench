@@ -600,15 +600,15 @@ install_z2r() {
 # каким это обычно делают вручную — свежий curl+sh с GitHub (заодно
 # подтягивает обновления компонентов z2r перед показом меню, сам z2r.sh
 # на это рассчитан и безобиден для уже актуальных файлов — "Без изменений").
-# Если GitHub недоступен — тот же резервный источник, что и в install_z2r(),
-# но тоже качаем и запускаем из /tmp (не трогаем /opt).
+# Если GitHub недоступен — тот же резервный источник и та же команда,
+# что и в install_z2r() (curl -o /opt/z2r ... && sh /opt/z2r).
 launch_z2r() {
   if ensure_curl; then
     if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" && sh z2r ); then
       return 0
     fi
     echo "GitHub недоступен, пробую резервный источник (git.px.rkn.quest)..." >&2
-    if ( cd /tmp && curl -fo z2r "$Z2R_INSTALL_URL_FALLBACK" && sh z2r ); then
+    if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && sh /opt/z2r; then
       return 0
     fi
     echo "Не удалось получить z2r ни с одного источника." >&2
