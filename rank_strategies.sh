@@ -21,6 +21,7 @@ SETTLE_SECONDS="${SETTLE_SECONDS:-3}"
 ATTEMPTS_PER_STRATEGY="${ATTEMPTS_PER_STRATEGY:-2}"
 PROFILE="1"
 FUNNEL=0
+INCLUDE_CLONE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,9 +30,36 @@ while [ $# -gt 0 ]; do
     --attempts) ATTEMPTS_PER_STRATEGY="$2"; shift 2 ;;
     --settle) SETTLE_SECONDS="$2"; shift 2 ;;
     --funnel) FUNNEL=1; shift ;;
+    --include-clone-strategies) INCLUDE_CLONE=1; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
+
+# Стратегии 31,32,33,34,35,36,38,39,41,42 в общем TCP-шаблоне
+# z2r_tcp_tls_common (используется профилями 1/2/3/8) используют
+# --lua-desync=tls_client_hello_clone:blob=clone_deepseek|clone_hcaptcha:...
+# — этот blob не статический файл, а захватывается ДИНАМИЧЕСКИ из живого
+# TLS-хендшейка к chat.deepseek.com/hcaptcha.com. Если на этой машине
+# никто и никогда не заходил на эти домены через nfqws2 — blob навсегда
+# "unavailable", и стратегия молча передаёт пакеты БЕЗ обхода вообще
+# (LUA ERROR в консоли, "passing packet unmodified"). Это не баг подбора —
+# такая стратегия может даже показать "успех" в тесте, если ISP в моменте
+# не блокирует конкретный URL, и попасть в топ рейтинга как рабочая, хотя
+# реально не делает ничего. Проверено вживую на NETH-4 (strategy=36 на
+# профиле 1 сломала работавший доступ на телефоне). Исключаем по
+# умолчанию; --include-clone-strategies возвращает старое поведение
+# (например, если blob уже прогрет вручную и известно, что работает).
+CLONE_DEPENDENT_STRATEGIES="31 32 33 34 35 36 38 39 41 42"
+clone_dependent_profile() {
+  case "$1" in 1|2|3|8) return 0 ;; *) return 1 ;; esac
+}
+is_clone_dependent_strategy() {
+  local s="$1"
+  case " $CLONE_DEPENDENT_STRATEGIES " in
+    *" $s "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 if [ "$(id -u)" != "0" ]; then
   echo "Нужен root." >&2
@@ -79,6 +107,12 @@ for p in $PROTO; do
   PREV_STRATEGY["$p"]="$(get_strategy "$PROFILE" "$p")"
 done
 
+SKIP_CLONE=0
+if [ "$INCLUDE_CLONE" != "1" ] && clone_dependent_profile "$PROFILE"; then
+  SKIP_CLONE=1
+  echo "Профиль $PROFILE: пропускаю стратегии, зависящие от непрогретого clone-блоба ($CLONE_DEPENDENT_STRATEGIES) — --include-clone-strategies, чтобы всё же включить их."
+fi
+
 echo "=== rank_strategies.sh: старт $(date) ==="
 if [ "$FUNNEL" = "1" ]; then
   echo "Профиль=$PROFILE ($TITLE), стратегии=1..$max_strat, режим=funnel (до $PASSES проходов, отсеивание нерабочих), попыток на стратегию=$ATTEMPTS_PER_STRATEGY"
@@ -95,7 +129,10 @@ if [ "$FUNNEL" = "1" ]; then
   # честный повтор всех стратегий на каждом проходе, а итоговая агрегация
   # (см. ниже) сама учитывает, до какого прохода стратегия дожила.
   candidates=""
-  for ((s=1; s<=max_strat; s++)); do candidates="$candidates$s "; done
+  for ((s=1; s<=max_strat; s++)); do
+    if [ "$SKIP_CLONE" = "1" ] && is_clone_dependent_strategy "$s"; then continue; fi
+    candidates="$candidates$s "
+  done
 
   for ((pass=1; pass<=PASSES; pass++)); do
     ncand=$(echo "$candidates" | wc -w)
@@ -143,6 +180,10 @@ else
   for ((pass=1; pass<=PASSES; pass++)); do
     echo "--- Проход $pass/$PASSES ---"
     for ((s=1; s<=max_strat; s++)); do
+      if [ "$SKIP_CLONE" = "1" ] && is_clone_dependent_strategy "$s"; then
+        current_step=$((current_step + 1))
+        continue
+      fi
       for p in $PROTO; do
         set_strategy "$PROFILE" "$p" "$s"
       done
