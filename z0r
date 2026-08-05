@@ -819,6 +819,10 @@ manage_voice_bot() {
 # Пункт 22: Zenith — автоподборщик-генератор стратегий. Отдельный
 # репозиторий (БД + docker-compose), без systemd — управляется через
 # "docker compose up/down", как и было решено при обсуждении.
+# Пункт 22 — если Zenith ещё не склонирован, сначала предлагает это
+# сделать (как раньше), а дальше — независимо от того, только что
+# склонировали или он уже стоял — открывает его собственное подменю
+# (zenith_menu), а не тупо переключает up/down одним вопросом.
 manage_zenith() {
   local st; st="$(get_zenith_status)"
   echo "Zenith: $st"
@@ -829,42 +833,56 @@ manage_zenith() {
     return 1
   fi
 
-  case "$st" in
-    NONE)
-      read -re -p "Склонировать Zenith в $ZENITH_DIR? [y/N]: " ans
-      case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+  if [ "$st" = "NONE" ]; then
+    read -re -p "Склонировать Zenith в $ZENITH_DIR? [y/N]: " ans
+    case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
 
-      if ! command -v git >/dev/null 2>&1; then
-        echo "git не найден, пробую поставить..." >&2
-        apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
-        apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
-      fi
-      if ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
-        echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
-        return 1
-      fi
-      [ -f "$ZENITH_DIR/.env" ] || cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
+    if ! command -v git >/dev/null 2>&1; then
+      echo "git не найден, пробую поставить..." >&2
+      apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+      apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+    fi
+    if ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
+      echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
+      return 1
+    fi
+    [ -f "$ZENITH_DIR/.env" ] || cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
+    echo "Склонирован. При желании поменяй пароли: $ZENITH_DIR/.env"
+  fi
 
-      echo ""
-      echo "Склонирован. Сейчас в репозитории только каркас (БД, без самой логики"
-      echo "генератора) — см. README в $ZENITH_DIR. При желании поменяй пароли:"
-      echo "  $ZENITH_DIR/.env"
-      ;;
-    OFF)
-      read -re -p "Поднять контейнеры (docker compose up -d)? [y/N]: " ans
-      case "$ans" in
-        y|Y) ( cd "$ZENITH_DIR" && docker compose up -d ) ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
-      ;;
-    ON)
-      read -re -p "Остановить контейнеры (docker compose down)? [y/N]: " ans
-      case "$ans" in
-        y|Y) ( cd "$ZENITH_DIR" && docker compose down ) ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
-      ;;
-  esac
+  zenith_menu
+}
+
+# Собственное подменю Zenith. Сейчас в репозитории только каркас (БД,
+# без самой логики генератора — см. его README), поэтому пункты пока
+# ограничены жизненным циклом контейнеров и прямым доступом к БД руками;
+# по мере переноса логики генератора сюда добавятся реальные "органы
+# управления" (запуск цикла подбора, история кандидатов и т.д.).
+zenith_menu() {
+  while true; do
+    local st; st="$(get_zenith_status)"
+    echo ""
+    echo "=== Zenith $(color_tag "$st") ==="
+    echo "Только каркас (БД без логики генератора) — см. README в $ZENITH_DIR."
+    echo ""
+    echo "  1) Статус контейнеров"
+    echo "  2) Запустить (docker compose up -d)"
+    echo "  3) Остановить (docker compose down)"
+    echo "  4) Логи (Ctrl+C — выйти из просмотра, контейнер не остановится)"
+    echo "  5) MySQL-шелл (посмотреть БД руками, спросит пароль root)"
+    echo "  0) Назад в главное меню"
+    echo ""
+    read -re -p "Zenith > " zchoice
+    case "$zchoice" in
+      1) ( cd "$ZENITH_DIR" && docker compose ps ) ;;
+      2) ( cd "$ZENITH_DIR" && docker compose up -d ) ;;
+      3) ( cd "$ZENITH_DIR" && docker compose down ) ;;
+      4) ( cd "$ZENITH_DIR" && docker compose logs -f ) ;;
+      5) ( cd "$ZENITH_DIR" && docker compose exec mysql mysql -uroot -p z2r_genome ) ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
 }
 
 uninstall_zenith() {
