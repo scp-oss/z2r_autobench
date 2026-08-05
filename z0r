@@ -954,15 +954,18 @@ zenith_toggle() {
 zenith_show_provider_strategies() {
   echo "Текущий провайдер: $(get_provider)"
   echo ""
+  # Общий срез по всем профилям сразу — колонка profile отличает пулы
+  # (см. schema.sql: геном не шарится между профилями). Для одного
+  # конкретного профиля — пункт 3, zenith_query_profile().
   zenith_mysql_query "
-    SELECT g.id, g.family, g.fooling, g.ttl_mode, gs.pulls, gs.successes,
+    SELECT g.profile, g.id, g.family, g.fooling, g.ttl_mode, gs.pulls, gs.successes,
            ROUND(gs.total_reward / NULLIF(gs.pulls,0), 3) AS avg_score,
            en.name AS environment
     FROM genome_scores gs
     JOIN genomes g ON g.id = gs.genome_id
     JOIN environments en ON en.id = gs.environment_id
-    ORDER BY avg_score DESC
-    LIMIT 20;"
+    ORDER BY g.profile, avg_score DESC
+    LIMIT 40;"
   echo ""
   echo "(пусто, если генератор ещё не запускался — см. README Zenith)"
 }
@@ -971,13 +974,14 @@ zenith_query_profile() {
   local profile="$1"
   echo "Профиль: $profile"
   echo ""
+  # genomes.profile — отдельный пул генома на профиль (не шарится между
+  # профилями даже при совпадении rendered_args), поэтому фильтр прямой,
+  # без обхода через experiments/domain_pool.profile_hint.
   zenith_mysql_query "
     SELECT g.id, g.family, g.fooling, g.ttl_mode, gs.pulls, gs.successes,
            ROUND(gs.total_reward / NULLIF(gs.pulls,0), 3) AS avg_score
     FROM genome_scores gs
-    JOIN genomes g ON g.id = gs.genome_id
-    JOIN experiments e ON e.genome_id = g.id
-    JOIN domain_pool d ON d.id = e.domain_id AND d.profile_hint = '$profile'
+    JOIN genomes g ON g.id = gs.genome_id AND g.profile = '$profile'
     GROUP BY g.id
     ORDER BY avg_score DESC
     LIMIT 20;"
