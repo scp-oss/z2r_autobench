@@ -134,6 +134,7 @@ declare -A PROFILE_PROTO=(
   [3]="tls"
   [4]="tls"
   [5]="udp"
+  [6]="udp"
   [8]="tls"
   [9]="http"
 )
@@ -345,6 +346,7 @@ show_menu() {
   echo "=== Подбор стратегии ===" >&2
   echo "" >&2
   echo " 10) Тест домена (найти рабочую стратегию для конкретного/ых домена/ов)" >&2
+  echo " 21) Ручное переключение стратегии (выбрать профиль и номер вручную)" >&2
   echo "" >&2
   echo "=== z2r ===" >&2
   echo "" >&2
@@ -418,6 +420,46 @@ apply_best_auto() {
   for proto in ${PROFILE_PROTO[$pid]:-tls}; do
     bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
   done
+}
+
+# Ручное переключение стратегии профиля на конкретный номер, без прогона
+# rank_strategies.sh/rank_quic.sh — для быстрой точечной проверки (например,
+# сверить номер из чужой статистики или руками попробовать конкретную
+# стратегию). Профиль 7 (GAMES_UDP) исключён — тестер не реализован, у
+# профиля нет согласованного числа стратегий, ставить туда что-то вручную
+# бессмысленно.
+manual_switch_strategy() {
+  echo ""
+  echo "=== Ручное переключение стратегии ==="
+  local pid
+  for pid in 1 2 3 4 5 6 8 9; do
+    printf "  %s) %-18s [#%s]\n" "$pid" "${TITLES[$pid]}" "$(get_locked_strategy "$pid")"
+  done
+  read -re -p "Профиль: " pid
+  case " 1 2 3 4 5 6 8 9 " in
+    *" $pid "*) ;;
+    *) echo "Нет такого профиля (или для него нет ручного переключения)."; return 1 ;;
+  esac
+
+  local cur strat proto ans
+  cur="$(get_locked_strategy "$pid")"
+  echo "Текущая стратегия профиля $pid (${TITLES[$pid]}): $cur"
+  read -re -p "Новый номер стратегии: " strat
+  if ! printf '%s' "$strat" | grep -Eq '^[0-9]+$'; then
+    echo "Стратегия должна быть числом."
+    return 1
+  fi
+
+  read -re -p "Применить strategy=$strat к профилю $pid (${TITLES[$pid]})? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      for proto in ${PROFILE_PROTO[$pid]:-tls}; do
+        bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$strat"
+      done
+      echo "Применено: профиль $pid (${TITLES[$pid]}) -> strategy=$strat (было $cur)."
+      ;;
+    *) echo "Отменено." ;;
+  esac
 }
 
 run_all() {
@@ -959,6 +1001,7 @@ while true; do
       [ -n "$dom" ] && run_domain_test "$dom"
       ;;
     11) launch_z2r ;;
+    21) manual_switch_strategy ;;
     12) manage_zapret ;;
     13) manage_daemon ;;
     14) manage_voice_bot ;;
