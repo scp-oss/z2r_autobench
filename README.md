@@ -47,7 +47,7 @@ curl -O https://raw.githubusercontent.com/scp-oss/z2r_autobench/main/z0r && sh z
  13) autotune-daemon [ON/OFF/NONE]      — фоновый автотюн
  14) Discord_bot [ON/OFF/NONE]          — голосовые тесты VOICE_UDP
  15) web_panel [dev]                    — заглушка, пока не реализовано
- 22) Zenith [ON/OFF/NONE]               — автоподборщик-генератор стратегий (docker compose)
+ 22) Zenith [ON/OFF/NONE]               — автоподборщик-генератор стратегий, открывает своё подменю
 
 === Удаление ===
  16-20) удалить z2r / autotune-daemon / Discord_bot / web_panel / сам автобенч
@@ -160,8 +160,11 @@ curl -O https://raw.githubusercontent.com/scp-oss/z2r_autobench/main/z0r && sh z
   генератор стратегий (мутации/скрещивание параметров, не просто перебор
   готового списка). Тоже отдельный репозиторий, не входит в этот;
   клонируется по требованию через пункт 22 меню в `Zenith/` внутри
-  `/opt/z2r_autobench`, управляется через `docker compose` (без systemd).
-  Найденные рабочие стратегии применяет тем же `set_strategy_cli.sh`, что
+  `/opt/z2r_autobench`, дальше открывает своё подменю (запуск/стоп, обзор
+  найденных стратегий по провайдеру/профилю). БД — либо своя в Docker,
+  либо подключение к уже существующей (выбирается при установке); сам
+  генератор всегда работает на хосте, не в контейнере. Найденные рабочие
+  стратегии применяет тем же `set_strategy_cli.sh`, что
   и Discord-бот — z2r_autobench остаётся единственным путём к живому
   `/opt/zapret2`.
 

@@ -78,8 +78,9 @@ PROVIDER_CACHE="$INSTALL_DIR/.provider_cache"
 VOICE_BOT_DIR="$INSTALL_DIR/z2r_test-voice-bot"
 VOICE_BOT_REPO_URL="https://github.com/scp-oss/z2r_test-voice-bot.git"
 VOICE_BOT_SERVICE="z2r-test-voice-bot"
-# Zenith — автоподборщик-генератор стратегий (отдельный репозиторий, БД +
-# docker-compose, не systemd-сервис — управляется через "docker compose").
+# Zenith — автоподборщик-генератор стратегий (отдельный репозиторий).
+# Docker нужен только для локальной БД (ZENITH_DB_MODE=docker) — если
+# подключена внешняя БД, Docker вообще не используется.
 ZENITH_DIR="$INSTALL_DIR/Zenith"
 ZENITH_REPO_URL="https://github.com/scp-oss/zenith.git"
 PASSES="${PASSES:-3}"
@@ -295,9 +296,45 @@ get_voice_bot_status() {
   systemctl is-active --quiet "$VOICE_BOT_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
 }
 
+# Читает один ключ из $ZENITH_DIR/.env (последнее вхождение, если задан
+# дважды). Пусто, если файла/ключа нет — вызывающий код сам подставляет
+# дефолт через ${var:-...}.
+zenith_env_get() {
+  local key="$1"
+  [ -f "$ZENITH_DIR/.env" ] || return 0
+  grep -E "^${key}=" "$ZENITH_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+# docker | external — во внешнем режиме Zenith вообще не трогает Docker,
+# БД у пользователя своя (см. README Zenith).
+zenith_db_mode() {
+  local mode; mode="$(zenith_env_get ZENITH_DB_MODE)"
+  echo "${mode:-docker}"
+}
+
 get_zenith_status() {
   [ -d "$ZENITH_DIR" ] || { echo "NONE"; return; }
-  ( cd "$ZENITH_DIR" && docker compose ps --status running -q 2>/dev/null | grep -q . ) && echo "ON" || echo "OFF"
+  if [ "$(zenith_db_mode)" = "external" ]; then
+    zenith_mysql_query "SELECT 1;" >/dev/null 2>&1 && echo "ON" || echo "OFF"
+  else
+    ( cd "$ZENITH_DIR" && docker compose ps --status running -q 2>/dev/null | grep -q . ) && echo "ON" || echo "OFF"
+  fi
+}
+
+# Единая точка запроса к БД Zenith — сама решает, через docker exec или
+# напрямую клиентом mysql на хосте, в зависимости от ZENITH_DB_MODE.
+zenith_mysql_query() {
+  local sql="$1" user pass db host port
+  user="$(zenith_env_get MYSQL_USER)"; user="${user:-zenith}"
+  pass="$(zenith_env_get MYSQL_PASSWORD)"
+  db="$(zenith_env_get MYSQL_DATABASE)"; db="${db:-z2r_genome}"
+  if [ "$(zenith_db_mode)" = "external" ]; then
+    host="$(zenith_env_get MYSQL_HOST)"; host="${host:-127.0.0.1}"
+    port="$(zenith_env_get MYSQL_PORT)"; port="${port:-3306}"
+    mysql -h"$host" -P"$port" -u"$user" -p"$pass" "$db" -e "$sql" 2>/dev/null
+  else
+    ( cd "$ZENITH_DIR" && docker compose exec -T mysql mysql -u"$user" -p"$pass" "$db" -e "$sql" 2>/dev/null )
+  fi
 }
 
 # Текущая залоченная стратегия профиля (для "[#N]" в списке профилей).
@@ -367,7 +404,7 @@ show_menu() {
   echo " 13) autotune-daemon $(color_tag "$(get_daemon_status)") (сервис автотестирования и подстройки)" >&2
   echo " 14) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
   echo " 15) web_panel $(color_tag dev) (управление через браузер)" >&2
-  echo " 22) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий, docker compose)" >&2
+  echo " 22) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
   echo "" >&2
@@ -816,22 +853,13 @@ manage_voice_bot() {
   esac
 }
 
-# Пункт 22: Zenith — автоподборщик-генератор стратегий. Отдельный
-# репозиторий (БД + docker-compose), без systemd — управляется через
-# "docker compose up/down", как и было решено при обсуждении.
 # Пункт 22 — если Zenith ещё не склонирован, сначала предлагает это
-# сделать (как раньше), а дальше — независимо от того, только что
-# склонировали или он уже стоял — открывает его собственное подменю
-# (zenith_menu), а не тупо переключает up/down одним вопросом.
+# сделать и спрашивает про БД (своя в Docker или уже существующая), а
+# дальше — независимо от того, только что склонировали или он уже стоял —
+# открывает его собственное подменю (zenith_menu).
 manage_zenith() {
   local st; st="$(get_zenith_status)"
   echo "Zenith: $st"
-
-  if ! ensure_docker; then
-    echo "Без Docker Zenith не запустить (нужен и для установки, и для" >&2
-    echo "up/down на уже склонированном) — прерываю." >&2
-    return 1
-  fi
 
   if [ "$st" = "NONE" ]; then
     read -re -p "Склонировать Zenith в $ZENITH_DIR? [y/N]: " ans
@@ -846,39 +874,140 @@ manage_zenith() {
       echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
       return 1
     fi
-    [ -f "$ZENITH_DIR/.env" ] || cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
-    echo "Склонирован. При желании поменяй пароли: $ZENITH_DIR/.env"
+    cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
+
+    echo ""
+    echo "БД для Zenith:"
+    echo "  1) Поднять новую в Docker, локально (по умолчанию)"
+    echo "  2) Подключиться к уже существующей БД"
+    read -re -p "Выбор [1]: " dbchoice
+    if [ "$dbchoice" = "2" ]; then
+      sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=external/' "$ZENITH_DIR/.env"
+      read -re -p "  MYSQL_HOST: " h
+      read -re -p "  MYSQL_PORT [3306]: " p
+      read -re -p "  MYSQL_DATABASE [z2r_genome]: " d
+      read -re -p "  MYSQL_USER: " u
+      read -rse -p "  MYSQL_PASSWORD: " pw; echo ""
+      [ -n "$h" ] && sed -i "s/^MYSQL_HOST=.*/MYSQL_HOST=$h/" "$ZENITH_DIR/.env"
+      [ -n "$p" ] && sed -i "s/^MYSQL_PORT=.*/MYSQL_PORT=$p/" "$ZENITH_DIR/.env"
+      [ -n "$d" ] && sed -i "s/^MYSQL_DATABASE=.*/MYSQL_DATABASE=$d/" "$ZENITH_DIR/.env"
+      [ -n "$u" ] && sed -i "s/^MYSQL_USER=.*/MYSQL_USER=$u/" "$ZENITH_DIR/.env"
+      [ -n "$pw" ] && sed -i "s/^MYSQL_PASSWORD=.*/MYSQL_PASSWORD=$pw/" "$ZENITH_DIR/.env"
+      if ! command -v mysql >/dev/null 2>&1; then
+        echo "Клиент mysql не найден, пробую поставить (нужен для запросов во внешнем режиме)..." >&2
+        apt-get install -y mysql-client >/dev/null 2>&1 || apt-get install -y default-mysql-client >/dev/null 2>&1 \
+          || opkg install mysql-client-slim >/dev/null 2>&1 || apk add mysql-client >/dev/null 2>&1
+      fi
+      echo "Настроено подключение к внешней БД (без Docker)."
+      echo "Схему (db/schema.sql в $ZENITH_DIR) на неё нужно накатить самостоятельно."
+    else
+      echo "При желании поменяй пароли: $ZENITH_DIR/.env"
+    fi
   fi
 
   zenith_menu
 }
 
-# Собственное подменю Zenith. Сейчас в репозитории только каркас (БД,
-# без самой логики генератора — см. его README), поэтому пункты пока
-# ограничены жизненным циклом контейнеров и прямым доступом к БД руками;
-# по мере переноса логики генератора сюда добавятся реальные "органы
-# управления" (запуск цикла подбора, история кандидатов и т.д.).
+# Собственное подменю Zenith. Сейчас в репозитории только каркас (БД, без
+# самой логики генератора — см. его README) — пункты 2/3 читают то, что
+# УЖЕ накопилось в genome_scores/experiments, и пока честно покажут пусто,
+# пока генератор не перенесён и не начал их наполнять.
 zenith_menu() {
   while true; do
-    local st; st="$(get_zenith_status)"
+    local st mode; st="$(get_zenith_status)"; mode="$(zenith_db_mode)"
     echo ""
-    echo "=== Zenith $(color_tag "$st") ==="
-    echo "Только каркас (БД без логики генератора) — см. README в $ZENITH_DIR."
-    echo ""
-    echo "  1) Статус контейнеров"
-    echo "  2) Запустить (docker compose up -d)"
-    echo "  3) Остановить (docker compose down)"
-    echo "  4) Логи (Ctrl+C — выйти из просмотра, контейнер не остановится)"
-    echo "  5) MySQL-шелл (посмотреть БД руками, спросит пароль root)"
+    echo "=== Zenith $(color_tag "$st") (БД: $mode) ==="
+    echo "  1) Запуск/Стоп"
+    echo "  2) Стратегии для текущего провайдера"
+    echo "  3) Стратегии по профилям"
     echo "  0) Назад в главное меню"
     echo ""
     read -re -p "Zenith > " zchoice
     case "$zchoice" in
-      1) ( cd "$ZENITH_DIR" && docker compose ps ) ;;
-      2) ( cd "$ZENITH_DIR" && docker compose up -d ) ;;
-      3) ( cd "$ZENITH_DIR" && docker compose down ) ;;
-      4) ( cd "$ZENITH_DIR" && docker compose logs -f ) ;;
-      5) ( cd "$ZENITH_DIR" && docker compose exec mysql mysql -uroot -p z2r_genome ) ;;
+      1) zenith_toggle ;;
+      2) zenith_show_provider_strategies ;;
+      3) zenith_profiles_submenu ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
+zenith_toggle() {
+  if [ "$(zenith_db_mode)" = "external" ]; then
+    echo "БД внешняя — Zenith ею не управляет, только проверяю связь:"
+    if zenith_mysql_query "SELECT 1;" >/dev/null 2>&1; then
+      echo "  связь есть."
+    else
+      echo "  связи нет — проверь MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD в $ZENITH_DIR/.env."
+    fi
+    return 0
+  fi
+  if ! ensure_docker; then return 1; fi
+  if [ "$(get_zenith_status)" = "ON" ]; then
+    ( cd "$ZENITH_DIR" && docker compose down )
+  else
+    ( cd "$ZENITH_DIR" && docker compose up -d )
+  fi
+}
+
+zenith_show_provider_strategies() {
+  echo "Текущий провайдер: $(get_provider)"
+  echo ""
+  zenith_mysql_query "
+    SELECT g.id, g.family, g.fooling, g.ttl_mode, gs.pulls, gs.successes,
+           ROUND(gs.total_reward / NULLIF(gs.pulls,0), 3) AS avg_score,
+           en.name AS environment
+    FROM genome_scores gs
+    JOIN genomes g ON g.id = gs.genome_id
+    JOIN environments en ON en.id = gs.environment_id
+    ORDER BY avg_score DESC
+    LIMIT 20;"
+  echo ""
+  echo "(пусто, если генератор ещё не запускался — см. README Zenith)"
+}
+
+zenith_query_profile() {
+  local profile="$1"
+  echo "Профиль: $profile"
+  echo ""
+  zenith_mysql_query "
+    SELECT g.id, g.family, g.fooling, g.ttl_mode, gs.pulls, gs.successes,
+           ROUND(gs.total_reward / NULLIF(gs.pulls,0), 3) AS avg_score
+    FROM genome_scores gs
+    JOIN genomes g ON g.id = gs.genome_id
+    JOIN experiments e ON e.genome_id = g.id
+    JOIN domain_pool d ON d.id = e.domain_id AND d.profile_hint = '$profile'
+    GROUP BY g.id
+    ORDER BY avg_score DESC
+    LIMIT 20;"
+  echo ""
+  echo "(пусто, если генератор ещё не запускался — см. README Zenith)"
+}
+
+zenith_profiles_submenu() {
+  while true; do
+    echo ""
+    echo "=== Стратегии по профилям ==="
+    echo "  1) YT_TLS"
+    echo "  2) GV_TLS"
+    echo "  3) RKN_TLS"
+    echo "  4) DS_TLS"
+    echo "  5) YT_QUIC_UDP $(color_tag бета) — этот провайдер не блокирует QUIC, проверить пока нельзя"
+    echo "  6) VOICE_UDP  $(color_tag dev) добавим позже"
+    echo "  7) GAMES_UDP  $(color_tag dev) добавим позже"
+    echo "  8) FB_TLS     $(color_tag dev) добавим позже"
+    echo "  9) FB_HTTP    $(color_tag dev) добавим позже"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "Профиль > " pchoice
+    case "$pchoice" in
+      1) zenith_query_profile "YT_TLS" ;;
+      2) zenith_query_profile "GV_TLS" ;;
+      3) zenith_query_profile "RKN_TLS" ;;
+      4) zenith_query_profile "DS_TLS" ;;
+      5) echo "YT_QUIC_UDP — бета, доработаем позже (этот провайдер QUIC не блокирует, нечего проверять)." ;;
+      6|7|8|9) echo "Добавим позже." ;;
       0|q|Q|"") return 0 ;;
       *) echo "Неизвестный выбор." ;;
     esac
@@ -890,10 +1019,14 @@ uninstall_zenith() {
     echo "Zenith ($ZENITH_DIR) не найден — нечего удалять."
     return 0
   fi
-  read -re -p "Найден $ZENITH_DIR — остановить контейнеры и удалить (вместе с БД в volume)? [y/N]: " ans
+  if [ "$(zenith_db_mode)" = "external" ]; then
+    read -re -p "Найден $ZENITH_DIR (БД внешняя, её не трогаю) — удалить папку? [y/N]: " ans
+  else
+    read -re -p "Найден $ZENITH_DIR — остановить контейнеры и удалить (вместе с БД в volume)? [y/N]: " ans
+  fi
   case "$ans" in
     y|Y)
-      ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
+      [ "$(zenith_db_mode)" = "external" ] || ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
       rm -rf "$ZENITH_DIR"
       echo "Zenith удалён."
       ;;
