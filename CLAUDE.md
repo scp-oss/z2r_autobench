@@ -9,18 +9,26 @@ project names here — same public-repo constraint as README.md.
 
 - Designated branch: `claude/z2r-autobench-open-issues-hq8gjy`. Never push
   elsewhere without explicit permission.
-- This sandbox cannot `git push` to GitHub — both raw `git push` and the
-  GitHub API (`push_files`/`create_repository`) return 403 (integration
-  lacks write scope). Workflow: commit locally → `git format-patch` →
-  `SendUserFile` → user runs `git am <patch> && git push` on the deployment
-  box → verify with `git fetch`/`git log` afterward.
-- Before generating a patch, if there's any chance earlier patches were
-  already applied, fetch and check the real remote HEAD first —
-  format-patching against a stale local HEAD produces `git am` conflicts
-  that look like real problems but are just base drift. Recovery: fetch,
-  diff old local commit vs new remote tip for content parity (should be
-  empty), `git checkout -B tmp <remote-tip>`, `git cherry-pick
-  <local-commit>`, patch just that.
+- `git push` to GitHub now works directly from this sandbox (confirmed
+  working as of this note) — no more format-patch/SendUserFile/git-am
+  handoff needed. Earlier in this engagement it 403'd (both raw `git push`
+  and the GitHub API `push_files`/`create_repository`); that restriction
+  lifted at some point without an explicit announcement, so if push starts
+  403ing again, fall back to: commit locally → `git format-patch` →
+  `SendUserFile` → user runs `git am <patch> && git push` on the
+  deployment box → verify with `git fetch`/`git log` afterward.
+- No execution access to the deployment box itself (no SSH, no remote-exec
+  tool) — only git. Anything that needs to actually run there (sandbox
+  setup, the orchestrator, systemctl, iptables) has to be handed to the
+  user as exact commands; it can't be run from here even though pushing
+  the code that defines those commands now can be.
+- Before generating a patch (only relevant if push is 403ing again), if
+  there's any chance earlier patches were already applied, fetch and check
+  the real remote HEAD first — format-patching against a stale local HEAD
+  produces `git am` conflicts that look like real problems but are just
+  base drift. Recovery: fetch, diff old local commit vs new remote tip for
+  content parity (should be empty), `git checkout -B tmp <remote-tip>`,
+  `git cherry-pick <local-commit>`, patch just that.
 - Never assume the deployment box's checkout is on the right branch after
   a bootstrap/reinstall — a plain `git clone` with no branch arg lands on
   the repo's default branch. Confirm via `git branch --show-current`
