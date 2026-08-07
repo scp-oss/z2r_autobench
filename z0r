@@ -835,11 +835,11 @@ manage_voice_bot() {
       echo "     Список стратегий бот строит сам динамически (set_strategy_cli.sh"
       echo "     max) — отдельного файла со списком заводить не нужно."
       echo "  2. Нужен уже поставленный Zenith (пункт 22) — бот тестирует через"
-      echo "     его песочницу, юзера zenith-sandbox без него не будет."
+      echo "     его песочницу, юзера zenith-voice-bot без него не будет."
       ;;
     OFF)
-      if ! id zenith-sandbox >/dev/null 2>&1; then
-        echo "Юзера zenith-sandbox нет — сначала поставь/настрой Zenith (пункт 22," >&2
+      if ! id zenith-voice-bot >/dev/null 2>&1; then
+        echo "Юзера zenith-voice-bot нет — сначала поставь/настрой Zenith (пункт 22," >&2
         echo "manage_zenith -> setup_sandbox.sh создаёт этого юзера)." >&2
         return 1
       fi
@@ -852,9 +852,9 @@ manage_voice_bot() {
         systemctl daemon-reload
       fi
       # Узкий sudoers на рестарт песочницы -- юнит бота работает от
-      # zenith-sandbox (см. .service), start_sandbox.sh требует root.
-      local sudoers_file="/etc/sudoers.d/zenith-sandbox-voice-bot"
-      local sudoers_line="zenith-sandbox ALL=(root) NOPASSWD: $ZENITH_DIR/sandbox/start_sandbox.sh"
+      # zenith-voice-bot (см. .service), start_sandbox.sh требует root.
+      local sudoers_file="/etc/sudoers.d/zenith-voice-bot"
+      local sudoers_line="zenith-voice-bot ALL=(root) NOPASSWD: $ZENITH_DIR/sandbox/start_sandbox.sh"
       if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
         echo "$sudoers_line" > "$sudoers_file"
         chmod 440 "$sudoers_file"
