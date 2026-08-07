@@ -1022,7 +1022,7 @@ zenith_profiles_submenu() {
     echo "  3) RKN_TLS"
     echo "  4) DS_TLS"
     echo "  5) YT_QUIC_UDP $(color_tag бета) — этот провайдер не блокирует QUIC, проверить пока нельзя"
-    echo "  6) VOICE_UDP  $(color_tag dev) добавим позже"
+    echo "  6) VOICE_UDP  — реальный Discord voice-тест (orchestrator/voice_tester.py), заменяет ручной Discord-бот (пункт 14)"
     echo "  7) GAMES_UDP  $(color_tag dev) добавим позже"
     echo "  8) FB_TLS     $(color_tag dev) добавим позже"
     echo "  9) FB_HTTP    $(color_tag dev) добавим позже"
@@ -1035,7 +1035,8 @@ zenith_profiles_submenu() {
       3) zenith_query_profile "RKN_TLS" ;;
       4) zenith_query_profile "DS_TLS" ;;
       5) echo "YT_QUIC_UDP — бета, доработаем позже (этот провайдер QUIC не блокирует, нечего проверять)." ;;
-      6|7|8|9) echo "Добавим позже." ;;
+      6) zenith_query_profile "VOICE_UDP" ;;
+      7|8|9) echo "Добавим позже." ;;
       0|q|Q|"") return 0 ;;
       *) echo "Неизвестный выбор." ;;
     esac
