@@ -333,12 +333,15 @@ zenith_mysql_query() {
   user="$(zenith_env_get MYSQL_USER)"; user="${user:-zenith}"
   pass="$(zenith_env_get MYSQL_PASSWORD)"
   db="$(zenith_env_get MYSQL_DATABASE)"; db="${db:-z2r_genome}"
+  # Пароль через MYSQL_PWD, не -p"$pass" — иначе mysql на каждый вызов
+  # плюётся "[Warning] Using a password on the command line interface
+  # can be insecure" в stderr, а мы его больше не глушим (см. выше).
   if [ "$(zenith_db_mode)" = "external" ]; then
     host="$(zenith_env_get MYSQL_HOST)"; host="${host:-127.0.0.1}"
     port="$(zenith_env_get MYSQL_PORT)"; port="${port:-3306}"
-    mysql -h"$host" -P"$port" -u"$user" -p"$pass" "$db" -e "$sql"
+    MYSQL_PWD="$pass" mysql -h"$host" -P"$port" -u"$user" "$db" -e "$sql"
   else
-    ( cd "$ZENITH_DIR" && docker compose exec -T mysql mysql -u"$user" -p"$pass" "$db" -e "$sql" )
+    ( cd "$ZENITH_DIR" && docker compose exec -T -e MYSQL_PWD="$pass" mysql mysql -u"$user" "$db" -e "$sql" )
   fi
 }
 
@@ -962,17 +965,24 @@ zenith_show_provider_strategies() {
   # Общий срез по всем профилям сразу — колонка profile отличает пулы
   # (см. schema.sql: геном не шарится между профилями). Для одного
   # конкретного профиля — пункт 3, zenith_query_profile().
-  zenith_mysql_query "
-    SELECT g.profile, g.id, g.family, g.fooling, g.ttl_mode, gs.pulls, gs.successes,
+  # id обрезан до 12 символов для читаемости — полный есть в БД (это
+  # sha256, не что-то, что нужно вводить руками).
+  local out
+  out="$(zenith_mysql_query "
+    SELECT g.profile, SUBSTRING(g.id,1,12) AS id, g.family, g.fooling, g.ttl_mode,
+           gs.pulls, gs.successes,
            ROUND(gs.total_reward / NULLIF(gs.pulls,0), 3) AS avg_score,
            en.name AS environment
     FROM genome_scores gs
     JOIN genomes g ON g.id = gs.genome_id
     JOIN environments en ON en.id = gs.environment_id
     ORDER BY g.profile, avg_score DESC
-    LIMIT 40;"
-  echo ""
-  echo "(пусто, если генератор ещё не запускался — см. README Zenith)"
+    LIMIT 40;")"
+  if [ -n "$out" ]; then
+    echo "$out"
+  else
+    echo "(пусто — генератор ещё не запускался или ничего не нашёл, см. README Zenith)"
+  fi
 }
 
 zenith_query_profile() {
@@ -986,17 +996,21 @@ zenith_query_profile() {
   # ключуется (genome_id, environment_id), так что при нескольких окружениях
   # (будущие ВМ ростелеком/МТС) на один genome_id могут быть НЕСКОЛЬКО строк;
   # без агрегации это падало с ONLY_FULL_GROUP_BY (проверено вживую).
-  zenith_mysql_query "
-    SELECT g.id, g.family, g.fooling, g.ttl_mode,
+  local out
+  out="$(zenith_mysql_query "
+    SELECT SUBSTRING(g.id,1,12) AS id, g.family, g.fooling, g.ttl_mode,
            SUM(gs.pulls) AS pulls, SUM(gs.successes) AS successes,
            ROUND(SUM(gs.total_reward) / NULLIF(SUM(gs.pulls),0), 3) AS avg_score
     FROM genome_scores gs
     JOIN genomes g ON g.id = gs.genome_id AND g.profile = '$profile'
     GROUP BY g.id, g.family, g.fooling, g.ttl_mode
     ORDER BY avg_score DESC
-    LIMIT 20;"
-  echo ""
-  echo "(пусто, если генератор ещё не запускался — см. README Zenith)"
+    LIMIT 20;")"
+  if [ -n "$out" ]; then
+    echo "$out"
+  else
+    echo "(пусто — генератор ещё не запускался или ничего не нашёл, см. README Zenith)"
+  fi
 }
 
 zenith_profiles_submenu() {
