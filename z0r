@@ -323,6 +323,11 @@ get_zenith_status() {
 
 # Единая точка запроса к БД Zenith — сама решает, через docker exec или
 # напрямую клиентом mysql на хосте, в зависимости от ZENITH_DB_MODE.
+# stderr НЕ глушим (раньше глушили и это один раз уже маскировало
+# реальную ошибку SQL как "пусто, генератор не запускался" — путаница,
+# на разбор которой ушло время вживую) — единственное исключение:
+# get_zenith_status() сам подавляет вывод отдельно, ему нужен только
+# код возврата, а не текст ошибки на каждой отрисовке меню.
 zenith_mysql_query() {
   local sql="$1" user pass db host port
   user="$(zenith_env_get MYSQL_USER)"; user="${user:-zenith}"
@@ -331,9 +336,9 @@ zenith_mysql_query() {
   if [ "$(zenith_db_mode)" = "external" ]; then
     host="$(zenith_env_get MYSQL_HOST)"; host="${host:-127.0.0.1}"
     port="$(zenith_env_get MYSQL_PORT)"; port="${port:-3306}"
-    mysql -h"$host" -P"$port" -u"$user" -p"$pass" "$db" -e "$sql" 2>/dev/null
+    mysql -h"$host" -P"$port" -u"$user" -p"$pass" "$db" -e "$sql"
   else
-    ( cd "$ZENITH_DIR" && docker compose exec -T mysql mysql -u"$user" -p"$pass" "$db" -e "$sql" 2>/dev/null )
+    ( cd "$ZENITH_DIR" && docker compose exec -T mysql mysql -u"$user" -p"$pass" "$db" -e "$sql" )
   fi
 }
 
@@ -977,12 +982,17 @@ zenith_query_profile() {
   # genomes.profile — отдельный пул генома на профиль (не шарится между
   # профилями даже при совпадении rendered_args), поэтому фильтр прямой,
   # без обхода через experiments/domain_pool.profile_hint.
+  # SUM()/ROUND(SUM.../SUM...), не голые gs.pulls/gs.successes — genome_scores
+  # ключуется (genome_id, environment_id), так что при нескольких окружениях
+  # (будущие ВМ ростелеком/МТС) на один genome_id могут быть НЕСКОЛЬКО строк;
+  # без агрегации это падало с ONLY_FULL_GROUP_BY (проверено вживую).
   zenith_mysql_query "
-    SELECT g.id, g.family, g.fooling, g.ttl_mode, gs.pulls, gs.successes,
-           ROUND(gs.total_reward / NULLIF(gs.pulls,0), 3) AS avg_score
+    SELECT g.id, g.family, g.fooling, g.ttl_mode,
+           SUM(gs.pulls) AS pulls, SUM(gs.successes) AS successes,
+           ROUND(SUM(gs.total_reward) / NULLIF(SUM(gs.pulls),0), 3) AS avg_score
     FROM genome_scores gs
     JOIN genomes g ON g.id = gs.genome_id AND g.profile = '$profile'
-    GROUP BY g.id
+    GROUP BY g.id, g.family, g.fooling, g.ttl_mode
     ORDER BY avg_score DESC
     LIMIT 20;"
   echo ""
