@@ -944,6 +944,33 @@ manage_zenith() {
     else
       echo "При желании поменяй пароли: $ZENITH_DIR/.env"
     fi
+
+    # Своя БД у ноды остаётся своей в любом случае (см. выше) -- это
+    # ОТДЕЛЬНЫЙ вопрос: подключаться ли по HTTP к центральной панели
+    # (z0r-panel) для обмена найденными геномами (hub-and-spoke sync, не
+    # общая БД). Токен создаётся в UI панели ПУСТЫМ (/nodes -> "Создать
+    # токен") -- имя/провайдера эта же нода сообщит панели сама при
+    # первом обращении, из значений ниже (см. z0r-panel/README.md).
+    echo ""
+    read -re -p "Подключить эту ноду к центральной панели (z0r-panel) сейчас? [y/N]: " panel_ans
+    case "$panel_ans" in
+      y|Y)
+        read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
+        read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
+        read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
+        read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
+        [ -n "$purl" ] && sed -i "s@^#\?[[:space:]]*PANEL_URL=.*@PANEL_URL=$purl@" "$ZENITH_DIR/.env"
+        [ -n "$ptoken" ] && sed -i "s@^#\?[[:space:]]*PANEL_NODE_TOKEN=.*@PANEL_NODE_TOKEN=$ptoken@" "$ZENITH_DIR/.env"
+        [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
+        [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
+        echo "Подключено. После установки песочницы (см. README Zenith "
+        echo "\"VOICE_UDP\"/\"Как тестируются новые геномы\") можно сразу:"
+        echo "  cd $ZENITH_DIR/orchestrator"
+        echo "  python3 -m venv venv && venv/bin/pip install -r requirements.txt"
+        echo "  sudo venv/bin/python3 bootstrap.py --profile <PROFILE>   # что уже известно работающим"
+        ;;
+      *) echo "Ок, панель не подключаю — можно настроить позже вручную в $ZENITH_DIR/.env (PANEL_URL/PANEL_NODE_TOKEN)." ;;
+    esac
   fi
 
   zenith_menu
