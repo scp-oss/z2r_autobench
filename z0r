@@ -917,14 +917,21 @@ manage_zenith() {
     fi
     cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
 
+    # Три режима БД для ноды -- см. README Zenith "Три режима БД".
     echo ""
-    echo "БД для Zenith:"
-    echo "  1) Поднять новую в Docker, локально (по умолчанию)"
-    echo "  2) Подключиться к уже существующей БД"
-    read -re -p "Выбор [1]: " dbchoice
-    if [ "$dbchoice" = "2" ]; then
+    echo "БД для Zenith на этой ноде:"
+    echo "  1) Локальная, без панели -- изолированная нода, своя БД в Docker"
+    echo "  2) Локальная + синк с центральной панелью по HTTP (по умолчанию для новой ноды на отдельном провайдере)"
+    echo "  3) Только центральная БД напрямую, без своей (нужен доступ по сети, см. README перед выбором)"
+    read -re -p "Выбор [2]: " dbchoice
+    dbchoice="${dbchoice:-2}"
+
+    if [ "$dbchoice" = "3" ]; then
       sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=external/' "$ZENITH_DIR/.env"
-      read -re -p "  MYSQL_HOST: " h
+      echo ""
+      echo "Значения ниже выдаёт db/create_remote_db_user.sh, запущенный НА ЦЕНТРАЛЬНОМ сервере"
+      echo "(создаёт урезанного юзера под конкретный IP этой ноды -- не общий MYSQL_USER/MYSQL_PASSWORD):"
+      read -re -p "  MYSQL_HOST (центральный сервер): " h
       read -re -p "  MYSQL_PORT [3306]: " p
       read -re -p "  MYSQL_DATABASE [z2r_genome]: " d
       read -re -p "  MYSQL_USER: " u
@@ -939,22 +946,21 @@ manage_zenith() {
         apt-get install -y mysql-client >/dev/null 2>&1 || apt-get install -y default-mysql-client >/dev/null 2>&1 \
           || opkg install mysql-client-slim >/dev/null 2>&1 || apk add mysql-client >/dev/null 2>&1
       fi
-      echo "Настроено подключение к внешней БД (без Docker)."
-      echo "Схему (db/schema.sql в $ZENITH_DIR) на неё нужно накатить самостоятельно."
+      read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
+      read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
+      [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
+      [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
+      echo "Настроено прямое подключение к центральной БД -- своей БД тут нет, panel/HTTP-sync не нужен."
     else
       echo "При желании поменяй пароли: $ZENITH_DIR/.env"
-    fi
 
-    # Своя БД у ноды остаётся своей в любом случае (см. выше) -- это
-    # ОТДЕЛЬНЫЙ вопрос: подключаться ли по HTTP к центральной панели
-    # (z0r-panel) для обмена найденными геномами (hub-and-spoke sync, не
-    # общая БД). Токен создаётся в UI панели ПУСТЫМ (/nodes -> "Создать
-    # токен") -- имя/провайдера эта же нода сообщит панели сама при
-    # первом обращении, из значений ниже (см. z0r-panel/README.md).
-    echo ""
-    read -re -p "Подключить эту ноду к центральной панели (z0r-panel) сейчас? [y/N]: " panel_ans
-    case "$panel_ans" in
-      y|Y)
+      if [ "$dbchoice" = "2" ]; then
+        # Локальная БД остаётся своей (см. выше) -- панель подключается
+        # ОТДЕЛЬНО, по HTTP (hub-and-spoke, не общая БД). Токен создаётся
+        # в UI панели ПУСТЫМ (/nodes -> "Создать токен") -- имя/провайдера
+        # эта же нода сообщит панели сама при первом обращении, из
+        # значений ниже (см. z0r-panel/README.md).
+        echo ""
         read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
         read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
         read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
@@ -968,9 +974,8 @@ manage_zenith() {
         echo "  cd $ZENITH_DIR/orchestrator"
         echo "  python3 -m venv venv && venv/bin/pip install -r requirements.txt"
         echo "  sudo venv/bin/python3 bootstrap.py --profile <PROFILE>   # что уже известно работающим"
-        ;;
-      *) echo "Ок, панель не подключаю — можно настроить позже вручную в $ZENITH_DIR/.env (PANEL_URL/PANEL_NODE_TOKEN)." ;;
-    esac
+      fi
+    fi
   fi
 
   zenith_menu
