@@ -894,6 +894,44 @@ manage_voice_bot() {
   esac
 }
 
+# Читает вставленный целиком блок KEY=value (по строке на переменную,
+# пустая строка или Ctrl+D завершает) и применяет распознанные ключи в
+# указанный .env -- create_remote_db_user.sh и панель (/nodes -> "Создать
+# токен") печатают именно такой блок для копипаста одним куском, вместо
+# набора значений по одному полю (по мотивам того, как Remnawave выдаёт
+# готовый docker-compose.yml с уже подставленными значениями, а не просит
+# вписывать host/port/token в интерактивные вопросы по одному -- меньше
+# ручного транскрибирования, меньше опечаток вроде вставленных как есть
+# угловых скобок-плейсхолдеров). Печатает число применённых строк на
+# stdout (остальной вывод -- в stderr) -- 0 значит ничего не вставили,
+# вызывающий код должен откатиться на прежние индивидуальные read -p.
+apply_env_paste_block() {
+  local envfile="$1"; shift
+  local allowed=" $* "
+  local line key val applied=0
+  echo "Вставь блок вида KEY=value (по строке на переменную) -- из вывода" >&2
+  echo "create_remote_db_user.sh или кнопки \"Создать токен\" в панели." >&2
+  echo "Пустая строка или Ctrl+D — закончить, ничего не вставлять — ввести поля по одному:" >&2
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [ -z "$line" ] && break
+    key="${line%%=*}"
+    val="${line#*=}"
+    # trim -- create_remote_db_user.sh/панель печатают флеш-лефт, но
+    # мало ли откуда реально скопируют (отступы, случайные пробелы)
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+    case "$allowed" in
+      *" $key "*)
+        sed -i "s@^#\?[[:space:]]*${key}=.*@${key}=${val}@" "$envfile"
+        applied=$((applied + 1))
+        echo "  принято: $key" >&2
+        ;;
+      *) [ -n "$key" ] && echo "  пропущено (незнакомый ключ): $key" >&2 ;;
+    esac
+  done
+  echo "$applied"
+}
+
 # Пункт 22 — если Zenith ещё не склонирован, сначала предлагает это
 # сделать и спрашивает про БД (своя в Docker или уже существующая), а
 # дальше — независимо от того, только что склонировали или он уже стоял —
@@ -929,27 +967,32 @@ manage_zenith() {
     if [ "$dbchoice" = "3" ]; then
       sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=external/' "$ZENITH_DIR/.env"
       echo ""
-      echo "Значения ниже выдаёт db/create_remote_db_user.sh, запущенный НА ЦЕНТРАЛЬНОМ сервере"
-      echo "(создаёт урезанного юзера под конкретный IP этой ноды -- не общий MYSQL_USER/MYSQL_PASSWORD):"
-      read -re -p "  MYSQL_HOST (центральный сервер): " h
-      read -re -p "  MYSQL_PORT [3306]: " p
-      read -re -p "  MYSQL_DATABASE [z2r_genome]: " d
-      read -re -p "  MYSQL_USER: " u
-      read -rse -p "  MYSQL_PASSWORD: " pw; echo ""
-      [ -n "$h" ] && sed -i "s/^MYSQL_HOST=.*/MYSQL_HOST=$h/" "$ZENITH_DIR/.env"
-      [ -n "$p" ] && sed -i "s/^MYSQL_PORT=.*/MYSQL_PORT=$p/" "$ZENITH_DIR/.env"
-      [ -n "$d" ] && sed -i "s/^MYSQL_DATABASE=.*/MYSQL_DATABASE=$d/" "$ZENITH_DIR/.env"
-      [ -n "$u" ] && sed -i "s/^MYSQL_USER=.*/MYSQL_USER=$u/" "$ZENITH_DIR/.env"
-      [ -n "$pw" ] && sed -i "s/^MYSQL_PASSWORD=.*/MYSQL_PASSWORD=$pw/" "$ZENITH_DIR/.env"
+      echo "Данные выдаёт db/create_remote_db_user.sh, запущенный НА ЦЕНТРАЛЬНОМ сервере"
+      echo "(создаёт урезанного юзера под конкретный IP этой ноды -- не общий MYSQL_USER/MYSQL_PASSWORD)."
+      applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
+        MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD \
+        ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
+      if [ "$applied" = "0" ]; then
+        read -re -p "  MYSQL_HOST (центральный сервер): " h
+        read -re -p "  MYSQL_PORT [3306]: " p
+        read -re -p "  MYSQL_DATABASE [z2r_genome]: " d
+        read -re -p "  MYSQL_USER: " u
+        read -rse -p "  MYSQL_PASSWORD: " pw; echo ""
+        read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
+        read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
+        [ -n "$h" ] && sed -i "s/^MYSQL_HOST=.*/MYSQL_HOST=$h/" "$ZENITH_DIR/.env"
+        [ -n "$p" ] && sed -i "s/^MYSQL_PORT=.*/MYSQL_PORT=$p/" "$ZENITH_DIR/.env"
+        [ -n "$d" ] && sed -i "s/^MYSQL_DATABASE=.*/MYSQL_DATABASE=$d/" "$ZENITH_DIR/.env"
+        [ -n "$u" ] && sed -i "s/^MYSQL_USER=.*/MYSQL_USER=$u/" "$ZENITH_DIR/.env"
+        [ -n "$pw" ] && sed -i "s/^MYSQL_PASSWORD=.*/MYSQL_PASSWORD=$pw/" "$ZENITH_DIR/.env"
+        [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
+        [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
+      fi
       if ! command -v mysql >/dev/null 2>&1; then
         echo "Клиент mysql не найден, пробую поставить (нужен для запросов во внешнем режиме)..." >&2
         apt-get install -y mysql-client >/dev/null 2>&1 || apt-get install -y default-mysql-client >/dev/null 2>&1 \
           || opkg install mysql-client-slim >/dev/null 2>&1 || apk add mysql-client >/dev/null 2>&1
       fi
-      read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
-      read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
-      [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
-      [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
       echo "Настроено прямое подключение к центральной БД -- своей БД тут нет, panel/HTTP-sync не нужен."
     else
       echo "При желании поменяй пароли: $ZENITH_DIR/.env"
@@ -958,17 +1001,20 @@ manage_zenith() {
         # Локальная БД остаётся своей (см. выше) -- панель подключается
         # ОТДЕЛЬНО, по HTTP (hub-and-spoke, не общая БД). Токен создаётся
         # в UI панели ПУСТЫМ (/nodes -> "Создать токен") -- имя/провайдера
-        # эта же нода сообщит панели сама при первом обращении, из
-        # значений ниже (см. z0r-panel/README.md).
+        # эта же нода сообщит панели сама при первом обращении.
         echo ""
-        read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
-        read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
-        read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
-        read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
-        [ -n "$purl" ] && sed -i "s@^#\?[[:space:]]*PANEL_URL=.*@PANEL_URL=$purl@" "$ZENITH_DIR/.env"
-        [ -n "$ptoken" ] && sed -i "s@^#\?[[:space:]]*PANEL_NODE_TOKEN=.*@PANEL_NODE_TOKEN=$ptoken@" "$ZENITH_DIR/.env"
-        [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
-        [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
+        applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
+          PANEL_URL PANEL_NODE_TOKEN ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
+        if [ "$applied" = "0" ]; then
+          read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
+          read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
+          read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
+          read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
+          [ -n "$purl" ] && sed -i "s@^#\?[[:space:]]*PANEL_URL=.*@PANEL_URL=$purl@" "$ZENITH_DIR/.env"
+          [ -n "$ptoken" ] && sed -i "s@^#\?[[:space:]]*PANEL_NODE_TOKEN=.*@PANEL_NODE_TOKEN=$ptoken@" "$ZENITH_DIR/.env"
+          [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
+          [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
+        fi
         echo "Подключено. После установки песочницы (см. README Zenith "
         echo "\"VOICE_UDP\"/\"Как тестируются новые геномы\") можно сразу:"
         echo "  cd $ZENITH_DIR/orchestrator"
