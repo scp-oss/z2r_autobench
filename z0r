@@ -83,6 +83,15 @@ VOICE_BOT_SERVICE="z2r-test-voice-bot"
 # подключена внешняя БД, Docker вообще не используется.
 ZENITH_DIR="$INSTALL_DIR/Zenith"
 ZENITH_REPO_URL="https://github.com/scp-oss/zenith.git"
+# z0r-panel — веб-панель для Zenith (обзор по нодам/провайдерам, история
+# мутаций, sync-хаб), отдельный репозиторий (была вложенной Zenith/panel/,
+# выделена отдельно). Своя .env/venv/systemd-юнит, к MySQL Zenith ходит
+# как обычный клиент — при первой установке подхватываем MYSQL_*/
+# ZENITH_ENVIRONMENT_* из уже настроенного $ZENITH_DIR/.env, если он есть
+# (см. manage_panel), а не просим вводить те же значения второй раз.
+PANEL_DIR="$INSTALL_DIR/z0r-panel"
+PANEL_REPO_URL="https://github.com/scp-oss/z0r-panel.git"
+PANEL_SERVICE="zenith-panel"
 PASSES="${PASSES:-3}"
 MODE=""
 SINGLE_PROFILE=""
@@ -321,6 +330,11 @@ get_zenith_status() {
   fi
 }
 
+get_panel_status() {
+  [ -d "$PANEL_DIR" ] || { echo "NONE"; return; }
+  systemctl is-active --quiet "$PANEL_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
+}
+
 # Единая точка запроса к БД Zenith — сама решает, через docker exec или
 # напрямую клиентом mysql на хосте, в зависимости от ZENITH_DB_MODE.
 # stderr НЕ глушим (раньше глушили и это один раз уже маскировало
@@ -411,7 +425,7 @@ show_menu() {
   echo " 12) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
   echo " 13) autotune-daemon $(color_tag "$(get_daemon_status)") (сервис автотестирования и подстройки)" >&2
   echo " 14) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
-  echo " 15) web_panel $(color_tag dev) (управление через браузер)" >&2
+  echo " 15) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
   echo " 22) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
@@ -419,11 +433,11 @@ show_menu() {
   echo " 16) Удалить z2r" >&2
   echo " 17) Удалить autotune-daemon" >&2
   echo " 18) Удалить Discord_bot" >&2
-  echo " 19) Удалить web_panel $(color_tag dev)" >&2
+  echo " 19) Удалить web_panel" >&2
   echo " 20) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
   echo " 23) Удалить Zenith" >&2
   echo "" >&2
-  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + Zenith)" >&2
+  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + web_panel + Zenith)" >&2
   echo "" >&2
   echo "  0) Выход" >&2
   echo "" >&2
@@ -1138,8 +1152,114 @@ uninstall_voice_bot() {
   esac
 }
 
-web_panel_stub() {
-  echo "web_panel: в разработке, пока нечего запускать/удалять." >&2
+manage_panel() {
+  local st; st="$(get_panel_status)"
+  echo "web_panel: $st"
+  case "$st" in
+    NONE)
+      read -re -p "Склонировать и подготовить z0r-panel в $PANEL_DIR? [y/N]: " ans
+      case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+
+      if ! command -v git >/dev/null 2>&1; then
+        echo "git не найден, пробую поставить..." >&2
+        apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+        apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+      fi
+      if ! git clone "$PANEL_REPO_URL" "$PANEL_DIR"; then
+        echo "Не удалось склонировать $PANEL_REPO_URL — GitHub недоступен?" >&2
+        return 1
+      fi
+
+      if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 не найден, пробую поставить..." >&2
+        apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+      fi
+      if ! ( cd "$PANEL_DIR" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
+        echo "Не удалось поставить зависимости панели — доразберись руками в $PANEL_DIR." >&2
+        return 1
+      fi
+
+      if [ ! -f "$PANEL_DIR/.env" ]; then
+        cp "$PANEL_DIR/.env.example" "$PANEL_DIR/.env"
+        # Панель ходит в ТУ ЖЕ БД, что и Zenith на этом сервере — если он
+        # уже настроен, подхватываем его MYSQL_*/ZENITH_ENVIRONMENT_*
+        # вместо повторного ввода тех же значений руками (zenith_env_get
+        # читает именно $ZENITH_DIR/.env).
+        if [ -f "$ZENITH_DIR/.env" ]; then
+          for var in MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD \
+                     ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER; do
+            val="$(zenith_env_get "$var")"
+            [ -n "$val" ] && sed -i "s#^${var}=.*#${var}=${val}#" "$PANEL_DIR/.env"
+          done
+          echo "Подхватил MYSQL_*/ZENITH_ENVIRONMENT_* из $ZENITH_DIR/.env."
+        fi
+      fi
+
+      if ! id zenith-panel >/dev/null 2>&1; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin zenith-panel
+      fi
+      # Узкий read-only sudoers — только get/max, НИКОГДА set (панель
+      # ничего не применяет в боевой конфиг сама, см. её README "Границы
+      # ответственности панели").
+      local sudoers_file="/etc/sudoers.d/zenith-panel"
+      local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *"
+      if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
+        echo "$sudoers_line" > "$sudoers_file"
+        chmod 440 "$sudoers_file"
+        echo "Добавлен/обновлён $sudoers_file."
+      fi
+
+      echo ""
+      echo "Склонирован и готов к настройке. Перед включением (пункт 15 ещё раз):"
+      echo "  1. Проверь/заполни: $PANEL_DIR/.env — PANEL_ADMIN_PASSWORD_HASH"
+      echo "     ($PANEL_DIR/gen_password_hash.py) и PANEL_SESSION_SECRET"
+      echo "     (python3 -c 'import secrets; print(secrets.token_hex(32))')."
+      echo "  2. Для доступа снаружи через Cloudflare — см. README панели"
+      echo "     \"Публикация через Cloudflare\" (Origin CA сертификат в"
+      echo "     $PANEL_DIR/tls/, альт-порт)."
+      ;;
+    OFF)
+      if [ ! -f "/etc/systemd/system/${PANEL_SERVICE}.service" ]; then
+        if [ ! -f "$PANEL_DIR/${PANEL_SERVICE}.service" ]; then
+          echo "Не найден $PANEL_DIR/${PANEL_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
+          return 1
+        fi
+        cp -f "$PANEL_DIR/${PANEL_SERVICE}.service" "/etc/systemd/system/${PANEL_SERVICE}.service"
+        systemctl daemon-reload
+      fi
+      read -re -p "Сервис установлен, но не запущен. Включить сейчас? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl enable --now "$PANEL_SERVICE"; sleep 2; systemctl status "$PANEL_SERVICE" --no-pager ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+    ON)
+      read -re -p "Сервис работает. Остановить и отключить? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl disable --now "$PANEL_SERVICE" 2>/dev/null || true; echo "Остановлен." ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+  esac
+}
+
+uninstall_panel() {
+  if [ ! -d "$PANEL_DIR" ]; then
+    echo "web_panel ($PANEL_DIR) не найден — нечего удалять."
+    return 0
+  fi
+  read -re -p "Найден $PANEL_DIR — остановить сервис и удалить? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl disable --now "$PANEL_SERVICE" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${PANEL_SERVICE}.service"
+      rm -f /etc/sudoers.d/zenith-panel
+      systemctl daemon-reload
+      rm -rf "$PANEL_DIR"
+      echo "web_panel удалён. Юзер zenith-panel не тронут (могут быть его файлы вне $PANEL_DIR) — удали вручную при необходимости: userdel zenith-panel"
+      ;;
+    *) echo "Отмена, web_panel не тронут." ;;
+  esac
 }
 
 # Удаляет весь z2r_autobench (сам себя) — файл, из которого мы прямо сейчас
@@ -1180,6 +1300,8 @@ uninstall_everything() {
   uninstall_z2r
   echo ""
   uninstall_voice_bot
+  echo ""
+  uninstall_panel
   echo ""
   uninstall_zenith
   echo ""
@@ -1303,11 +1425,11 @@ while true; do
     12) manage_zapret ;;
     13) manage_daemon ;;
     14) manage_voice_bot ;;
-    15) web_panel_stub ;;
+    15) manage_panel ;;
     16) uninstall_z2r ;;
     17) uninstall_daemon ;;
     18) uninstall_voice_bot ;;
-    19) web_panel_stub ;;
+    19) uninstall_panel ;;
     20) uninstall_autobench_self ;;
     22) manage_zenith ;;
     23) uninstall_zenith ;;
