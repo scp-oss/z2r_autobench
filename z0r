@@ -894,6 +894,62 @@ manage_voice_bot() {
   esac
 }
 
+# Одна строка-конфиг вместо блока -- base64(JSON), как VLESS/Outline/
+# WireGuard-ключи: адрес+порт+токен зашиты внутрь одной непрозрачной
+# строки, копипастится единственным куском, меньше риска частичной
+# вставки/битых пробелов, чем даже у блока KEY=value ниже (по прямому
+# запросу, спасибо за наводку). Формат {"m":"panel"|"db", ...поля...},
+# см. z0r-panel/main.py (panel) и Zenith/db/create_remote_db_user.sh (db)
+# -- обе стороны, что печатают строку. "0" на stdout -- не удалось
+# распознать (не наш base64/JSON, либо чужой режим) -- вызывающий код
+# откатывается на apply_env_paste_block, затем на read -p по одному полю.
+decode_connect_string() {
+  local envfile="$1" str="$2"
+  local out
+  out="$(python3 - "$str" <<'PYEOF' 2>/dev/null
+import base64, json, sys
+
+s = sys.argv[1].strip()
+try:
+    data = base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+    obj = json.loads(data)
+except Exception:
+    sys.exit(1)
+
+FIELD_MAP = {
+    "panel": {
+        "url": "PANEL_URL", "token": "PANEL_NODE_TOKEN",
+        "name": "ZENITH_ENVIRONMENT_NAME", "provider": "ZENITH_ENVIRONMENT_PROVIDER",
+    },
+    "db": {
+        "host": "MYSQL_HOST", "port": "MYSQL_PORT", "db": "MYSQL_DATABASE",
+        "user": "MYSQL_USER", "pass": "MYSQL_PASSWORD",
+        "name": "ZENITH_ENVIRONMENT_NAME", "provider": "ZENITH_ENVIRONMENT_PROVIDER",
+    },
+}
+fields = FIELD_MAP.get(obj.get("m"))
+if not fields:
+    sys.exit(1)
+for jkey, envkey in fields.items():
+    if obj.get(jkey) not in (None, ""):
+        print(f"{envkey}={obj[jkey]}")
+PYEOF
+)"
+  if [ -z "$out" ]; then
+    echo "0"
+    return
+  fi
+  local applied=0 line key val
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    key="${line%%=*}"; val="${line#*=}"
+    sed -i "s@^#\?[[:space:]]*${key}=.*@${key}=${val}@" "$envfile"
+    applied=$((applied + 1))
+    echo "  принято (из строки-конфига): $key" >&2
+  done <<< "$out"
+  echo "$applied"
+}
+
 # Читает вставленный целиком блок KEY=value (по строке на переменную,
 # пустая строка или Ctrl+D завершает) и применяет распознанные ключи в
 # указанный .env -- create_remote_db_user.sh и панель (/nodes -> "Создать
@@ -969,7 +1025,10 @@ manage_zenith() {
       echo ""
       echo "Данные выдаёт db/create_remote_db_user.sh, запущенный НА ЦЕНТРАЛЬНОМ сервере"
       echo "(создаёт урезанного юзера под конкретный IP этой ноды -- не общий MYSQL_USER/MYSQL_PASSWORD)."
-      applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
+      read -re -p "Строка-конфиг (одна строка, если она есть; иначе Enter): " connstr
+      applied=0
+      [ -n "$connstr" ] && applied="$(decode_connect_string "$ZENITH_DIR/.env" "$connstr")"
+      [ "$applied" = "0" ] && applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
         MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD \
         ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
       if [ "$applied" = "0" ]; then
@@ -1003,7 +1062,10 @@ manage_zenith() {
         # в UI панели ПУСТЫМ (/nodes -> "Создать токен") -- имя/провайдера
         # эта же нода сообщит панели сама при первом обращении.
         echo ""
-        applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
+        read -re -p "Строка-конфиг с /nodes (одна строка, если панель её выдала; иначе Enter): " connstr
+        applied=0
+        [ -n "$connstr" ] && applied="$(decode_connect_string "$ZENITH_DIR/.env" "$connstr")"
+        [ "$applied" = "0" ] && applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
           PANEL_URL PANEL_NODE_TOKEN ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
         if [ "$applied" = "0" ]; then
           read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
