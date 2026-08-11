@@ -79,8 +79,8 @@ VOICE_BOT_DIR="$INSTALL_DIR/z2r_test-voice-bot"
 VOICE_BOT_REPO_URL="https://github.com/scp-oss/z2r_test-voice-bot.git"
 VOICE_BOT_SERVICE="z2r-test-voice-bot"
 # Zenith — автоподборщик-генератор стратегий (отдельный репозиторий).
-# Docker нужен только для локальной БД (ZENITH_DB_MODE=docker) — если
-# подключена внешняя БД, Docker вообще не используется.
+# Docker нужен только для локальной БД (ZENITH_DB_MODE=docker) — в режиме
+# api (без своей БД, всё через панель по HTTP) Docker вообще не используется.
 ZENITH_DIR="$INSTALL_DIR/Zenith"
 ZENITH_REPO_URL="https://github.com/scp-oss/zenith.git"
 # z0r-panel — веб-панель для Zenith (обзор по нодам/провайдерам, история
@@ -314,17 +314,34 @@ zenith_env_get() {
   grep -E "^${key}=" "$ZENITH_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-
 }
 
-# docker | external — во внешнем режиме Zenith вообще не трогает Docker,
-# БД у пользователя своя (см. README Zenith).
+# docker | api — в api-режиме Zenith вообще не трогает Docker/MySQL, своей
+# БД тут нет вообще, всё через панель по HTTP (см. README Zenith "Два
+# режима БД").
 zenith_db_mode() {
   local mode; mode="$(zenith_env_get ZENITH_DB_MODE)"
   echo "${mode:-docker}"
 }
 
+# HTTP-пинг панели для ZENITH_DB_MODE=api -- своей БД тут нет вообще, "SELECT
+# 1" недоступен, поэтому статус -- тот же authenticated-запрос, что
+# orchestrator/db_api.py делает на каждую реальную операцию.
+zenith_panel_ping() {
+  local url token name provider
+  url="$(zenith_env_get PANEL_URL)"
+  token="$(zenith_env_get PANEL_NODE_TOKEN)"
+  [ -n "$url" ] && [ -n "$token" ] || return 1
+  name="$(zenith_env_get ZENITH_ENVIRONMENT_NAME)"
+  provider="$(zenith_env_get ZENITH_ENVIRONMENT_PROVIDER)"
+  curl -fsS --max-time 5 \
+    -H "Authorization: Bearer $token" \
+    -H "X-Node-Name: $name" -H "X-Node-Provider: $provider" \
+    "${url%/}/api/v1/db/environment" >/dev/null 2>&1
+}
+
 get_zenith_status() {
   [ -d "$ZENITH_DIR" ] || { echo "NONE"; return; }
-  if [ "$(zenith_db_mode)" = "external" ]; then
-    zenith_mysql_query "SELECT 1;" >/dev/null 2>&1 && echo "ON" || echo "OFF"
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    zenith_panel_ping && echo "ON" || echo "OFF"
   else
     ( cd "$ZENITH_DIR" && docker compose ps --status running -q 2>/dev/null | grep -q . ) && echo "ON" || echo "OFF"
   fi
@@ -335,28 +352,25 @@ get_panel_status() {
   systemctl is-active --quiet "$PANEL_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
 }
 
-# Единая точка запроса к БД Zenith — сама решает, через docker exec или
-# напрямую клиентом mysql на хосте, в зависимости от ZENITH_DB_MODE.
+# Точка прямого SQL-запроса к БД Zenith через docker exec -- ТОЛЬКО для
+# ZENITH_DB_MODE=docker (своя локальная БД). В ZENITH_DB_MODE=api своей
+# БД нет вообще -- вызывающий код обязан сам проверить zenith_db_mode()
+# и не звать эту функцию (см. zenith_show_provider_strategies/
+# zenith_query_profile/zenith_toggle -- ветка "иначе, через панель").
 # stderr НЕ глушим (раньше глушили и это один раз уже маскировало
 # реальную ошибку SQL как "пусто, генератор не запускался" — путаница,
 # на разбор которой ушло время вживую) — единственное исключение:
 # get_zenith_status() сам подавляет вывод отдельно, ему нужен только
 # код возврата, а не текст ошибки на каждой отрисовке меню.
 zenith_mysql_query() {
-  local sql="$1" user pass db host port
+  local sql="$1" user pass db
   user="$(zenith_env_get MYSQL_USER)"; user="${user:-zenith}"
   pass="$(zenith_env_get MYSQL_PASSWORD)"
   db="$(zenith_env_get MYSQL_DATABASE)"; db="${db:-z2r_genome}"
   # Пароль через MYSQL_PWD, не -p"$pass" — иначе mysql на каждый вызов
   # плюётся "[Warning] Using a password on the command line interface
   # can be insecure" в stderr, а мы его больше не глушим (см. выше).
-  if [ "$(zenith_db_mode)" = "external" ]; then
-    host="$(zenith_env_get MYSQL_HOST)"; host="${host:-127.0.0.1}"
-    port="$(zenith_env_get MYSQL_PORT)"; port="${port:-3306}"
-    MYSQL_PWD="$pass" mysql -h"$host" -P"$port" -u"$user" "$db" -e "$sql"
-  else
-    ( cd "$ZENITH_DIR" && docker compose exec -T -e MYSQL_PWD="$pass" mysql mysql -u"$user" "$db" -e "$sql" )
-  fi
+  ( cd "$ZENITH_DIR" && docker compose exec -T -e MYSQL_PWD="$pass" mysql mysql -u"$user" "$db" -e "$sql" )
 }
 
 # Текущая залоченная стратегия профиля (для "[#N]" в списке профилей).
@@ -898,11 +912,14 @@ manage_voice_bot() {
 # WireGuard-ключи: адрес+порт+токен зашиты внутрь одной непрозрачной
 # строки, копипастится единственным куском, меньше риска частичной
 # вставки/битых пробелов, чем даже у блока KEY=value ниже (по прямому
-# запросу, спасибо за наводку). Формат {"m":"panel"|"db", ...поля...},
-# см. z0r-panel/main.py (panel) и Zenith/db/create_remote_db_user.sh (db)
-# -- обе стороны, что печатают строку. "0" на stdout -- не удалось
-# распознать (не наш base64/JSON, либо чужой режим) -- вызывающий код
-# откатывается на apply_env_paste_block, затем на read -p по одному полю.
+# запросу, спасибо за наводку). Формат {"m":"panel", ...поля...}, см.
+# z0r-panel/main.py::make_connect_string -- единственная сторона, что
+# печатает строку (раньше был ещё режим "db" от
+# Zenith/db/create_remote_db_user.sh -- убран вместе со скриптом, сырой
+# MySQL наружу больше не выдаётся никому, оба режима синка и api ходят
+# через панель одним и тем же "panel"-форматом). "0" на stdout -- не
+# удалось распознать (не наш base64/JSON) -- вызывающий код откатывается
+# на apply_env_paste_block, затем на read -p по одному полю.
 decode_connect_string() {
   local envfile="$1" str="$2"
   local out
@@ -919,11 +936,6 @@ except Exception:
 FIELD_MAP = {
     "panel": {
         "url": "PANEL_URL", "token": "PANEL_NODE_TOKEN",
-        "name": "ZENITH_ENVIRONMENT_NAME", "provider": "ZENITH_ENVIRONMENT_PROVIDER",
-    },
-    "db": {
-        "host": "MYSQL_HOST", "port": "MYSQL_PORT", "db": "MYSQL_DATABASE",
-        "user": "MYSQL_USER", "pass": "MYSQL_PASSWORD",
         "name": "ZENITH_ENVIRONMENT_NAME", "provider": "ZENITH_ENVIRONMENT_PROVIDER",
     },
 }
@@ -1011,78 +1023,58 @@ manage_zenith() {
     fi
     cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
 
-    # Три режима БД для ноды -- см. README Zenith "Три режима БД".
+    # Два вопроса вместо трёх пунктов меню -- см. README Zenith "Два
+    # режима БД". Раньше был выбор 1/2/3 сразу (локальная/hub-and-
+    # spoke/центральная-напрямую) -- центральная-напрямую (сырой MySQL
+    # наружу) убрана целиком, режим "без своей БД" (api) теперь ходит
+    # через панель по HTTP+токену, тем же способом, что и синк.
     echo ""
-    echo "БД для Zenith на этой ноде:"
-    echo "  1) Локальная, без панели -- изолированная нода, своя БД в Docker"
-    echo "  2) Локальная + синк с центральной панелью по HTTP (по умолчанию для новой ноды на отдельном провайдере)"
-    echo "  3) Только центральная БД напрямую, без своей (нужен доступ по сети, см. README перед выбором)"
-    read -re -p "Выбор [2]: " dbchoice
-    dbchoice="${dbchoice:-2}"
+    read -re -p "Синхронизироваться с центральной панелью? [Y/n]: " syncans
+    case "$syncans" in
+      n|N) sync_with_panel=0 ;;
+      *) sync_with_panel=1 ;;
+    esac
 
-    if [ "$dbchoice" = "3" ]; then
-      sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=external/' "$ZENITH_DIR/.env"
+    if [ "$sync_with_panel" = "0" ]; then
+      sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=docker/' "$ZENITH_DIR/.env"
+      echo "При желании поменяй пароли: $ZENITH_DIR/.env"
+      echo "Изолированная нода -- своя локальная БД, без панели."
+    else
       echo ""
-      echo "Данные выдаёт db/create_remote_db_user.sh, запущенный НА ЦЕНТРАЛЬНОМ сервере"
-      echo "(создаёт урезанного юзера под конкретный IP этой ноды -- не общий MYSQL_USER/MYSQL_PASSWORD)."
-      read -re -p "Строка-конфиг (одна строка, если она есть; иначе Enter): " connstr
+      read -re -p "Строка-конфиг с /nodes панели (одна строка, если она есть; иначе Enter): " connstr
       applied=0
       [ -n "$connstr" ] && applied="$(decode_connect_string "$ZENITH_DIR/.env" "$connstr")"
       [ "$applied" = "0" ] && applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
-        MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD \
-        ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
+        PANEL_URL PANEL_NODE_TOKEN ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
       if [ "$applied" = "0" ]; then
-        read -re -p "  MYSQL_HOST (центральный сервер): " h
-        read -re -p "  MYSQL_PORT [3306]: " p
-        read -re -p "  MYSQL_DATABASE [z2r_genome]: " d
-        read -re -p "  MYSQL_USER: " u
-        read -rse -p "  MYSQL_PASSWORD: " pw; echo ""
+        read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
+        read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
         read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
         read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
-        [ -n "$h" ] && sed -i "s/^MYSQL_HOST=.*/MYSQL_HOST=$h/" "$ZENITH_DIR/.env"
-        [ -n "$p" ] && sed -i "s/^MYSQL_PORT=.*/MYSQL_PORT=$p/" "$ZENITH_DIR/.env"
-        [ -n "$d" ] && sed -i "s/^MYSQL_DATABASE=.*/MYSQL_DATABASE=$d/" "$ZENITH_DIR/.env"
-        [ -n "$u" ] && sed -i "s/^MYSQL_USER=.*/MYSQL_USER=$u/" "$ZENITH_DIR/.env"
-        [ -n "$pw" ] && sed -i "s/^MYSQL_PASSWORD=.*/MYSQL_PASSWORD=$pw/" "$ZENITH_DIR/.env"
+        [ -n "$purl" ] && sed -i "s@^#\?[[:space:]]*PANEL_URL=.*@PANEL_URL=$purl@" "$ZENITH_DIR/.env"
+        [ -n "$ptoken" ] && sed -i "s@^#\?[[:space:]]*PANEL_NODE_TOKEN=.*@PANEL_NODE_TOKEN=$ptoken@" "$ZENITH_DIR/.env"
         [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
         [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
       fi
-      if ! command -v mysql >/dev/null 2>&1; then
-        echo "Клиент mysql не найден, пробую поставить (нужен для запросов во внешнем режиме)..." >&2
-        apt-get install -y mysql-client >/dev/null 2>&1 || apt-get install -y default-mysql-client >/dev/null 2>&1 \
-          || opkg install mysql-client-slim >/dev/null 2>&1 || apk add mysql-client >/dev/null 2>&1
-      fi
-      echo "Настроено прямое подключение к центральной БД -- своей БД тут нет, panel/HTTP-sync не нужен."
-    else
-      echo "При желании поменяй пароли: $ZENITH_DIR/.env"
 
-      if [ "$dbchoice" = "2" ]; then
-        # Локальная БД остаётся своей (см. выше) -- панель подключается
-        # ОТДЕЛЬНО, по HTTP (hub-and-spoke, не общая БД). Токен создаётся
-        # в UI панели ПУСТЫМ (/nodes -> "Создать токен") -- имя/провайдера
-        # эта же нода сообщит панели сама при первом обращении.
-        echo ""
-        read -re -p "Строка-конфиг с /nodes (одна строка, если панель её выдала; иначе Enter): " connstr
-        applied=0
-        [ -n "$connstr" ] && applied="$(decode_connect_string "$ZENITH_DIR/.env" "$connstr")"
-        [ "$applied" = "0" ] && applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
-          PANEL_URL PANEL_NODE_TOKEN ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
-        if [ "$applied" = "0" ]; then
-          read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
-          read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
-          read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
-          read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
-          [ -n "$purl" ] && sed -i "s@^#\?[[:space:]]*PANEL_URL=.*@PANEL_URL=$purl@" "$ZENITH_DIR/.env"
-          [ -n "$ptoken" ] && sed -i "s@^#\?[[:space:]]*PANEL_NODE_TOKEN=.*@PANEL_NODE_TOKEN=$ptoken@" "$ZENITH_DIR/.env"
-          [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
-          [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
-        fi
-        echo "Подключено. После установки песочницы (см. README Zenith "
-        echo "\"VOICE_UDP\"/\"Как тестируются новые геномы\") можно сразу:"
-        echo "  cd $ZENITH_DIR/orchestrator"
-        echo "  python3 -m venv venv && venv/bin/pip install -r requirements.txt"
-        echo "  sudo venv/bin/python3 bootstrap.py --profile <PROFILE>   # что уже известно работающим"
-      fi
+      echo ""
+      read -re -p "Держать локальную БД как буфер (переживает недоступность панели)? [Y/n]: " bufans
+      case "$bufans" in
+        n|N)
+          sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=api/' "$ZENITH_DIR/.env"
+          echo "Настроено: без своей БД, всё через панель по HTTP -- Docker/MySQL тут не нужны вообще."
+          ;;
+        *)
+          sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=docker/' "$ZENITH_DIR/.env"
+          echo "При желании поменяй пароли: $ZENITH_DIR/.env"
+          echo "Настроено: локальная БД как буфер + синк с панелью."
+          ;;
+      esac
+      echo "Подключено. После установки песочницы (см. README Zenith "
+      echo "\"VOICE_UDP\"/\"Как тестируются новые геномы\") можно сразу:"
+      echo "  cd $ZENITH_DIR/orchestrator"
+      echo "  python3 -m venv venv && venv/bin/pip install -r requirements.txt"
+      echo "  sudo venv/bin/python3 bootstrap.py --profile <PROFILE>   # что уже известно работающим"
     fi
   fi
 
@@ -1115,12 +1107,12 @@ zenith_menu() {
 }
 
 zenith_toggle() {
-  if [ "$(zenith_db_mode)" = "external" ]; then
-    echo "БД внешняя — Zenith ею не управляет, только проверяю связь:"
-    if zenith_mysql_query "SELECT 1;" >/dev/null 2>&1; then
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    echo "БД — панель, своей тут нет — Zenith ею не управляет, только проверяю связь:"
+    if zenith_panel_ping; then
       echo "  связь есть."
     else
-      echo "  связи нет — проверь MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD в $ZENITH_DIR/.env."
+      echo "  связи нет — проверь PANEL_URL/PANEL_NODE_TOKEN в $ZENITH_DIR/.env."
     fi
     return 0
   fi
@@ -1133,6 +1125,11 @@ zenith_toggle() {
 }
 
 zenith_show_provider_strategies() {
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    echo "БД — панель, своей тут нет: этот обзор недоступен из CLI в режиме api."
+    echo "Смотри на панели: $(zenith_env_get PANEL_URL)/"
+    return 0
+  fi
   echo "Текущий провайдер: $(get_provider)"
   echo ""
   # Общий срез по всем профилям сразу — колонка profile отличает пулы
@@ -1160,6 +1157,11 @@ zenith_show_provider_strategies() {
 
 zenith_query_profile() {
   local profile="$1"
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    echo "БД — панель, своей тут нет: этот обзор недоступен из CLI в режиме api."
+    echo "Смотри на панели: $(zenith_env_get PANEL_URL)/knowledge (или /genome/<id>)"
+    return 0
+  fi
   echo "Профиль: $profile"
   echo ""
   # genomes.profile — отдельный пул генома на профиль (не шарится между
@@ -1221,14 +1223,14 @@ uninstall_zenith() {
     echo "Zenith ($ZENITH_DIR) не найден — нечего удалять."
     return 0
   fi
-  if [ "$(zenith_db_mode)" = "external" ]; then
-    read -re -p "Найден $ZENITH_DIR (БД внешняя, её не трогаю) — удалить папку? [y/N]: " ans
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    read -re -p "Найден $ZENITH_DIR (БД — панель, тут нечего останавливать) — удалить папку? [y/N]: " ans
   else
     read -re -p "Найден $ZENITH_DIR — остановить контейнеры и удалить (вместе с БД в volume)? [y/N]: " ans
   fi
   case "$ans" in
     y|Y)
-      [ "$(zenith_db_mode)" = "external" ] || ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
+      [ "$(zenith_db_mode)" = "api" ] || ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
       rm -rf "$ZENITH_DIR"
       echo "Zenith удалён."
       ;;
