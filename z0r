@@ -710,6 +710,35 @@ ensure_curl() {
   command -v curl >/dev/null 2>&1
 }
 
+# python3 -m venv может молча "создаться" без рабочего pip внутри --
+# ensurepip не всегда идёт частью базового python3 (Debian/Ubuntu держат
+# его в ОТДЕЛЬНОМ пакете, версионном -- python3.13-venv, не только общем
+# python3-venv). Живой случай на Ростелекоме 2026-08-13: venv создался,
+# первый же venv/bin/pip install упал с "ensurepip is not available" --
+# узнаём это ДО того, как что-то реально понадобится ставить, а не
+# посреди установки Zenith.
+ensure_python_venv() {
+  local test_dir ok=0
+  test_dir="$(mktemp -d)"
+  if python3 -m venv "$test_dir/venv" >/dev/null 2>&1 && [ -x "$test_dir/venv/bin/pip" ]; then
+    ok=1
+  fi
+  rm -rf "$test_dir"
+  [ "$ok" = "1" ] && return 0
+
+  echo "python3 -m venv не даёт рабочий pip, ставлю пакет venv..." >&2
+  local pyver; pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
+  apt-get install -y python3-venv >/dev/null 2>&1
+  [ -n "$pyver" ] && apt-get install -y "python${pyver}-venv" >/dev/null 2>&1
+  opkg install python3-venv >/dev/null 2>&1
+
+  test_dir="$(mktemp -d)"
+  python3 -m venv "$test_dir/venv" >/dev/null 2>&1 && [ -x "$test_dir/venv/bin/pip" ]
+  ok=$?
+  rm -rf "$test_dir"
+  return $ok
+}
+
 # Живой случай на Ростелекоме 2026-08-13: локальный DNS для
 # raw.githubusercontent.com вернул ВМЕСТЕ с настоящими IP (185.199.10x.133,
 # Fastly) чужой 1.1.1.1 (адрес резолвера Cloudflare, не хостинга GitHub
@@ -1277,11 +1306,23 @@ manage_zenith() {
           echo "Настроено: локальная БД как буфер + синк с панелью."
           ;;
       esac
-      echo "Подключено. После установки песочницы (см. README Zenith "
-      echo "\"VOICE_UDP\"/\"Как тестируются новые геномы\") можно сразу:"
-      echo "  cd $ZENITH_DIR/orchestrator"
-      echo "  python3 -m venv venv && venv/bin/pip install -r requirements.txt"
-      echo "  sudo venv/bin/python3 bootstrap.py --profile <PROFILE>   # что уже известно работающим"
+      echo "Подключено."
+    fi
+
+    echo ""
+    echo "Готовлю Python-окружение оркестратора..."
+    if ensure_python_venv; then
+      if ( cd "$ZENITH_DIR/orchestrator" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
+        echo "venv готов: $ZENITH_DIR/orchestrator/venv"
+        echo "После установки песочницы (см. README Zenith \"VOICE_UDP\"/\"Как тестируются"
+        echo "новые геномы\") можно сразу:"
+        echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 bootstrap.py --profile <PROFILE>"
+      else
+        echo "venv создался, но pip install упал -- проверь requirements.txt/сеть вручную." >&2
+      fi
+    else
+      echo "Не удалось поставить рабочий python3-venv -- подготовь venv руками:" >&2
+      echo "  cd $ZENITH_DIR/orchestrator && python3 -m venv venv && venv/bin/pip install -r requirements.txt" >&2
     fi
   fi
 
