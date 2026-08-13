@@ -284,6 +284,20 @@ detect_provider() {
   fi
 }
 
+# "PJSC Rostelecom" -> "rostelecom", "MTS PJSC" -> "mts" -- машинный слаг
+# для ZENITH_ENVIRONMENT_PROVIDER (см. manage_zenith) вместо ручного ввода.
+# Список организационно-правовых обозначений неполный (покрывает то, что
+# реально встречается у операторов связи, не претендует на полноту) --
+# неизвестное просто лоуеркейзится и схлопывается в [a-z0-9-], тоже
+# годный (пусть не идеально короткий) слаг.
+slugify_provider() {
+  local raw="$1"
+  printf '%s' "$raw" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/\b(pjsc|jsc|ojsc|oao|zao|ooo|llc|ltd|inc|corp|пао|ооо|зао|оао)\b//g' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
 get_provider() {
   if [ -s "$PROVIDER_CACHE" ]; then
     cat "$PROVIDER_CACHE"
@@ -706,13 +720,30 @@ ensure_curl() {
 # по себе, но стоит явно предложить постоянный DoT-резолвер (не только для
 # GitHub-доменов -- если ISP подменяет DNS для одного хоста, подозревать
 # стоит и остальные).
+# DoH-запрос к конкретному провайдеру. Google и Cloudflare оба отдают
+# JSON, но у Cloudflare без заголовка Accept: application/dns-json уходит
+# в DNS-wire-формат вместо JSON -- отсюда разные curl-вызовы, не общий.
+# Яндекс сюда намеренно не включён -- их JSON DoH-эндпоинт не проверен
+# вживую (в отличие от DoT ниже в offer_doh_setup, тот документирован
+# надёжно), гадать не хочется.
+_doh_query_google() {
+  curl -fsS --max-time 5 "https://dns.google/resolve?name=${1}&type=A" 2>/dev/null
+}
+_doh_query_cloudflare() {
+  curl -fsS --max-time 5 -H 'accept: application/dns-json' \
+    "https://cloudflare-dns.com/dns-query?name=${1}&type=A" 2>/dev/null
+}
+
 dns_looks_hijacked() {
-  local domain="$1" local_ips doh_ips extra
+  local domain="$1" local_ips doh_ips extra provider raw
   local_ips="$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u)"
   [ -z "$local_ips" ] && return 1
 
-  doh_ips="$(curl -fsS --max-time 5 "https://dns.google/resolve?name=${domain}&type=A" 2>/dev/null \
-    | python3 -c "
+  doh_ips=""
+  for provider in _doh_query_google _doh_query_cloudflare; do
+    raw="$("$provider" "$domain")"
+    [ -z "$raw" ] && continue
+    doh_ips="$(printf '%s' "$raw" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -722,6 +753,8 @@ for a in data.get('Answer', []):
     if a.get('type') == 1:
         print(a['data'])
 " 2>/dev/null | sort -u)"
+    [ -n "$doh_ips" ] && break
+  done
   [ -z "$doh_ips" ] && return 1
 
   # Хоть один локальный IP, которого DoH не подтверждает -- подозрение на подмену
@@ -742,13 +775,19 @@ offer_doh_setup() {
     echo "dnscrypt-proxy) и перезапусти установку." >&2
     return 1
   fi
-  read -re -p "Включить DNS-over-TLS через systemd-resolved (1.1.1.1/9.9.9.9, шифрованно, ISP не подменит)? [Y/n]: " ans
+  read -re -p "Включить DNS-over-TLS через systemd-resolved (Cloudflare/Quad9/Яндекс, шифрованно, ISP не подменит)? [Y/n]: " ans
   case "$ans" in n|N) return 1 ;; esac
 
+  # Три независимых DoT-провайдера -- если один из них у конкретного ISP
+  # тоже режется (см. CLAUDE.md/README про то, что провайдеры периодически
+  # блокируют отдельные диапазоны), systemd-resolved сам переберёт
+  # остальные. Яндекс -- common.dot.dns.yandex.net (не "безопасный"/
+  # "семейный" вариант, тот дополнительно фильтрует некоторые домены,
+  # нам нужен обычный).
   mkdir -p /etc/systemd/resolved.conf.d
   cat > /etc/systemd/resolved.conf.d/z0r-doh.conf <<'EOF'
 [Resolve]
-DNS=1.1.1.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net
+DNS=1.1.1.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net 77.88.8.8#common.dot.dns.yandex.net
 DNSOverTLS=yes
 EOF
   systemctl restart systemd-resolved
@@ -1180,6 +1219,22 @@ manage_zenith() {
     fi
     cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
 
+    # Имя/провайдер ноды -- автоматически, не руками (по прямому запросу:
+    # готовимся к деплою на МТС, там должно пройти без ручной доводки).
+    # Имя -- hostname этой машины (уникальность внутри флота обеспечивает
+    # panel self_report_node -- при конфликте вернёт понятную 409, поправить
+    # руками останется только в этом редком случае). Провайдер -- тот же
+    # детектор ISP, что уже используется в шапке меню (get_provider),
+    # слагифицирован в машинный вид. Применяется ко ВСЕМ веткам ниже,
+    # включая полностью локальную (иначе там осталось бы "prod-domru" из
+    # .env.example нетронутым).
+    local auto_name auto_provider
+    auto_name="$(hostname)"
+    auto_provider="$(slugify_provider "$(get_provider)")"
+    sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$auto_name/" "$ZENITH_DIR/.env"
+    sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$auto_provider/" "$ZENITH_DIR/.env"
+    echo "Имя ноды: $auto_name, провайдер: $auto_provider (определено автоматически)."
+
     # Два вопроса вместо трёх пунктов меню -- см. README Zenith "Два
     # режима БД". Раньше был выбор 1/2/3 сразу (локальная/hub-and-
     # spoke/центральная-напрямую) -- центральная-напрямую (сырой MySQL
@@ -1201,17 +1256,12 @@ manage_zenith() {
       read -re -p "Строка-конфиг с /nodes панели (одна строка, если она есть; иначе Enter): " connstr
       applied=0
       [ -n "$connstr" ] && applied="$(decode_connect_string "$ZENITH_DIR/.env" "$connstr")"
-      [ "$applied" = "0" ] && applied="$(apply_env_paste_block "$ZENITH_DIR/.env" \
-        PANEL_URL PANEL_NODE_TOKEN ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER)"
+      [ "$applied" = "0" ] && applied="$(apply_env_paste_block "$ZENITH_DIR/.env" PANEL_URL PANEL_NODE_TOKEN)"
       if [ "$applied" = "0" ]; then
         read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
         read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
-        read -re -p "  Имя этой ноды (ZENITH_ENVIRONMENT_NAME, напр. vm-rostelecom): " ename
-        read -re -p "  Провайдер (ZENITH_ENVIRONMENT_PROVIDER, напр. rostelecom): " eprovider
         [ -n "$purl" ] && sed -i "s@^#\?[[:space:]]*PANEL_URL=.*@PANEL_URL=$purl@" "$ZENITH_DIR/.env"
         [ -n "$ptoken" ] && sed -i "s@^#\?[[:space:]]*PANEL_NODE_TOKEN=.*@PANEL_NODE_TOKEN=$ptoken@" "$ZENITH_DIR/.env"
-        [ -n "$ename" ] && sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$ename/" "$ZENITH_DIR/.env"
-        [ -n "$eprovider" ] && sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$eprovider/" "$ZENITH_DIR/.env"
       fi
 
       echo ""
