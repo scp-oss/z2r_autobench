@@ -696,6 +696,66 @@ ensure_curl() {
   command -v curl >/dev/null 2>&1
 }
 
+# Живой случай на Ростелекоме 2026-08-13: локальный DNS для
+# raw.githubusercontent.com вернул ВМЕСТЕ с настоящими IP (185.199.10x.133,
+# Fastly) чужой 1.1.1.1 (адрес резолвера Cloudflare, не хостинга GitHub
+# Pages) -- явная подмена ответа, не просто "домен недоступен". Собственная
+# DoH-проверка авторского установщика z2r тоже не помогла ("Не удалось
+# получить IP через DoH") -- сам dns.google был недоступен с этой же сети,
+# так что ОДНОРАЗОВАЯ проверка внутри install_z2r() ничего не чинит сама
+# по себе, но стоит явно предложить постоянный DoT-резолвер (не только для
+# GitHub-доменов -- если ISP подменяет DNS для одного хоста, подозревать
+# стоит и остальные).
+dns_looks_hijacked() {
+  local domain="$1" local_ips doh_ips extra
+  local_ips="$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u)"
+  [ -z "$local_ips" ] && return 1
+
+  doh_ips="$(curl -fsS --max-time 5 "https://dns.google/resolve?name=${domain}&type=A" 2>/dev/null \
+    | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for a in data.get('Answer', []):
+    if a.get('type') == 1:
+        print(a['data'])
+" 2>/dev/null | sort -u)"
+  [ -z "$doh_ips" ] && return 1
+
+  # Хоть один локальный IP, которого DoH не подтверждает -- подозрение на подмену
+  extra="$(comm -23 <(printf '%s\n' "$local_ips") <(printf '%s\n' "$doh_ips"))"
+  [ -n "$extra" ]
+}
+
+# Ставит DNS-over-TLS через systemd-resolved (drop-in, не трогает основной
+# resolved.conf напрямую -- откатывается одним rm) -- самый низкий порог
+# входа на Debian/Ubuntu (systemd-resolved обычно уже есть, отдельный демон
+# ставить не нужно). На системах без systemd-resolved просто печатает,
+# что делать руками -- не тащим сюда dnscrypt-proxy/cloudflared ради
+# одной проверки.
+offer_doh_setup() {
+  echo "Похоже, локальный DNS у этого провайдера подменяет ответы (см. вывод выше)." >&2
+  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1; then
+    echo "systemd-resolved не найден -- настрой DoH/DoT-резолвер вручную (например," >&2
+    echo "dnscrypt-proxy) и перезапусти установку." >&2
+    return 1
+  fi
+  read -re -p "Включить DNS-over-TLS через systemd-resolved (1.1.1.1/9.9.9.9, шифрованно, ISP не подменит)? [Y/n]: " ans
+  case "$ans" in n|N) return 1 ;; esac
+
+  mkdir -p /etc/systemd/resolved.conf.d
+  cat > /etc/systemd/resolved.conf.d/z0r-doh.conf <<'EOF'
+[Resolve]
+DNS=1.1.1.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net
+DNSOverTLS=yes
+EOF
+  systemctl restart systemd-resolved
+  echo "Готово -- /etc/systemd/resolved.conf.d/z0r-doh.conf (откат: rm его и systemctl restart systemd-resolved)."
+  return 0
+}
+
 # Docker ставится официальным скриптом (get.docker.com), не через
 # пакетный менеджер дистрибутива — разброс версий/названий пакетов между
 # Debian/Ubuntu/CentOS/openSUSE и т.д. слишком велик, чтобы угадывать
@@ -730,6 +790,10 @@ install_z2r() {
   echo "(не наш код, выполняется с root). Убедись, что доверяешь источнику."
   read -re -p "Продолжить установку z2r? [y/N]: " ans
   case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+
+  if dns_looks_hijacked raw.githubusercontent.com; then
+    offer_doh_setup
+  fi
 
   echo "Пробую основное зеркало (GitHub)..."
   if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" && sh z2r ); then
