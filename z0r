@@ -39,6 +39,11 @@
 #                                — установить+включить autotune-daemon.service
 #                                  (без меню, для git clone && запусти-и-готово)
 #   sudo ./z0r --install-z2r    — поставить сам z2r (ядро DPI-обхода), если его нет
+#   sudo ./z0r --install-z2r-offline
+#                                — то же самое, но из офлайн-архива автора
+#                                  (Google Drive+пароль zator) -- когда GitHub
+#                                  у провайдера недоступен целиком, install_z2r()
+#                                  сам предложит этот путь после двух зеркал
 #   sudo ./z0r --uninstall      — удалить autotune-daemon.service и/или z2r
 #                                  (с подтверждением на каждый найденный компонент)
 #
@@ -118,6 +123,7 @@ while [ $# -gt 0 ]; do
     --apply) APPLY_FLAG="--apply"; shift ;;
     --install-service) MODE="install"; shift ;;
     --install-z2r) MODE="install-z2r"; shift ;;
+    --install-z2r-offline) MODE="install-z2r-offline"; shift ;;
     --uninstall) MODE="uninstall"; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
@@ -737,8 +743,95 @@ install_z2r() {
     return 0
   fi
 
-  echo "Не удалось установить z2r ни с одного зеркала." >&2
-  return 1
+  echo "Не удалось установить z2r ни с одного зеркала (GitHub у некоторых провайдеров" >&2
+  echo "режется/деградирует целиком, живой случай -- см. CLAUDE.md/README)." >&2
+  echo "У автора есть офлайн-архив на этот случай (Google Drive, ссылку он периодически" >&2
+  echo "обновляет и публикует сам -- не зашита сюда заранее, вставь текущую)." >&2
+  read -re -p "Есть ссылка/ID офлайн-архива под рукой? [y/N]: " ans
+  case "$ans" in
+    y|Y) install_z2r_offline ;;
+    *) return 1 ;;
+  esac
+}
+
+# Офлайн-путь для случаев, когда GitHub (raw.githubusercontent.com/
+# api.github.com) у провайдера деградирует целиком -- живой случай 2026-08-13,
+# оба зеркала install_z2r() недоступны, но сам гугл-драйв не блокируется.
+# Архив -- RAR5 под паролем "zator" (публично документированный автором
+# константа, не секрет), внутри zator-offline-<версия>.tar.gz, а внутри
+# него -- обычный набор файлов + z2r-скрипт для локального запуска.
+install_z2r_offline() {
+  read -re -p "Ссылка на Google Drive (вида .../file/d/<ID>/view) или голый ID: " src
+  local fileid
+  fileid="$(printf '%s' "$src" | sed -n 's#.*/d/\([A-Za-z0-9_-]\+\).*#\1#p')"
+  [ -z "$fileid" ] && fileid="$src"
+  if [ -z "$fileid" ]; then
+    echo "Пустой ID -- отмена." >&2
+    return 1
+  fi
+
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    echo "pip не найден, пробую поставить..." >&2
+    apt-get install -y python3-pip >/dev/null 2>&1 || opkg install python3-pip >/dev/null 2>&1
+  fi
+  if ! python3 -c "import gdown" >/dev/null 2>&1; then
+    echo "Ставлю gdown (единственный надёжный способ пройти предупреждение" >&2
+    echo "Google Drive о вирус-скане для больших файлов)..." >&2
+    python3 -m pip install --break-system-packages -q gdown 2>/dev/null \
+      || python3 -m pip install -q gdown
+  fi
+
+  local workdir; workdir="$(mktemp -d /tmp/z2r_offline.XXXXXX)"
+  echo "Качаю архив..."
+  if ! python3 -m gdown "https://drive.google.com/uc?id=${fileid}" -O "$workdir/archive"; then
+    echo "Не удалось скачать по этому ID/ссылке." >&2
+    return 1
+  fi
+
+  local kind; kind="$(file -b "$workdir/archive")"
+  echo "Тип файла: $kind"
+  case "$kind" in
+    *RAR*)
+      command -v unar >/dev/null 2>&1 || apt-get install -y unar >/dev/null 2>&1
+      if command -v unar >/dev/null 2>&1; then
+        unar -q -p zator -o "$workdir" "$workdir/archive"
+      elif command -v unrar >/dev/null 2>&1; then
+        ( cd "$workdir" && unrar x -p'zator' archive )
+      else
+        echo "Нет unar/unrar и не удалось поставить -- распакуй руками:" >&2
+        echo "  файл: $workdir/archive, пароль: zator" >&2
+        return 1
+      fi
+      ;;
+    *Zip*)
+      command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1
+      unzip -q -P zator "$workdir/archive" -d "$workdir"
+      ;;
+    *)
+      echo "Не архив (RAR/ZIP) -- похоже на страницу-предупреждение Google Drive," >&2
+      echo "не HTML-эт содержимое. Файл: $workdir/archive" >&2
+      return 1
+      ;;
+  esac
+
+  local inner_tgz; inner_tgz="$(find "$workdir" -maxdepth 2 -iname 'zator-offline-*.tar.gz' | head -1)"
+  if [ -z "$inner_tgz" ]; then
+    echo "Не нашёл zator-offline-*.tar.gz внутри распакованного архива ($workdir)." >&2
+    return 1
+  fi
+  tar -xzf "$inner_tgz" -C "$workdir"
+  local inner_dir; inner_dir="$(dirname "$inner_tgz")"
+  local z2r_dir; z2r_dir="$(find "$workdir" -maxdepth 2 -iname 'zator-offline-*' -type d | head -1)"
+  if [ -z "$z2r_dir" ] || [ ! -f "$z2r_dir/z2r" ]; then
+    echo "Не нашёл распакованный zator-offline-*/z2r." >&2
+    return 1
+  fi
+
+  echo "Запускаю установщик из офлайн-архива ($z2r_dir)..."
+  ( cd "$z2r_dir" && sh z2r )
+  local rc=$?
+  echo "Оставил распакованное в $workdir (можно удалить после проверки: rm -rf $workdir)."
+  return $rc
 }
 
 # Запускает собственное меню z2r (не наш z0r). По умолчанию тем же способом,
@@ -1543,6 +1636,11 @@ fi
 
 if [ "$MODE" = "install-z2r" ]; then
   install_z2r
+  exit $?
+fi
+
+if [ "$MODE" = "install-z2r-offline" ]; then
+  install_z2r_offline
   exit $?
 fi
 
