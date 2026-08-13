@@ -1466,6 +1466,23 @@ zenith_profiles_submenu() {
   done
 }
 
+# Живой инцидент 2026-08-13: uninstall_z2r() сносил /opt/zapret2, пока
+# песочный nfqws2 Зенита (sandbox/start_sandbox.sh -- ОТДЕЛЬНЫЙ процесс от
+# основного zapret2.service, свой systemd тут не используется) всё ещё
+# работал и держал открытыми хостлисты из-под удалённого /opt/zapret2 --
+# результат: бесконечный залив терминала "file_mod_signature: No such
+# file or directory" на каждую попытку перечитать конфиг. teardown_sandbox.sh
+# сам останавливает nfqws2 первым делом (см. его докстринг) -- вызываем
+# ПЕРЕД любым rm -rf, что тут, что в uninstall_z2r(). pkill -- отдельная
+# страховка на случай, если sandbox уже не в том состоянии, которое
+# teardown_sandbox.sh ожидает (osiротевший процесс без queue_num и т.п.).
+stop_zenith_sandbox_if_running() {
+  if [ -x "$ZENITH_DIR/sandbox/teardown_sandbox.sh" ]; then
+    ( cd "$ZENITH_DIR/sandbox" && ./teardown_sandbox.sh ) || true
+  fi
+  pkill -9 -x nfqws2 2>/dev/null || true
+}
+
 uninstall_zenith() {
   if [ ! -d "$ZENITH_DIR" ]; then
     echo "Zenith ($ZENITH_DIR) не найден — нечего удалять."
@@ -1478,6 +1495,7 @@ uninstall_zenith() {
   fi
   case "$ans" in
     y|Y)
+      stop_zenith_sandbox_if_running
       [ "$(zenith_db_mode)" = "api" ] || ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
       rm -rf "$ZENITH_DIR"
       echo "Zenith удалён."
@@ -1517,6 +1535,11 @@ uninstall_z2r() {
     systemctl disable --now zapret2 2>/dev/null || true
     rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service
     systemctl daemon-reload
+    # Песочный nfqws2 Zenith'а -- отдельный процесс от zapret2.service выше,
+    # держит открытыми файлы из /opt/zapret2 -- останавливаем ДО rm -rf,
+    # иначе он бесконечно заливает терминал ошибками чтения удалённых
+    # хостлистов (живой инцидент 2026-08-13, см. stop_zenith_sandbox_if_running).
+    [ -d "$ZENITH_DIR" ] && stop_zenith_sandbox_if_running
     rm -rf /opt/zapret2
     echo "z2r удалён."
   else
