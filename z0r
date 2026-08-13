@@ -886,17 +886,36 @@ install_z2r() {
   esac
 }
 
+# Последняя ссылка, о которой мы знаем (подтверждена рабочей 2026-08-13,
+# см. CLAUDE.md) -- просто удобный дефолт по Enter, НЕ гарантия
+# актуальности: автор прямо предупреждает, что она периодически меняется
+# и не синхронна с git-версией. install_z2r_offline() сама предложит
+# ввести свежую, если эта не сработает -- держать её в актуальном
+# состоянии тут не пытаемся.
+Z2R_OFFLINE_ARCHIVE_LAST_KNOWN="10c5DZ1wMIjBIRGUzs-FcK2vP7l5g83xy"
+
 # Офлайн-путь для случаев, когда GitHub (raw.githubusercontent.com/
 # api.github.com) у провайдера деградирует целиком -- живой случай 2026-08-13,
 # оба зеркала install_z2r() недоступны, но сам гугл-драйв не блокируется.
 # Архив -- RAR5 под паролем "zator" (публично документированный автором
 # константа, не секрет), внутри zator-offline-<версия>.tar.gz, а внутри
 # него -- обычный набор файлов + z2r-скрипт для локального запуска.
+_z2r_offline_extract_id() {
+  local fileid; fileid="$(printf '%s' "$1" | sed -n 's#.*/d/\([A-Za-z0-9_-]\+\).*#\1#p')"
+  [ -z "$fileid" ] && fileid="$1"
+  printf '%s' "$fileid"
+}
+
 install_z2r_offline() {
-  read -re -p "Ссылка на Google Drive (вида .../file/d/<ID>/view) или голый ID: " src
+  read -re -p "Ссылка на Google Drive (вида .../file/d/<ID>/view) или голый ID [Enter -- последняя известная]: " src
   local fileid
-  fileid="$(printf '%s' "$src" | sed -n 's#.*/d/\([A-Za-z0-9_-]\+\).*#\1#p')"
-  [ -z "$fileid" ] && fileid="$src"
+  if [ -z "$src" ]; then
+    fileid="$Z2R_OFFLINE_ARCHIVE_LAST_KNOWN"
+    echo "Использую последнюю известную ссылку -- она может быть устаревшей (автор" >&2
+    echo "меняет её время от времени), если не скачается -- спрошу свежую." >&2
+  else
+    fileid="$(_z2r_offline_extract_id "$src")"
+  fi
   if [ -z "$fileid" ]; then
     echo "Пустой ID -- отмена." >&2
     return 1
@@ -917,7 +936,15 @@ install_z2r_offline() {
   echo "Качаю архив..."
   if ! python3 -m gdown "https://drive.google.com/uc?id=${fileid}" -O "$workdir/archive"; then
     echo "Не удалось скачать по этому ID/ссылке." >&2
-    return 1
+    read -re -p "Есть другая/свежая ссылка? (Enter -- отмена): " src2
+    if [ -z "$src2" ]; then
+      return 1
+    fi
+    fileid="$(_z2r_offline_extract_id "$src2")"
+    if ! python3 -m gdown "https://drive.google.com/uc?id=${fileid}" -O "$workdir/archive"; then
+      echo "И эта не сработала -- отмена." >&2
+      return 1
+    fi
   fi
 
   local kind; kind="$(file -b "$workdir/archive")"

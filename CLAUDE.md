@@ -98,6 +98,37 @@ project names here — same public-repo constraint as README.md.
 - Scaffold-only as of this writing — mutation/UCB/crossover logic not yet
   ported into it.
 
+## z2r core install — GitHub is not reliable from every provider
+
+- Live case (Rostelecom, 2026-08-13): `raw.githubusercontent.com`/
+  `api.github.com` were flaky/degraded for hours — sometimes the entry
+  script fetched fine but a component file failed, sometimes DNS for the
+  domain came back with a spoofed extra IP (`1.1.1.1` mixed into the real
+  Fastly answers). Both `install_z2r()` mirrors (GitHub direct + the
+  `git.px.rkn.quest` mirror) failed outright; the author's own script has
+  an internal fallback path that can loop forever on partial failure
+  (Ctrl+C kills the whole `sh z0r` process, including the not-yet-cloned
+  `/opt/z2r_autobench` — re-run from a directory that still exists, decline
+  the z2r prompt, let it clone the repo, then retry z2r separately).
+- `sudo ./z0r --install-z2r-offline` is the escape hatch — the author
+  publishes an offline archive (Google Drive, RAR5 password `zator`) for
+  exactly this. Link rotates over time (author's own warning, not synced
+  with git releases) — `Z2R_OFFLINE_ARCHIVE_LAST_KNOWN` in `z0r` is just a
+  convenience default for Enter, not guaranteed current; the function
+  prompts for a fresh one if the default 404s.
+- `dns_looks_hijacked()`/`offer_doh_setup()` in `z0r` detect the DNS-spoof
+  case specifically and offer DNS-over-TLS (systemd-resolved drop-in)
+  before even trying the GitHub mirrors — but this only helps if at least
+  one of the DoH cross-check providers (Google, then Cloudflare) is
+  itself reachable; if both are also blocked, it can't tell and silently
+  skips the offer.
+- `uninstall_z2r()`/`uninstall_zenith()` MUST stop Zenith's sandbox
+  `nfqws2` (`stop_zenith_sandbox_if_running()`, wraps
+  `sandbox/teardown_sandbox.sh` + `pkill -9 nfqws2`) before `rm -rf
+  /opt/zapret2` — that sandbox process is separate from `zapret2.service`
+  and, left running, spins forever re-reading now-deleted hostlist files,
+  flooding the terminal. Learned the hard way via item 999 on a live box.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
