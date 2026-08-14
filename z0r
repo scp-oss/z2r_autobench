@@ -291,11 +291,17 @@ detect_provider() {
 # неизвестное просто лоуеркейзится и схлопывается в [a-z0-9-], тоже
 # годный (пусть не идеально короткий) слаг.
 slugify_provider() {
-  local raw="$1"
-  printf '%s' "$raw" \
+  local raw="$1" slug
+  slug="$(printf '%s' "$raw" \
     | tr '[:upper:]' '[:lower:]' \
     | sed -E 's/\b(pjsc|jsc|ojsc|oao|zao|ooo|llc|ltd|inc|corp|пао|ооо|зао|оао)\b//g' \
-    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  # Кириллица (напр. "не определён" -- detect_provider() не смог достучаться
+  # ни до одной из двух IP->ISP служб) целиком режется в шаге выше (не
+  # [a-z0-9]) -- без этой подстраховки ZENITH_ENVIRONMENT_PROVIDER
+  # улетал бы пустой строкой, тихо ломая self-report на панели.
+  [ -z "$slug" ] && slug="unknown"
+  printf '%s' "$slug"
 }
 
 get_provider() {
