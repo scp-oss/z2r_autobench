@@ -1721,11 +1721,19 @@ manage_panel() {
       if ! id zenith-panel >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /usr/sbin/nologin zenith-panel
       fi
-      # Узкий read-only sudoers — только get/max, НИКОГДА set (панель
-      # ничего не применяет в боевой конфиг сама, см. её README "Границы
-      # ответственности панели").
+      # Узкий sudoers — set_strategy_cli.sh только get/max, НИКОГДА set
+      # (панель ничего не применяет в боевой /opt/zapret2 сама, см. её
+      # README "Границы ответственности панели"). Отдельная строка ниже —
+      # для кнопки "запустить подбор" на /controls (см. z0r-panel/
+      # runner.py): она стартует Zenith'овский orchestrator/main.py от
+      # root'а (сам main.py этого требует — песочница, см. Zenith README),
+      # но это другая песочница (zenith-sandbox), не боевой zapret2.config
+      # — тем не менее это ИСПОЛНЕНИЕ произвольного питон-кода того же
+      # main.py, не read-only, так что команда сужена до конкретного
+      # venv/main.py с фиксированными флагами, не общий root-шелл.
       local sudoers_file="/etc/sudoers.d/zenith-panel"
-      local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *"
+      local sudoers_run_cmd="$ZENITH_DIR/orchestrator/venv/bin/python3 main.py --profile * --rounds * *"
+      local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_run_cmd"
       if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
         echo "$sudoers_line" > "$sudoers_file"
         chmod 440 "$sudoers_file"
