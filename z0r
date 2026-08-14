@@ -824,6 +824,83 @@ EOF
   return 0
 }
 
+ensure_expect() {
+  command -v expect >/dev/null 2>&1 && return 0
+  echo "expect не найден, пробую поставить..." >&2
+  apt-get install -y expect >/dev/null 2>&1 || opkg install expect >/dev/null 2>&1
+  command -v expect >/dev/null 2>&1
+}
+
+# Авторский установщик z2r (не наш код) задаёт ~10 интерактивных вопросов
+# подряд -- почти у всех есть разумный дефолт по Enter, кроме выбора
+# firewall (дефолт автора -- nftables, тут по прямому запросу нужен
+# iptables) и выбора LAN/WAN интерфейса (списка без дефолта, номер плывёт
+# от машины к машине из-за docker-мостов/veth). Гоняем тот же `sh z2r`
+# через expect и сами отвечаем по тексту вопроса -- для интерфейса
+# парсим уже напечатанный список (лежит в $expect_out(buffer) на момент
+# совпадения с промптом) и ищем строку с именем интерфейса дефолтного
+# маршрута.
+#
+# Если формулировка вопроса у автора когда-нибудь поменяется -- конкретный
+# expect-шаблон просто не совпадёт и шаг провиснет на 30-секундном таймауте
+# (не отправит случайный неверный ответ), тогда откат -- обычная
+# интерактивная установка (install_z2r/install_z2r_offline).
+#
+# $1 -- путь к скачанному файлу z2r (не обязательно в текущей директории).
+run_z2r_installer_unattended() {
+  local z2r_path="$1" dir base
+  dir="$(dirname "$z2r_path")"; base="$(basename "$z2r_path")"
+
+  if ! ensure_expect; then
+    echo "expect не поставился -- обычная интерактивная установка." >&2
+    ( cd "$dir" && sh "$base" )
+    return $?
+  fi
+
+  local iface
+  iface="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+  [ -z "$iface" ] && iface="$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+
+  ( cd "$dir" && IFACE="$iface" Z2R_BASE="$base" expect -c '
+    encoding system utf-8
+    set timeout 30
+    set iface $env(IFACE)
+    spawn sh $env(Z2R_BASE)
+
+    expect {
+      "или Enter для пропуска" { send "\r"; exp_continue }
+      "web-ssh)? Enter - Да, 1 - нет" { send "\r"; exp_continue }
+      "your choice (default : nftables) :" { send "1\r"; exp_continue }
+      "ipv6 support" { send "\r"; exp_continue }
+      "your choice (default : hostlist) :" { send "\r"; exp_continue }
+      "enable nfqws2 ?" { send "\r"; exp_continue }
+      "edit the options" { send "\r"; exp_continue }
+      -re {your choice \(default : NONE\) : $} {
+        if {$iface ne "" && [regexp -line "^\\s*(\\d+) : $iface\\y" $expect_out(buffer) matched num]} {
+          send "$num\r"
+        } else {
+          send "\r"
+        }
+        exp_continue
+      }
+      -re {your choice \(default : ANY\) : $} {
+        if {$iface ne "" && [regexp -line "^\\s*(\\d+) : $iface\\y" $expect_out(buffer) matched num]} {
+          send "$num\r"
+        } else {
+          send "\r"
+        }
+        exp_continue
+      }
+      "auto download ip/host list" { send "\r"; exp_continue }
+      "~3мб места)? 1 - Да, Enter - нет" { send "\r"; exp_continue }
+      "press enter to continue" { send "\r"; exp_continue }
+      eof
+    }
+    catch wait result
+    exit [lindex $result 3]
+  ' )
+}
+
 # Docker ставится официальным скриптом (get.docker.com), не через
 # пакетный менеджер дистрибутива — разброс версий/названий пакетов между
 # Debian/Ubuntu/CentOS/openSUSE и т.д. слишком велик, чтобы угадывать
@@ -864,13 +941,13 @@ install_z2r() {
   fi
 
   echo "Пробую основное зеркало (GitHub)..."
-  if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" && sh z2r ); then
+  if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" ) && run_z2r_installer_unattended /tmp/z2r; then
     echo "z2r установлен (основное зеркало)."
     return 0
   fi
 
   echo "Основное зеркало недоступно, пробую резервное (git.px.rkn.quest)..."
-  if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && sh /opt/z2r; then
+  if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && run_z2r_installer_unattended /opt/z2r; then
     echo "z2r установлен (резервное зеркало)."
     return 0
   fi
@@ -987,7 +1064,7 @@ install_z2r_offline() {
   fi
 
   echo "Запускаю установщик из офлайн-архива ($z2r_dir)..."
-  ( cd "$z2r_dir" && sh z2r )
+  run_z2r_installer_unattended "$z2r_dir/z2r"
   local rc=$?
   echo "Оставил распакованное в $workdir (можно удалить после проверки: rm -rf $workdir)."
   return $rc
