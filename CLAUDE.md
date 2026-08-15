@@ -97,6 +97,26 @@ project names here — same public-repo constraint as README.md.
   (uninstall), same on-demand-clone pattern as item 14's Discord bot.
 - Scaffold-only as of this writing — mutation/UCB/crossover logic not yet
   ported into it.
+- Production panel host (NETH-4) has its own `Zenith/` checkout on `main`,
+  independently ahead in places (its own unrelated commits, e.g.
+  `create_remote_db_user.sh` work) but *behind* our feature branches —
+  migrations beyond `002_node_self_report.sql` (e.g.
+  `003_promoted_strategy.sql`) are NOT there until someone deliberately
+  pulls/merges them. Meanwhile `z0r-panel` on that same host DOES run our
+  feature branch (`claude/realtime-db-api`) — the two sibling repos on one
+  box can be on divergent lineages, don't assume they match. Live case
+  2026-08-14: panel code shipped a `db.py` query referencing
+  `genome_scores.promoted_strategy` before the migration reached that
+  host's MySQL — instant 500 on `/overview` (`Unknown column`). Before
+  shipping any panel change that depends on a new column/table, remember
+  the migration has to independently reach the box's MySQL — a panel git
+  pull does not do that by itself.
+- MySQL on that host runs in Docker (`zenith-mysql` container, compose
+  service name `mysql`), not a host package — there is no `mysql` CLI on
+  the host itself. Run SQL via
+  `docker compose exec -T -e MYSQL_PWD="$MYSQL_PASSWORD" mysql mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -e "..."`
+  from `$ZENITH_DIR` (same pattern as `z0r`'s own `zenith_mysql_query()`),
+  not a bare `mysql -u... -p...` — that fails with "команда не найдена".
 
 ## z2r core install — GitHub is not reliable from every provider
 
