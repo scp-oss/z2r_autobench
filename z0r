@@ -1741,7 +1741,14 @@ manage_panel() {
       # main.py, не read-only, так что команда сужена до конкретного
       # venv/main.py с фиксированными флагами, не общий root-шелл.
       local sudoers_file="/etc/sudoers.d/zenith-panel"
-      local sudoers_run_cmd="$ZENITH_DIR/orchestrator/venv/bin/python3 main.py --profile * --rounds * *"
+      # ОДИН завершающий "*", не "* *" -- sudoers-glob матчится против всей
+      # командной строки, "* *" требует буквальный пробел + ещё один токен
+      # ПОСЛЕ номера раундов, так что без --domain (самый обычный случай --
+      # поле в форме необязательное) команда не матчится вообще, sudo -n
+      # тихо требует пароль ("sudo: требуется указать пароль" в UI, живой
+      # инцидент 2026-08-15). Один хвостовой "*" матчит и "--rounds 20"
+      # (пусто после), и "--rounds 20 --domain host/path" (* жадный).
+      local sudoers_run_cmd="$ZENITH_DIR/orchestrator/venv/bin/python3 main.py --profile * --rounds *"
       local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_run_cmd"
       if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
         echo "$sudoers_line" > "$sudoers_file"
