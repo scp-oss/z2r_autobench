@@ -1721,6 +1721,15 @@ manage_panel() {
       if ! id zenith-panel >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /usr/sbin/nologin zenith-panel
       fi
+      # run_logs/ -- логи прогонов, запущенных кнопкой /controls/run (см.
+      # z0r-panel/runner.py) -- панель работает от zenith-panel, а сам
+      # каталог $PANEL_DIR обычно принадлежит тому, кто клонировал репозиторий
+      # (root/deploy-юзер), не zenith-panel -- без явного chown здесь
+      # os.makedirs() в runner.py падает PermissionError при первом же
+      # запуске (живой инцидент 2026-08-15). Идемпотентно -- пересоздание
+      # не портит уже существующие логи.
+      mkdir -p "$PANEL_DIR/run_logs"
+      chown zenith-panel:zenith-panel "$PANEL_DIR/run_logs"
       # Узкий sudoers — set_strategy_cli.sh только get/max, НИКОГДА set
       # (панель ничего не применяет в боевой /opt/zapret2 сама, см. её
       # README "Границы ответственности панели"). Отдельная строка ниже —
