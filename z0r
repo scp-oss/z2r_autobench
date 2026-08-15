@@ -1675,9 +1675,57 @@ uninstall_voice_bot() {
   esac
 }
 
+# run_logs/ + sudoers для zenith-panel -- вынесено из ветки первого клона
+# (case NONE) manage_panel и вызывается ЕЩЁ И безусловно в начале
+# manage_panel при каждом заходе в пункт 15, а не только при первой
+# установке -- иначе апдейт z0r-скрипта, принёсший новое правило sudoers
+# (или починку старого), никогда не долетает до уже установленной панели:
+# ON/OFF-ветки только дёргают systemd, старый файл в /etc/sudoers.d/ так
+# и остаётся лежать нетронутым. Живой инцидент 2026-08-15: правило чинили
+# дважды (сначала write-доступ к run_logs, потом баг в самом sudoers-glob),
+# и оба раза пункт 15 -> "ON/OFF" ничего не обновлял, пока это не стало
+# отдельной идемпотентной функцией, вызываемой всегда.
+ensure_panel_runtime_grants() {
+  [ -d "$PANEL_DIR" ] || return 0
+  id zenith-panel >/dev/null 2>&1 || return 0
+
+  # см. z0r-panel/runner.py -- панель работает от zenith-panel, а сам
+  # $PANEL_DIR обычно принадлежит тому, кто клонировал репозиторий
+  # (root/deploy-юзер), не zenith-panel -- без chown os.makedirs() в
+  # runner.py падает PermissionError на первом же запуске.
+  mkdir -p "$PANEL_DIR/run_logs"
+  chown zenith-panel:zenith-panel "$PANEL_DIR/run_logs"
+
+  # Узкий sudoers — set_strategy_cli.sh только get/max, НИКОГДА set
+  # (панель ничего не применяет в боевой /opt/zapret2 сама, см. её
+  # README "Границы ответственности панели"). Отдельная команда ниже —
+  # для кнопки "запустить подбор" на /controls (см. z0r-panel/runner.py):
+  # она стартует Zenith'овский orchestrator/main.py от root'а (сам
+  # main.py этого требует — песочница, см. Zenith README), но это другая
+  # песочница (zenith-sandbox), не боевой zapret2.config — тем не менее
+  # это ИСПОЛНЕНИЕ произвольного питон-кода того же main.py, не
+  # read-only, так что команда сужена до конкретного venv/main.py с
+  # фиксированными флагами, не общий root-шелл.
+  local sudoers_file="/etc/sudoers.d/zenith-panel"
+  # ОДИН завершающий "*", не "* *" -- sudoers-glob матчится против всей
+  # командной строки, "* *" требует буквальный пробел + ещё один токен
+  # ПОСЛЕ номера раундов, так что без --domain (самый обычный случай --
+  # поле в форме необязательное) команда не матчится вообще, sudo -n
+  # тихо требует пароль. Один хвостовой "*" матчит и "--rounds 20"
+  # (пусто после), и "--rounds 20 --domain host/path" (* жадный).
+  local sudoers_run_cmd="$ZENITH_DIR/orchestrator/venv/bin/python3 main.py --profile * --rounds *"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_run_cmd"
+  if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
+    echo "$sudoers_line" > "$sudoers_file"
+    chmod 440 "$sudoers_file"
+    echo "Добавлен/обновлён $sudoers_file."
+  fi
+}
+
 manage_panel() {
   local st; st="$(get_panel_status)"
   echo "web_panel: $st"
+  ensure_panel_runtime_grants
   case "$st" in
     NONE)
       read -re -p "Склонировать и подготовить z0r-panel в $PANEL_DIR? [y/N]: " ans
@@ -1721,40 +1769,7 @@ manage_panel() {
       if ! id zenith-panel >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /usr/sbin/nologin zenith-panel
       fi
-      # run_logs/ -- логи прогонов, запущенных кнопкой /controls/run (см.
-      # z0r-panel/runner.py) -- панель работает от zenith-panel, а сам
-      # каталог $PANEL_DIR обычно принадлежит тому, кто клонировал репозиторий
-      # (root/deploy-юзер), не zenith-panel -- без явного chown здесь
-      # os.makedirs() в runner.py падает PermissionError при первом же
-      # запуске (живой инцидент 2026-08-15). Идемпотентно -- пересоздание
-      # не портит уже существующие логи.
-      mkdir -p "$PANEL_DIR/run_logs"
-      chown zenith-panel:zenith-panel "$PANEL_DIR/run_logs"
-      # Узкий sudoers — set_strategy_cli.sh только get/max, НИКОГДА set
-      # (панель ничего не применяет в боевой /opt/zapret2 сама, см. её
-      # README "Границы ответственности панели"). Отдельная строка ниже —
-      # для кнопки "запустить подбор" на /controls (см. z0r-panel/
-      # runner.py): она стартует Zenith'овский orchestrator/main.py от
-      # root'а (сам main.py этого требует — песочница, см. Zenith README),
-      # но это другая песочница (zenith-sandbox), не боевой zapret2.config
-      # — тем не менее это ИСПОЛНЕНИЕ произвольного питон-кода того же
-      # main.py, не read-only, так что команда сужена до конкретного
-      # venv/main.py с фиксированными флагами, не общий root-шелл.
-      local sudoers_file="/etc/sudoers.d/zenith-panel"
-      # ОДИН завершающий "*", не "* *" -- sudoers-glob матчится против всей
-      # командной строки, "* *" требует буквальный пробел + ещё один токен
-      # ПОСЛЕ номера раундов, так что без --domain (самый обычный случай --
-      # поле в форме необязательное) команда не матчится вообще, sudo -n
-      # тихо требует пароль ("sudo: требуется указать пароль" в UI, живой
-      # инцидент 2026-08-15). Один хвостовой "*" матчит и "--rounds 20"
-      # (пусто после), и "--rounds 20 --domain host/path" (* жадный).
-      local sudoers_run_cmd="$ZENITH_DIR/orchestrator/venv/bin/python3 main.py --profile * --rounds *"
-      local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_run_cmd"
-      if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
-        echo "$sudoers_line" > "$sudoers_file"
-        chmod 440 "$sudoers_file"
-        echo "Добавлен/обновлён $sudoers_file."
-      fi
+      ensure_panel_runtime_grants
 
       echo ""
       echo "Склонирован и готов к настройке. Перед включением (пункт 15 ещё раз):"
