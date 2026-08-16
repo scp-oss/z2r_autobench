@@ -1706,7 +1706,6 @@ ensure_panel_runtime_grants() {
   # это ИСПОЛНЕНИЕ произвольного питон-кода того же main.py, не
   # read-only, так что команда сужена до конкретного venv/main.py с
   # фиксированными флагами, не общий root-шелл.
-  local sudoers_file="/etc/sudoers.d/zenith-panel"
   # ОДИН завершающий "*", не "* *" -- sudoers-glob матчится против всей
   # командной строки, "* *" требует буквальный пробел + ещё один токен
   # ПОСЛЕ номера раундов, так что без --domain (самый обычный случай --
@@ -1714,7 +1713,21 @@ ensure_panel_runtime_grants() {
   # тихо требует пароль. Один хвостовой "*" матчит и "--rounds 20"
   # (пусто после), и "--rounds 20 --domain host/path" (* жадный).
   local sudoers_run_cmd="$ZENITH_DIR/orchestrator/venv/bin/python3 main.py --profile * --rounds *"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_run_cmd"
+
+  # Старт/стоп/статус/лог autotune-daemon.service с /controls (см.
+  # z0r-panel/daemon_ctl.py) -- ровно то же самое, что человек делает
+  # руками через пункт 13 этого же z0r-скрипта, просто кнопкой вместо
+  # SSH. Команды фиксированы буквально (никаких "*") -- меньше
+  # привилегий, чем даже у запуска main.py выше, никакого произвольного
+  # выбора юнита или доп. флагов. Абсолютные пути резолвим тут же -- в
+  # sudoers нельзя полагаться на PATH, а хардкодить /usr/bin вслепую
+  # рискованно (не везде одинаково).
+  local systemctl_bin; systemctl_bin="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
+  local journalctl_bin; journalctl_bin="$(command -v journalctl 2>/dev/null || echo /usr/bin/journalctl)"
+  local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
+
+  local sudoers_file="/etc/sudoers.d/zenith-panel"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_run_cmd, $sudoers_daemon_cmds"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"
