@@ -1696,16 +1696,34 @@ ensure_panel_runtime_grants() {
   mkdir -p "$PANEL_DIR/run_logs"
   chown zenith-panel:zenith-panel "$PANEL_DIR/run_logs"
 
-  # Узкий sudoers — set_strategy_cli.sh только get/max, НИКОГДА set
-  # (панель ничего не применяет в боевой /opt/zapret2 сама, см. её
-  # README "Границы ответственности панели"). Отдельная команда ниже —
-  # для кнопки "запустить подбор" на /controls (см. z0r-panel/runner.py):
-  # она стартует Zenith'овский orchestrator/main.py от root'а (сам
-  # main.py этого требует — песочница, см. Zenith README), но это другая
-  # песочница (zenith-sandbox), не боевой zapret2.config — тем не менее
-  # это ИСПОЛНЕНИЕ произвольного питон-кода того же main.py, не
-  # read-only, так что команда сужена до конкретного venv/main.py с
-  # фиксированными флагами, не общий root-шелл.
+  # Абсолютные пути резолвим тут же -- в sudoers нельзя полагаться на
+  # PATH, а хардкодить /usr/bin вслепую рискованно (не везде одинаково).
+  local systemctl_bin; systemctl_bin="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
+  local journalctl_bin; journalctl_bin="$(command -v journalctl 2>/dev/null || echo /usr/bin/journalctl)"
+
+  # Sudoers — get/max были принципиально read-only с самого начала (см.
+  # README панели "Границы ответственности", то поколение текста). Живой
+  # запрос 2026-08-15 изменил это осознанно: /controls теперь умеет и
+  # set_strategy_cli.sh set, и restart zapret2 -- то же самое ручное
+  # переключение стратегии, что человек делает через z0r пункт 21, просто
+  # кнопкой (README/докстринги панели обновлены тем же коммитом).
+  local sudoers_set_cmd="/usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh set *"
+  # restart -- ОБЯЗАТЕЛЬНЫЙ шаг после set (set_strategy_cli.sh set сам по
+  # себе не горячее применение, см. promote.py "circular_locked держит
+  # max strategy= в памяти процесса без TTL" -- живой инцидент
+  # 2026-08-07). show -- read-only, чтобы панель могла показать
+  # ActiveEnterTimestamp и подтвердить, что restart реально произошёл
+  # только что, а не тихо не сработал.
+  local sudoers_zapret_cmds="$systemctl_bin restart zapret2, $systemctl_bin show zapret2 --property=ActiveEnterTimestamp,SubState"
+
+  # Отдельная команда ниже — для кнопки "запустить подбор" на /controls
+  # (см. z0r-panel/runner.py): она стартует Zenith'овский
+  # orchestrator/main.py от root'а (сам main.py этого требует —
+  # песочница, см. Zenith README), но это другая песочница
+  # (zenith-sandbox), не боевой zapret2.config — тем не менее это
+  # ИСПОЛНЕНИЕ произвольного питон-кода того же main.py, не read-only,
+  # так что команда сужена до конкретного venv/main.py с фиксированными
+  # флагами, не общий root-шелл.
   # ОДИН завершающий "*", не "* *" -- sudoers-glob матчится против всей
   # командной строки, "* *" требует буквальный пробел + ещё один токен
   # ПОСЛЕ номера раундов, так что без --domain (самый обычный случай --
@@ -1719,15 +1737,11 @@ ensure_panel_runtime_grants() {
   # руками через пункт 13 этого же z0r-скрипта, просто кнопкой вместо
   # SSH. Команды фиксированы буквально (никаких "*") -- меньше
   # привилегий, чем даже у запуска main.py выше, никакого произвольного
-  # выбора юнита или доп. флагов. Абсолютные пути резолвим тут же -- в
-  # sudoers нельзя полагаться на PATH, а хардкодить /usr/bin вслепую
-  # рискованно (не везде одинаково).
-  local systemctl_bin; systemctl_bin="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
-  local journalctl_bin; journalctl_bin="$(command -v journalctl 2>/dev/null || echo /usr/bin/journalctl)"
+  # выбора юнита или доп. флагов.
   local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
 
   local sudoers_file="/etc/sudoers.d/zenith-panel"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_run_cmd, $sudoers_daemon_cmds"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"
