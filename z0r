@@ -1714,7 +1714,13 @@ ensure_panel_runtime_grants() {
   # 2026-08-07). show -- read-only, чтобы панель могла показать
   # ActiveEnterTimestamp и подтвердить, что restart реально произошёл
   # только что, а не тихо не сработал.
-  local sudoers_zapret_cmds="$systemctl_bin restart zapret2, $systemctl_bin show zapret2 --property=ActiveEnterTimestamp,SubState"
+  # ДВА отдельных --property=, не один через запятую -- sudoers режет
+  # список команд ПО запятой даже внутри аргумента (живой инцидент
+  # 2026-08-15: "--property=ActiveEnterTimestamp,SubState" сломало разбор
+  # всего файла целиком -- "ожидался полный путь" на "SubState", и как
+  # следствие NOPASSWD не применялся вообще ни для одной команды в файле,
+  # не только для этой).
+  local sudoers_zapret_cmds="$systemctl_bin restart zapret2, $systemctl_bin show zapret2 --property=ActiveEnterTimestamp --property=SubState"
 
   # Отдельная команда ниже — для кнопки "запустить подбор" на /controls
   # (см. z0r-panel/runner.py): она стартует Zenith'овский
