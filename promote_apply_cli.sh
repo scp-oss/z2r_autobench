@@ -7,12 +7,22 @@
 # рискованная операция во всей цепочке (правит боевой файл без
 # присмотра человека), поэтому:
 #
-#   - блок профиля находится ИСКЛЮЧИТЕЛЬНО по точному построчному
-#     совпадению строк заголовка (--filter-tcp=/--hostlist=/... --
-#     передаётся вызывающим, обычно взято 1:1 из Zenith'овского
-#     genome.py::PROFILE_FILTERS, "сверено построчно с
-#     /opt/zapret2/config") -- НЕ по имени профиля, НЕ по позиции в
-#     файле, так надёжнее всего не перепутать один профиль с другим;
+#   - блок находится ОДНИМ из двух способов, вызывающий выбирает
+#     явно (см. формат spec ниже) -- НЕ по имени профиля, НЕ по позиции
+#     в файле:
+#       HEADER -- точное построчное совпадение заголовка (--filter-tcp=/
+#         --hostlist=/... -- для профилей с САМОДОСТАТОЧНЫМ блоком,
+#         strategy=N лежат прямо в нём);
+#       TEMPLATE -- точное совпадение одной строки "--template=<имя>" --
+#         для профилей, которые сами лишь --import=<имя> общий шаблон
+#         (несколько профилей могут делить один и тот же шаблон, см.
+#         живой пример 2026-08-16: YT_TLS и RKN_TLS оба --import=
+#         z2r_tcp_tls_common -- их strategy=N физически лежат В ШАБЛОНЕ,
+#         не в собственном маленьком блоке-диспетчере профиля, у
+#         которого там только circular_locked:key=N + --import=, ни
+#         одной строки strategy= -- HEADER-режим на таком блоке
+#         корректно откажет ("нет ни одной строки strategy="), но
+#         писать всё равно нужно в шаблон, не в диспетчер);
 #   - конец блока -- первая строка "--new" ПОСЛЕ найденного заголовка
 #     (--new разделяет НЕЗАВИСИМЫЕ блоки профилей, см. CLAUDE.md z2r_autobench
 #     "zapret1 vs zapret2 -- do not mix syntax");
@@ -38,14 +48,14 @@
 #   promote_apply_cli.sh apply <after_strategy> <config_path> <backup_dir> < spec
 #   promote_apply_cli.sh restore <backup_path> <config_path>
 #
-# apply -- spec (stdin), простой построчный формат:
-#   HEADER
-#   <строка заголовка блока 1>
-#   <строка заголовка блока 2>
-#   ...
-#   BODY
+# apply -- spec (stdin), простой построчный формат, ДВА варианта:
+#   HEADER                              |  TEMPLATE
+#   <строка заголовка блока 1>          |  <имя шаблона, напр. z2r_tcp_tls_common>
+#   <строка заголовка блока 2>          |  BODY
+#   ...                                 |  <строка тела 1>
+#   BODY                                |  ...
 #   <строка тела 1 -- БЕЗ :strategy=, скрипт сам допишет>
-#   <строка тела 2, если геном много строчный>
+#   <строка тела 2, если геном многострочный>
 #   ...
 # stdout при успехе: одна строка -- присвоенный strategy=N.
 # stderr: путь к backup при успехе, диагностика при ошибке.
@@ -102,21 +112,39 @@ fi
 
 header=()
 body=()
+template_name=""
+spec_mode=""
 section=""
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    HEADER) section=header; continue ;;
+    HEADER) spec_mode="header"; section=header; continue ;;
+    TEMPLATE) spec_mode="template"; section=template; continue ;;
     BODY) section=body; continue ;;
   esac
   case "$section" in
     header) header+=("$line") ;;
+    template)
+      if [ -n "$template_name" ]; then
+        echo "TEMPLATE-секция ожидает РОВНО одну строку (имя шаблона), получена вторая: '$line'" >&2
+        exit 1
+      fi
+      template_name="$line"
+      ;;
     body) body+=("$line") ;;
-    *) echo "Строка до маркера HEADER: '$line' -- неверный формат stdin" >&2; exit 1 ;;
+    *) echo "Строка до маркера HEADER/TEMPLATE: '$line' -- неверный формат stdin" >&2; exit 1 ;;
   esac
 done
 
-if [ "${#header[@]}" -eq 0 ]; then
+if [ "$spec_mode" != "header" ] && [ "$spec_mode" != "template" ]; then
+  echo "spec должен начинаться с HEADER или TEMPLATE" >&2
+  exit 1
+fi
+if [ "$spec_mode" = "header" ] && [ "${#header[@]}" -eq 0 ]; then
   echo "Пустой HEADER -- нечем искать блок профиля" >&2
+  exit 1
+fi
+if [ "$spec_mode" = "template" ] && [ -z "$template_name" ]; then
+  echo "Пустой TEMPLATE -- не указано имя шаблона" >&2
   exit 1
 fi
 if [ "${#body[@]}" -eq 0 ]; then
@@ -127,32 +155,48 @@ fi
 mapfile -t config_lines < "$config_path"
 total_lines="${#config_lines[@]}"
 
-# Найти СТРОГО контигуальное вхождение всех строк header по порядку --
-# начало блока профиля. Якорится по первой строке заголовка, дальше
-# построчно сверяет остаток.
 start_idx=-1
-first_header_line="${header[0]}"
-for ((i = 0; i < total_lines; i++)); do
-  [ "${config_lines[$i]}" = "$first_header_line" ] || continue
-  match=1
-  for ((j = 1; j < ${#header[@]}; j++)); do
-    if [ "${config_lines[$((i + j))]:-}" != "${header[$j]}" ]; then
-      match=0
+anchor_len=1
+if [ "$spec_mode" = "header" ]; then
+  # Найти СТРОГО контигуальное вхождение всех строк header по порядку --
+  # начало блока профиля. Якорится по первой строке заголовка, дальше
+  # построчно сверяет остаток.
+  anchor_len="${#header[@]}"
+  first_header_line="${header[0]}"
+  for ((i = 0; i < total_lines; i++)); do
+    [ "${config_lines[$i]}" = "$first_header_line" ] || continue
+    match=1
+    for ((j = 1; j < ${#header[@]}; j++)); do
+      if [ "${config_lines[$((i + j))]:-}" != "${header[$j]}" ]; then
+        match=0
+        break
+      fi
+    done
+    if [ "$match" -eq 1 ]; then
+      start_idx="$i"
       break
     fi
   done
-  if [ "$match" -eq 1 ]; then
-    start_idx="$i"
-    break
+  if [ "$start_idx" -lt 0 ]; then
+    echo "Заголовок блока не найден в $config_path -- профиль переехал в файле или переданный HEADER разошёлся с реальным конфигом. Отказ, ничего не менял." >&2
+    exit 1
   fi
-done
-
-if [ "$start_idx" -lt 0 ]; then
-  echo "Заголовок блока не найден в $config_path -- профиль переехал в файле или переданный HEADER разошёлся с реальным конфигом (см. Zenith genome.py::PROFILE_FILTERS). Отказ, ничего не менял." >&2
-  exit 1
+else
+  # TEMPLATE -- один якорь, буквальная строка "--template=<имя>".
+  template_line="--template=${template_name}"
+  for ((i = 0; i < total_lines; i++)); do
+    if [ "${config_lines[$i]}" = "$template_line" ]; then
+      start_idx="$i"
+      break
+    fi
+  done
+  if [ "$start_idx" -lt 0 ]; then
+    echo "Строка '$template_line' не найдена в $config_path -- имя шаблона неверное или конфиг изменился. Отказ, ничего не менял." >&2
+    exit 1
+  fi
 fi
 
-block_start=$((start_idx + ${#header[@]}))
+block_start=$((start_idx + anchor_len))
 
 # Конец блока -- первая строка "--new" (ровно, без хвостовых пробелов)
 # после block_start, либо конец файла, если это последний блок.
