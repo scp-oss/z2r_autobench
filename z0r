@@ -326,6 +326,21 @@ get_daemon_status() {
   systemctl is-active --quiet autotune-daemon 2>/dev/null && echo "ON" || echo "OFF"
 }
 
+# Автономный режим Zenith (генерация + автопродвижение БЕЗ человека) --
+# см. zenith_autonomy_menu(). Оба юнита живут В РЕПОЗИТОРИИ Zenith
+# ($ZENITH_DIR/zenith-autorun.service/zenith-promoter.service), z0r их
+# только копирует+включает, той же схемой, что zenith-panel.service из
+# z0r-panel (см. manage_panel).
+get_zenith_autorun_status() {
+  [ -f /etc/systemd/system/zenith-autorun.service ] || { echo "NONE"; return; }
+  systemctl is-active --quiet zenith-autorun 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+get_zenith_promoter_status() {
+  [ -f /etc/systemd/system/zenith-promoter.service ] || { echo "NONE"; return; }
+  systemctl is-active --quiet zenith-promoter 2>/dev/null && echo "ON" || echo "OFF"
+}
+
 get_voice_bot_status() {
   [ -d "$VOICE_BOT_DIR" ] || { echo "NONE"; return; }
   systemctl is-active --quiet "$VOICE_BOT_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
@@ -1451,6 +1466,7 @@ zenith_menu() {
     echo "  1) Запуск/Стоп"
     echo "  2) Стратегии для текущего провайдера"
     echo "  3) Стратегии по профилям"
+    echo "  4) Автономный режим (генерация + автопродвижение БЕЗ человека)"
     echo "  0) Назад в главное меню"
     echo ""
     read -re -p "Zenith > " zchoice
@@ -1458,6 +1474,87 @@ zenith_menu() {
       1) zenith_toggle ;;
       2) zenith_show_provider_strategies ;;
       3) zenith_profiles_submenu ;;
+      4) zenith_autonomy_menu ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
+# Копирует .service из $ZENITH_DIR (репозиторий Zenith сам их содержит,
+# та же схема, что zenith-panel.service в z0r-panel) в systemd и
+# перечитывает юниты, только если файл новый/изменился -- идемпотентно,
+# как ensure_panel_runtime_grants.
+install_zenith_service() {
+  local unit_name="$1"
+  local unit_src="$ZENITH_DIR/${unit_name}.service"
+  local unit_dst="/etc/systemd/system/${unit_name}.service"
+  if [ ! -f "$unit_src" ]; then
+    echo "$unit_src не найден -- обнови Zenith (git pull в $ZENITH_DIR)." >&2
+    return 1
+  fi
+  if [ ! -f "$unit_dst" ] || ! cmp -s "$unit_src" "$unit_dst"; then
+    cp -f "$unit_src" "$unit_dst"
+    systemctl daemon-reload
+    echo "Установлен/обновлён $unit_dst."
+  fi
+  return 0
+}
+
+# zenith-autorun.service (периодическая генерация кандидатов) +
+# zenith-promoter.service (автопродвижение в /opt/zapret2/config БЕЗ
+# человека, см. Zenith/README.md "Автономный режим") -- оба
+# НЕЗАВИСИМЫ от z0r-panel, читай п.4 докстрин выше. Панель, если
+# установлена, просто дублирует start/stop/log поверх ЭТИХ ЖЕ юнитов.
+zenith_autonomy_menu() {
+  while true; do
+    local ar_st pr_st
+    ar_st="$(get_zenith_autorun_status)"
+    pr_st="$(get_zenith_promoter_status)"
+    echo ""
+    echo "=== Автономный режим Zenith ==="
+    echo "  1) zenith-autorun (генерация кандидатов) $(color_tag "$ar_st")"
+    echo "  2) zenith-promoter (автопродвижение в прод) $(color_tag "$pr_st")"
+    echo "  3) Лог zenith-autorun (journalctl -f, Ctrl+C для выхода)"
+    echo "  4) Лог zenith-promoter (journalctl -f, Ctrl+C для выхода)"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "Автономный режим > " achoice
+    case "$achoice" in
+      1)
+        install_zenith_service zenith-autorun || continue
+        if [ "$ar_st" = "ON" ]; then
+          systemctl disable --now zenith-autorun
+          echo "zenith-autorun остановлен и отключён."
+        else
+          systemctl enable --now zenith-autorun
+          sleep 1
+          systemctl status zenith-autorun --no-pager
+        fi
+        ;;
+      2)
+        install_zenith_service zenith-promoter || continue
+        if [ "$pr_st" = "ON" ]; then
+          systemctl disable --now zenith-promoter
+          echo "zenith-promoter остановлен и отключён."
+        else
+          echo "!!! zenith-promoter пишет /opt/zapret2/config и рестартует zapret2"
+          echo "БЕЗ подтверждения человека на каждом срабатывании. Перед первым"
+          echo "включением на этом сервере рекомендуется проверить руками:"
+          echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 auto_promoter.py --profile <PROFILE>"
+          read -re -p "Включить zenith-promoter сейчас? [y/N]: " ans
+          case "$ans" in
+            y|Y)
+              systemctl enable --now zenith-promoter
+              sleep 1
+              systemctl status zenith-promoter --no-pager
+              ;;
+            *) echo "Отмена." ;;
+          esac
+        fi
+        ;;
+      3) journalctl -u zenith-autorun -f ;;
+      4) journalctl -u zenith-promoter -f ;;
       0|q|Q|"") return 0 ;;
       *) echo "Неизвестный выбор." ;;
     esac
@@ -1606,6 +1703,16 @@ uninstall_zenith() {
   case "$ans" in
     y|Y)
       stop_zenith_sandbox_if_running
+      # Автономный режим (см. zenith_autonomy_menu) — отдельные systemd-юниты,
+      # не завязаны на docker compose, останавливаем/удаляем явно, иначе
+      # zenith-promoter.service продолжит дёргать уже удалённый ZENITH_DIR.
+      for unit in zenith-autorun zenith-promoter; do
+        if [ -f "/etc/systemd/system/${unit}.service" ]; then
+          systemctl disable --now "$unit" 2>/dev/null || true
+          rm -f "/etc/systemd/system/${unit}.service"
+        fi
+      done
+      systemctl daemon-reload 2>/dev/null || true
       [ "$(zenith_db_mode)" = "api" ] || ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
       rm -rf "$ZENITH_DIR"
       echo "Zenith удалён."
@@ -1746,17 +1853,21 @@ ensure_panel_runtime_grants() {
   # выбора юнита или доп. флагов.
   local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
 
-  # Автопродвижение БЕЗ участия человека (см. z0r-panel/promoter.py) --
-  # ОДИН трейлинг "*" покрывает и "apply <after_strategy> <config_path>
-  # <backup_dir>", и "restore <backup_path> <config_path>" (та же логика
-  # трейлинг-wildcard'а, что и у run_cmd выше -- разное число токенов в
-  # разных режимах). Сама валидация (какой блок, какой backup, откат при
-  # неудаче) -- внутри promote_apply_cli.sh, не в sudoers -- см. её
-  # докстринг.
-  local sudoers_promote_cmd="/usr/bin/bash $INSTALL_DIR/promote_apply_cli.sh *"
+  # Периодический автозапуск (zenith-autorun.service) и автопродвижение
+  # (zenith-promoter.service) БЕЗ участия человека -- ЖИВУТ КАК
+  # НЕЗАВИСИМЫЕ systemd-юниты (см. Zenith/README.md "Автономный режим"),
+  # НЕ внутри процесса панели -- по прямому запросу "панель это модуль,
+  # её может и не быть, функционал должен быть в CLI и без панели".
+  # Панель, если установлена, только start/stop/status/log поверх ЭТИХ
+  # ЖЕ юнитов (см. z0r-panel/autorun_ctl.py, promoter_ctl.py) -- та же
+  # узкая схема, что уже у autotune-daemon выше, никакого прямого
+  # доступа к promote_apply_cli.sh/main.py из панели для этой части
+  # (тот доступ у панели остаётся ТОЛЬКО для ручных кнопок -- "запустить
+  # подбор" разово и "Ручное переключение стратегии", см. выше).
+  local sudoers_zenith_units_cmds="$systemctl_bin start zenith-autorun, $systemctl_bin stop zenith-autorun, $systemctl_bin is-active zenith-autorun, $journalctl_bin -u zenith-autorun -n 200 --no-pager, $systemctl_bin start zenith-promoter, $systemctl_bin stop zenith-promoter, $systemctl_bin is-active zenith-promoter, $journalctl_bin -u zenith-promoter -n 200 --no-pager"
 
   local sudoers_file="/etc/sudoers.d/zenith-panel"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_promote_cmd"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"
