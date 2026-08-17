@@ -87,6 +87,39 @@ project names here — same public-repo constraint as README.md.
   just DPI/ISP blocking. Prefer CDN/static-asset endpoints over ordinary
   human-facing sites when picking new test targets.
 
+## Zenith-TG (scp-oss/Zenith-TG)
+
+- Separate repo: transparent Telegram access, not a zapret2 desync
+  profile — tried that first (`zapret2/TG_MTPROTO.block.conf` still in
+  that repo for reference), confirmed live on NETH-4 that it does
+  *not* help here: the block there is a curated IP blacklist of
+  specific well-known Telegram DC addresses (SYN itself never
+  completes), not a DPI signature `--lua-desync=` could fool. A
+  different, less-public IP in the same `/20` (`149.154.167.220` —
+  `Flowseal/tg-ws-proxy`'s own default `dc_redirects` target) answers
+  cleanly instead.
+- What actually works: `relay/transparent_relay.py` vendors
+  `tg-ws-proxy`'s relay machinery (`relay/vendor/`, MIT, unmodified —
+  WS pool to `.220`, Cloudflare-domain/worker fallback) but replaces
+  its client-facing connector. MTProxy's secret is baked into the key
+  derivation itself (`SHA256(prekey+secret)`), so a real MTProxy can
+  never accept unconfigured clients — this connector instead decodes
+  the incoming init using the same raw-key, no-secret semantics a
+  genuine direct-connect Telegram client already uses. Combined with
+  `iptables REDIRECT` on the Telegram CIDR list
+  (`relay/setup_redirect.sh`), the whole thing is transparent: no
+  MTProxy config in the client app, works for anything routing through
+  the box (including VLESS-tunneled clients — Xray's outbound is an
+  ordinary local `connect()`, so it hits the same `OUTPUT` chain).
+  Confirmed working end-to-end on NETH-4 with an unmodified Telegram
+  client over the existing VLESS tunnel.
+- Installed via z0r menu item 24 (manage)/25 (uninstall), same
+  on-demand-clone pattern as Zenith's 22/23 — but note its shipped
+  `relay/tg-transparent-relay.service` hardcodes `/opt/Zenith-TG`
+  (how it was first deployed by hand); `manage_tg_relay()` in `z0r`
+  `sed`-rewrites that path to the real `$TGRELAY_DIR` before installing
+  the unit, don't `cp` it as-is like `manage_panel` does.
+
 ## Zenith (scp-oss/zenith)
 
 - Separate repo/service: strategy *generator* (mutation/crossover/UCB over
