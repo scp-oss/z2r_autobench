@@ -194,12 +194,27 @@ if [ -n "$BEST_BLOB" ]; then
   echo "Применяю и оставляю его."
   apply_blob "$BEST_BLOB"
   restart_zapret2
-  # финальный дозор стратегиями уже сделан внутри score_blob() для победителя,
-  # но т.к. мы перебирали кандидатов по порядку, а не переоценивали победителя
-  # последним — прогоняем ещё раз для гарантии актуальных locked.tsv.
-  NIGHT_BUDGET_SECONDS="$PER_BLOB_BUDGET"
-  CURRENT_CANDIDATE="$BEST_BLOB(final)"
-  score_blob
+  # В отличие от основного цикла перебора выше (строки 174-178), этот
+  # финальный restart раньше не проверялся вообще -- если он падал на том
+  # же документированном qnum-race (см. restart_zapret2()), скрипт тихо
+  # шёл дальше в score_blob() как ни в чём не бывало, оставляя прод БЕЗ
+  # запущенного nfqws2 и без отката к backup, снятому в начале прогона
+  # (найдено при аудите перед деплоем на МТС 2026-08-17).
+  if ! zapret2_running; then
+    echo "!!! zapret2 не поднялся после финального применения $BEST_BLOB -- откатываюсь на backup ($CFG_BACKUP_DIR/config.${RUN_TS}.bak)." >&2
+    cp -p "$CFG_BACKUP_DIR/config.${RUN_TS}.bak" "$CFG"
+    restart_zapret2
+    if ! zapret2_running; then
+      echo "!!! zapret2 не поднялся даже после отката на backup -- нужно вмешательство человека." >&2
+    fi
+  else
+    # финальный дозор стратегиями уже сделан внутри score_blob() для победителя,
+    # но т.к. мы перебирали кандидатов по порядку, а не переоценивали победителя
+    # последним — прогоняем ещё раз для гарантии актуальных locked.tsv.
+    NIGHT_BUDGET_SECONDS="$PER_BLOB_BUDGET"
+    CURRENT_CANDIDATE="$BEST_BLOB(final)"
+    score_blob
+  fi
 else
   echo "Ни один кандидат не превзошёл baseline (${CURRENT_BLOB_FILE:-?}, score=$BASELINE_SCORE). Откатываюсь."
   cp -p "$CFG_BACKUP_DIR/config.${RUN_TS}.bak" "$CFG"

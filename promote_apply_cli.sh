@@ -178,10 +178,14 @@ total_lines="${#config_lines[@]}"
 
 start_idx=-1
 anchor_len=1
+anchor_matches=()
 if [ "$spec_mode" = "header" ]; then
   # Найти СТРОГО контигуальное вхождение всех строк header по порядку --
-  # начало блока профиля. Якорится по первой строке заголовка, дальше
-  # построчно сверяет остаток.
+  # начало блока профиля. НЕ останавливается на первом совпадении --
+  # собирает ВСЕ вхождения по всему файлу, чтобы поймать неоднозначность
+  # (дубль блока, скопипащенный заголовок и т.п.) -- на неё раньше можно
+  # было тихо попасть не в тот блок (найдено при аудите перед деплоем на
+  # МТС 2026-08-17).
   anchor_len="${#header[@]}"
   first_header_line="${header[0]}"
   for ((i = 0; i < total_lines; i++)); do
@@ -193,29 +197,32 @@ if [ "$spec_mode" = "header" ]; then
         break
       fi
     done
-    if [ "$match" -eq 1 ]; then
-      start_idx="$i"
-      break
-    fi
+    [ "$match" -eq 1 ] && anchor_matches+=("$i")
   done
-  if [ "$start_idx" -lt 0 ]; then
+  if [ "${#anchor_matches[@]}" -eq 0 ]; then
     echo "Заголовок блока не найден в $config_path -- профиль переехал в файле или переданный HEADER разошёлся с реальным конфигом. Отказ, ничего не менял." >&2
     exit 1
   fi
 else
-  # TEMPLATE -- один якорь, буквальная строка "--template=<имя>".
+  # TEMPLATE -- один якорь, буквальная строка "--template=<имя>", тоже
+  # собираем ВСЕ вхождения, не только первое.
   template_line="--template=${template_name}"
   for ((i = 0; i < total_lines; i++)); do
-    if [ "${config_lines[$i]}" = "$template_line" ]; then
-      start_idx="$i"
-      break
-    fi
+    [ "${config_lines[$i]}" = "$template_line" ] && anchor_matches+=("$i")
   done
-  if [ "$start_idx" -lt 0 ]; then
+  if [ "${#anchor_matches[@]}" -eq 0 ]; then
     echo "Строка '$template_line' не найдена в $config_path -- имя шаблона неверное или конфиг изменился. Отказ, ничего не менял." >&2
     exit 1
   fi
 fi
+
+if [ "${#anchor_matches[@]}" -gt 1 ]; then
+  human_lines=()
+  for idx in "${anchor_matches[@]}"; do human_lines+=("$((idx + 1))"); done
+  echo "Якорь встречается ${#anchor_matches[@]} раз в $config_path (строки: ${human_lines[*]}) -- неоднозначно, какой блок иметь в виду. Отказ, ничего не менял (нужно вмешательство человека -- разобраться, откуда дубль)." >&2
+  exit 1
+fi
+start_idx="${anchor_matches[0]}"
 
 block_start=$((start_idx + anchor_len))
 
@@ -229,12 +236,17 @@ for ((i = block_start; i < total_lines; i++)); do
   fi
 done
 
-# Максимум strategy=N СТРОГО внутри [block_start, block_end).
+# Максимум strategy=N СТРОГО внутри [block_start, block_end). Regex
+# заякорена на ":strategy=" (двоеточие перед) -- реальные директивы
+# всегда пишутся как "<...>:strategy=N" (см. запись ниже, строка ~281),
+# без заякоривания "strategy=42" совпал бы и внутри человеческого
+# комментария вида "# пробовали strategy=42 раньше" -- найдено при
+# аудите перед деплоем на МТС 2026-08-17.
 max_found=-1
 last_strategy_line_idx=-1
 for ((i = block_start; i < block_end; i++)); do
   line="${config_lines[$i]}"
-  if [[ "$line" =~ strategy=([0-9]+) ]]; then
+  if [[ "$line" =~ :strategy=([0-9]+) ]]; then
     n="${BASH_REMATCH[1]}"
     if [ "$n" -ge "$max_found" ]; then
       max_found="$n"

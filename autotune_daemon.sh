@@ -297,6 +297,25 @@ retune_profile() {
   best="$(awk '{print $1; exit}' "$ordered_file" 2>/dev/null)"
 
   if [ -n "$best" ]; then
+    # rank_strategies.sh сам возвращает locked.tsv на ПРЕЖНЮЮ стратегию в
+    # своём конце ("Возврат к исходной стратегии — скрипт только измеряет")
+    # ДО того, как мы тут применяем "best" -- живой замер именно этой
+    # стратегии мог быть уже несколько минут назад (весь --funnel проход
+    # по остальным кандидатам). Не доверяем ранжированию вслепую -- сразу
+    # после применения перепроверяем ЖИВЫМ трафиком тем же probe_url/
+    # probe_http_url, что и обычный health-check, и откатываем на
+    # прежнюю стратегию, если реальная проверка не прошла (найдено при
+    # аудите перед деплоем на МТС 2026-08-17 -- тот же класс бага, что
+    # уже поймали и починили в Zenith auto_promoter.py: "прошло ранжирование,
+    # но не работает вживую" тихо считалось успехом).
+    local proto_for_check prev_locked
+    if [ "$pid" = "5" ]; then
+      proto_for_check="udp"
+    else
+      proto_for_check="${PROFILE_PROTO[$pid]%% *}"
+    fi
+    prev_locked="$(orch_locked_get "$pid" "$proto_for_check" 2>/dev/null || echo "")"
+
     if [ "$pid" = "5" ]; then
       orch_locked_set "5" "udp" "$best"
       if type profile_state_set >/dev/null 2>&1; then
@@ -314,8 +333,31 @@ retune_profile() {
         fi
       done
     fi
-    log "RETUNE: применена новая стратегия profile=$pid ($title) strategy=$best (locked.tsv + profile.lock)"
-    clear_backoff "$pid"
+
+    local verify_ok=1
+    if [ "$pid" = "5" ]; then
+      check_profile_quic || verify_ok=0
+    else
+      check_profile_tls "$pid" || verify_ok=0
+    fi
+
+    if [ "$verify_ok" -eq 1 ]; then
+      log "RETUNE: применена новая стратегия profile=$pid ($title) strategy=$best (locked.tsv + profile.lock), живая проверка ПОСЛЕ применения пройдена"
+      clear_backoff "$pid"
+    else
+      log "RETUNE: !!! strategy=$best для profile=$pid ($title) прошла funnel-ранжирование, но живая проверка СРАЗУ ПОСЛЕ применения провалилась — откатываю на прежнюю ($prev_locked), ухожу в backoff (не долблю тем же результатом каждый цикл)"
+      if [ -n "$prev_locked" ] && [ "$prev_locked" != "?" ]; then
+        if [ "$pid" = "5" ]; then
+          orch_locked_set "5" "udp" "$prev_locked"
+        else
+          for p in ${PROFILE_PROTO[$pid]}; do
+            set_strategy "$pid" "$p" "$prev_locked"
+          done
+        fi
+      fi
+      local until_ts=$(( $(date +%s) + RETUNE_BACKOFF ))
+      set_backoff_until "$pid" "$until_ts"
+    fi
   else
     # Полный перебор не нашёл НИ ОДНОЙ рабочей стратегии. Почти всегда это
     # означает "тест бьёт не в тот канал/сломан", а не "провайдер заблокировал

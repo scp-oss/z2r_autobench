@@ -1807,6 +1807,7 @@ ensure_panel_runtime_grants() {
   # PATH, а хардкодить /usr/bin вслепую рискованно (не везде одинаково).
   local systemctl_bin; systemctl_bin="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
   local journalctl_bin; journalctl_bin="$(command -v journalctl 2>/dev/null || echo /usr/bin/journalctl)"
+  local flock_bin; flock_bin="$(command -v flock 2>/dev/null || echo /usr/bin/flock)"
 
   # Sudoers — get/max были принципиально read-only с самого начала (см.
   # README панели "Границы ответственности", то поколение текста). Живой
@@ -1843,7 +1844,19 @@ ensure_panel_runtime_grants() {
   # поле в форме необязательное) команда не матчится вообще, sudo -n
   # тихо требует пароль. Один хвостовой "*" матчит и "--rounds 20"
   # (пусто после), и "--rounds 20 --domain host/path" (* жадный).
-  local sudoers_run_cmd="$ZENITH_DIR/orchestrator/venv/bin/python3 main.py --profile * --rounds *"
+  # ПОЛНЫЙ путь к main.py, не просто "main.py" -- sudoers матчит команду
+  # буквально и понятия не имеет про cwd вызывающего; относительный путь
+  # раньше "работал" только потому, что единственный вызывающий
+  # (z0r-panel/runner.py) всегда СЛУЧАЙНО ставил правильный cwd перед
+  # запуском -- НОПАСВОРД-грант не должен зависеть от этого допущения
+  # (найдено при аудите перед деплоем на МТС 2026-08-17, runner.py
+  # исправлен тем же коммитом).
+  # "flock -n <lock-файл>" ПЕРЕД venv/main.py -- лок держит сам ДОЧЕРНИЙ
+  # процесс (не память процесса панели), так что "один прогон
+  # одновременно" переживает рестарт панели: второй клик после рестарта,
+  # пока старый прогон ещё жив, получает честный отказ от самого flock
+  # (найдено при том же аудите, см. z0r-panel/runner.py::RUN_LOCK_FILE).
+  local sudoers_run_cmd="$flock_bin -n $ZENITH_DIR/orchestrator/.run.lock $ZENITH_DIR/orchestrator/venv/bin/python3 $ZENITH_DIR/orchestrator/main.py --profile * --rounds *"
 
   # Старт/стоп/статус/лог autotune-daemon.service с /controls (см.
   # z0r-panel/daemon_ctl.py) -- ровно то же самое, что человек делает
