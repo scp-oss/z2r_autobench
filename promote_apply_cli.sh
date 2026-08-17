@@ -73,6 +73,25 @@
 
 set -uo pipefail
 
+# Блокировка -- ОДИН writer на config_path одновременно (apply ИЛИ
+# restore), иначе два параллельных вызова (напр. ручной apply поверх уже
+# работающего --loop) могут оба прочитать один и тот же max_found ДО
+# того, как другой успел записать, и оба "успешно" перезаписать файл --
+# второй mv тихо затирает результат первого, оба вызывающих получают
+# exit 0. Живёт до выхода процесса (flock держит дескриптор открытым),
+# нарочно НЕ через z2r_autobench_lib.sh::acquire_tune_lock() -- та тянет
+# полный z2r_lib (config.sh/orchestra_state.sh/netcheck.sh), этому
+# скрипту из всего этого ничего не нужно, только сама блокировка (см.
+# докстринг -- намеренно самодостаточный, узкий скрипт).
+_lock_config() {
+  local lock_file="${1}.promote.lock"
+  exec {PROMOTE_LOCK_FD}>"$lock_file" || { echo "Не удалось открыть $lock_file для блокировки" >&2; exit 1; }
+  if ! flock -w 30 "$PROMOTE_LOCK_FD"; then
+    echo "Не удалось захватить блокировку $lock_file за 30s -- другой apply/restore сейчас пишет $1. Отказ, ничего не менял." >&2
+    exit 1
+  fi
+}
+
 mode="${1:?Использование: $0 apply|restore ...}"
 shift
 
@@ -82,6 +101,7 @@ if [ "$mode" = "restore" ]; then
   [ -f "$backup_path" ] || { echo "backup не найден: $backup_path" >&2; exit 1; }
   [ -s "$backup_path" ] || { echo "backup пуст: $backup_path -- отказ, не буду откатывать на пустой файл." >&2; exit 1; }
   [ -f "$config_path" ] || { echo "Конфиг не найден: $config_path" >&2; exit 1; }
+  _lock_config "$config_path"
 
   pre_restore_backup="${backup_path%.bak}.pre-restore-$(date +%Y%m%d-%H%M%S).bak"
   cp -p "$config_path" "$pre_restore_backup" || { echo "Не удалось сделать pre-restore backup в $pre_restore_backup -- отказ, ничего не менял." >&2; exit 1; }
@@ -109,6 +129,7 @@ if ! printf '%s' "$after_strategy" | grep -Eq '^[0-9]+$'; then
 fi
 
 [ -f "$config_path" ] || { echo "Конфиг не найден: $config_path" >&2; exit 1; }
+_lock_config "$config_path"
 
 header=()
 body=()
