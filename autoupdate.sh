@@ -33,16 +33,46 @@ CONF="$CONF_DIR/autoupdate.conf"
 LOG_DIR="$INSTALL_DIR/logs/autoupdate"
 mkdir -p "$LOG_DIR"
 
-# shellcheck disable=SC1090
-[ -f "$CONF" ] && source "$CONF"
-
+SET_PROJECT=""
+SET_VALUE=""
 ONLY_PROJECT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) ONLY_PROJECT="$2"; shift 2 ;;
+    # --set пишет флаг и выходит, не запускает сам прогон обновления --
+    # используется z0r-panel (см. daemon_ctl.py-подобный sudo -n wrapper)
+    # для переключения через веб, тем же файлом, что читает/пишет и z0r
+    # (пункт меню 26), состояние не расходится.
+    --set)
+      SET_PROJECT="$2"; SET_VALUE="$3"; shift 3 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
+
+if [ -n "$SET_PROJECT" ]; then
+  case "$SET_VALUE" in
+    0|1) ;;
+    *) echo "Значение должно быть 0 или 1, получено: '$SET_VALUE'" >&2; exit 1 ;;
+  esac
+  case "$SET_PROJECT" in
+    z2r_autobench|zenith|panel|tgrelay) ;;
+    *) echo "Неизвестный проект: '$SET_PROJECT' (ожидается z2r_autobench|zenith|panel|tgrelay)" >&2; exit 1 ;;
+  esac
+  mkdir -p "$CONF_DIR"
+  touch "$CONF"
+  chmod 644 "$CONF"
+  local_key="AUTOUPDATE_$(echo "$SET_PROJECT" | tr '[:lower:]' '[:upper:]')"
+  if grep -qE "^${local_key}=" "$CONF" 2>/dev/null; then
+    sed -i "s/^${local_key}=.*/${local_key}=${SET_VALUE}/" "$CONF"
+  else
+    echo "${local_key}=${SET_VALUE}" >> "$CONF"
+  fi
+  echo "$SET_PROJECT: $([ "$SET_VALUE" = "1" ] && echo включено || echo выключено)"
+  exit 0
+fi
+
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && source "$CONF"
 
 _log() {
   local project="$1"; shift

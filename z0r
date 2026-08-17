@@ -1997,8 +1997,17 @@ ensure_panel_runtime_grants() {
   # подбор" разово и "Ручное переключение стратегии", см. выше).
   local sudoers_zenith_units_cmds="$systemctl_bin start zenith-autorun, $systemctl_bin stop zenith-autorun, $systemctl_bin is-active zenith-autorun, $journalctl_bin -u zenith-autorun -n 200 --no-pager, $systemctl_bin start zenith-promoter, $systemctl_bin stop zenith-promoter, $systemctl_bin is-active zenith-promoter, $journalctl_bin -u zenith-promoter -n 200 --no-pager"
 
+  # Автообновление -- панель ТОЛЬКО переключает флаги (autoupdate.sh
+  # --set, тот же файл читает/пишет z0r пункт 26) и триггерит разовый
+  # прогон/смотрит статус таймера -- саму УСТАНОВКУ таймера (копирование
+  # .service/.timer в /etc/systemd/system, daemon-reload) панель делать
+  # не должна, это шаг через z0r/SSH, как и первичная установка любого
+  # другого юнита в этом файле выше -- панель "пульт" для уже
+  # существующего, не устанавливает новое (см. daemon_ctl.py докстринг).
+  local sudoers_autoupdate_cmds="/usr/bin/bash $INSTALL_DIR/autoupdate.sh --set *, $systemctl_bin start z2r-autoupdate.service, $systemctl_bin is-enabled z2r-autoupdate.timer, $systemctl_bin is-active z2r-autoupdate.timer, $journalctl_bin -u z2r-autoupdate -n 200 --no-pager"
+
   local sudoers_file="/etc/sudoers.d/zenith-panel"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"
