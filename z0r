@@ -108,6 +108,10 @@ PANEL_SERVICE="zenith-panel"
 TGRELAY_DIR="$INSTALL_DIR/Zenith-TG"
 TGRELAY_REPO_URL="https://github.com/scp-oss/Zenith-TG.git"
 TGRELAY_SERVICE="tg-transparent-relay"
+# Автообновление всей экосистемы (z2r_autobench/Zenith/z0r-panel/
+# Zenith-TG) -- общий конфиг с z0r-panel (веб тоже читает/пишет ЭТОТ ЖЕ
+# файл, см. autoupdate.sh и README z0r-panel), не свой отдельный.
+AUTOUPDATE_CONF="/etc/z2r_autobench/autoupdate.conf"
 PASSES="${PASSES:-3}"
 MODE=""
 SINGLE_PROFILE=""
@@ -409,6 +413,48 @@ get_tg_relay_status() {
   systemctl is-active --quiet "$TGRELAY_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
 }
 
+autoupdate_conf_get() {
+  local project="$1"
+  [ -f "$AUTOUPDATE_CONF" ] || { echo "0"; return; }
+  local key; key="AUTOUPDATE_$(echo "$project" | tr '[:lower:]' '[:upper:]')"
+  grep -E "^${key}=" "$AUTOUPDATE_CONF" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+autoupdate_conf_set() {
+  local project="$1" value="$2"
+  mkdir -p "$(dirname "$AUTOUPDATE_CONF")"
+  touch "$AUTOUPDATE_CONF"
+  local key; key="AUTOUPDATE_$(echo "$project" | tr '[:lower:]' '[:upper:]')"
+  if grep -qE "^${key}=" "$AUTOUPDATE_CONF" 2>/dev/null; then
+    sed -i "s/^${key}=.*/${key}=${value}/" "$AUTOUPDATE_CONF"
+  else
+    echo "${key}=${value}" >> "$AUTOUPDATE_CONF"
+  fi
+}
+
+autoupdate_last_update() {
+  local project="$1" f
+  f="$INSTALL_DIR/logs/autoupdate/${project}.last_update"
+  [ -f "$f" ] && cat "$f" || echo "ещё не обновлялось"
+}
+
+get_autoupdate_timer_status() {
+  systemctl is-enabled --quiet z2r-autoupdate.timer 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+install_autoupdate_timer() {
+  if [ ! -f "$INSTALL_DIR/z2r-autoupdate.service" ] || [ ! -f "$INSTALL_DIR/z2r-autoupdate.timer" ]; then
+    echo "$INSTALL_DIR/z2r-autoupdate.service или .timer не найдены -- обнови z2r_autobench (git pull)." >&2
+    return 1
+  fi
+  chmod +x "$INSTALL_DIR/autoupdate.sh"
+  cp -f "$INSTALL_DIR/z2r-autoupdate.service" /etc/systemd/system/z2r-autoupdate.service
+  cp -f "$INSTALL_DIR/z2r-autoupdate.timer" /etc/systemd/system/z2r-autoupdate.timer
+  systemctl daemon-reload
+  systemctl enable --now z2r-autoupdate.timer
+  echo "Таймер автообновления установлен и включён (проверка каждые ~20 минут)."
+}
+
 # Точка прямого SQL-запроса к БД Zenith через docker exec -- ТОЛЬКО для
 # ZENITH_DB_MODE=docker (своя локальная БД). В ZENITH_DB_MODE=api своей
 # БД нет вообще -- вызывающий код обязан сам проверить zenith_db_mode()
@@ -499,6 +545,7 @@ show_menu() {
   echo " 15) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
   echo " 22) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
   echo " 24) Zenith-TG $(color_tag "$(get_tg_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
+  echo " 26) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-TG)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
   echo "" >&2
@@ -1499,6 +1546,59 @@ zenith_menu() {
   done
 }
 
+# Автообновление -- по одному флагу на проект в $AUTOUPDATE_CONF, общий
+# файл с z0r-panel (там своя веб-страница настроек читает/пишет то же
+# самое -- см. README z0r-panel), не своя отдельная копия состояния.
+# "Обновление" = git pull --ff-only от main (не от текущей рабочей
+# ветки -- продакшен подтягивает то, что реально смержено) +
+# специфичный для проекта рестарт, вся логика -- в autoupdate.sh.
+autoupdate_menu() {
+  local projects=(z2r_autobench zenith panel tgrelay)
+  local labels=(
+    "z2r_autobench (сам инструмент + autotune-daemon)"
+    "Zenith (docker compose up -d --build)"
+    "z0r-panel (pip install + systemctl restart zenith-panel)"
+    "Zenith-TG (pip install + systemctl restart tg-transparent-relay)"
+  )
+  while true; do
+    echo ""
+    echo "=== Автообновление (таймер: $(color_tag "$(get_autoupdate_timer_status)"), проверка ~раз в 20 мин) ==="
+    echo ""
+    local i
+    for i in "${!projects[@]}"; do
+      local project="${projects[$i]}" enabled
+      enabled="$(autoupdate_conf_get "$project")"
+      printf "  %d) [%s] %s\n" "$((i + 1))" "$([ "$enabled" = "1" ] && echo "ВКЛ" || echo "выкл")" "${labels[$i]}"
+      printf "     последнее обновление: %s\n" "$(autoupdate_last_update "$project")"
+    done
+    echo ""
+    echo "  r) Прогнать обновление прямо сейчас (для всех включённых)"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "Автообновление > " achoice
+    case "$achoice" in
+      1|2|3|4)
+        local idx=$((achoice - 1)) project="${projects[$((achoice - 1))]}" current new
+        current="$(autoupdate_conf_get "$project")"
+        new=$([ "$current" = "1" ] && echo "0" || echo "1")
+        autoupdate_conf_set "$project" "$new"
+        echo "${labels[$idx]}: $([ "$new" = "1" ] && echo "включено" || echo "выключено")."
+        if [ "$new" = "1" ] && [ "$(get_autoupdate_timer_status)" != "ON" ]; then
+          read -re -p "Таймер автообновления ещё не запущен -- установить и включить сейчас? [Y/n]: " ans
+          case "$ans" in n|N) ;; *) install_autoupdate_timer ;; esac
+        fi
+        ;;
+      r|R)
+        echo "Запускаю $INSTALL_DIR/autoupdate.sh вручную..."
+        bash "$INSTALL_DIR/autoupdate.sh"
+        echo "Готово, подробности: $INSTALL_DIR/logs/autoupdate/"
+        ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
 # Копирует .service из $ZENITH_DIR (репозиторий Zenith сам их содержит,
 # та же схема, что zenith-panel.service в z0r-panel) в systemd и
 # перечитывает юниты, только если файл новый/изменился -- идемпотентно,
@@ -2297,6 +2397,7 @@ while true; do
     23) uninstall_zenith ;;
     24) manage_tg_relay ;;
     25) uninstall_tg_relay ;;
+    26) autoupdate_menu ;;
     999) uninstall_everything ;;
     *)
       # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
