@@ -390,6 +390,26 @@ tune_profile_exhaustive() {
 # ведёт на конкретный /videoplayback?... с корректными itag/expire.
 DEFAULT_TEST_VIDEO_ID="${DEFAULT_TEST_VIDEO_ID:-dQw4w9WgXcQ}"
 
+# CDN "прилипает" к паре (video_id, наш IP) -- один и тот же ролик с одного
+# и того же сервера почти всегда возвращает ОДИН И ТОТ ЖЕ эдж (проверено
+# вживую, 6 проходов подряд — один и тот же rr3---sn-...). Живой случай на
+# NETH-4, 2026-08-18: rank_strategies.sh --profile 2 резолвил один и тот же
+# DEFAULT_TEST_VIDEO_ID, попал на эдж, который был забанен ещё с утра, и
+# все 52 стратегии закономерно провалились разом — не потому что все
+# стратегии сломаны, а потому что тест был заперт на одном мёртвом эдже.
+# Список общий для TLS-пути (профиль 2, через get_gv_test_url) и
+# QUIC-пути (профиль 5, rank_quic.sh) — раньше был продублирован только в
+# rank_quic.sh как QUIC_TEST_VIDEO_IDS.
+GV_TEST_VIDEO_IDS=(dQw4w9WgXcQ 9bZkp7q19f0 kJQP7kiw5Fk jNQXAC9IVRw 60ItHLz5WEA)
+
+# Детерминированный выбор по индексу (1-based) — для прогонов с несколькими
+# проходами, где важно менять видео МЕЖДУ проходами предсказуемо (см.
+# rank_quic.sh, теперь и rank_strategies.sh для профиля 2).
+gv_pick_video_id() {
+  local idx="${1:-1}"
+  echo "${GV_TEST_VIDEO_IDS[$(( (idx - 1) % ${#GV_TEST_VIDEO_IDS[@]} ))]}"
+}
+
 # Живой случай на NETH-4, 2026-08-18: у yt-dlp тут нет своего внешнего
 # таймаута -- при деградировавшей связности до YouTube (ровно то, что
 # профиль 2 время от времени и ловит) внутренние ретраи yt-dlp могут
@@ -414,13 +434,25 @@ resolve_googlevideo_url() {
 # yt-dlp доступен и резолвинг прошёл успешно; иначе — старый (слабый,
 # handshake-only по смыслу, но формально byte-threshold) фолбэк на домен,
 # с явным предупреждением в stderr.
+#
+# $1 (опционально) — конкретный video_id. Без аргумента (обычный
+# health-check в autotune_daemon.sh, один вызов за цикл) — выбирает
+# СЛУЧАЙНОЕ видео из GV_TEST_VIDEO_IDS каждый раз, а не всегда один и тот
+# же DEFAULT_TEST_VIDEO_ID, чтобы не залипать на одном эдже (см. комментарий
+# у GV_TEST_VIDEO_IDS выше). Вызывающие, которым нужна предсказуемая
+# ротация между несколькими проходами (rank_strategies.sh --profile 2),
+# передают явный video_id через gv_pick_video_id().
 get_gv_test_url() {
+  local video_id="${1:-}"
+  if [ -z "$video_id" ]; then
+    video_id="${GV_TEST_VIDEO_IDS[RANDOM % ${#GV_TEST_VIDEO_IDS[@]}]}"
+  fi
   local url
-  url="$(resolve_googlevideo_url)"
+  url="$(resolve_googlevideo_url "$video_id")"
   if [ -n "$url" ]; then
     echo "$url"
     return 0
   fi
-  echo "yt-dlp недоступен или резолвинг не удался — использую слабый фолбэк на домен-корень (тест профиля 2 будет ненадёжен, т.к. корень отдаёт 404 на 1.5КБ)." >&2
+  echo "yt-dlp недоступен или резолвинг не удался (видео $video_id) — использую слабый фолбэк на домен-корень (тест профиля 2 будет ненадёжен, т.к. корень отдаёт 404 на 1.5КБ)." >&2
   echo "https://$(get_yt_cluster_domain)"
 }

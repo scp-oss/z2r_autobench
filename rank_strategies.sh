@@ -81,13 +81,21 @@ acquire_tune_lock "rank_strategies.sh --profile $PROFILE" 10 || exit 1
 
 case "$PROFILE" in
   1) TITLE="YT_TLS/HTTP"; PROTO="tls http"; URL="https://www.youtube.com/"; IS_HTTP=0 ;;
-  2) TITLE="Googlevideo_TLS"; PROTO="tls"; URL="$(get_gv_test_url)"; IS_HTTP=0 ;;
+  2) TITLE="Googlevideo_TLS"; PROTO="tls"; URL="$(get_gv_test_url "$(gv_pick_video_id 1)")"; IS_HTTP=0 ;;
   3) TITLE="RKN_TLS"; PROTO="tls"; URL="https://meduza.io"; IS_HTTP=0 ;;
   4) TITLE="Discord_TLS"; PROTO="tls"; URL="https://discord.com/"; IS_HTTP=0 ;;
   8) TITLE="Fallback_TLS"; PROTO="tls"; URL="https://rutracker.org"; IS_HTTP=0 ;;
   9) TITLE="Fallback_HTTP"; PROTO="http"; URL="http://rutracker.org"; IS_HTTP=1 ;;
   *) echo "Неизвестный/неподдерживаемый профиль: $PROFILE (доступны: 1,2,3,4,8,9)" >&2; exit 1 ;;
 esac
+
+# Профиль 2 переразрезолвливает эдж (новое видео из GV_TEST_VIDEO_IDS) на
+# КАЖДЫЙ проход -- см. комментарий у GV_TEST_VIDEO_IDS в z2r_autobench_lib.sh.
+# Без этого весь прогон (все 52 стратегии, оба режима) бьёт в один и тот же
+# эдж всю дорогу -- если именно он забанен, "проваливаются все стратегии"
+# ничего не говорит о самих стратегиях (живой случай 2026-08-18).
+GV_ROTATE=0
+[ "$PROFILE" = "2" ] && GV_ROTATE=1
 
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
@@ -169,6 +177,10 @@ if [ "$FUNNEL" = "1" ]; then
   done
 
   for ((pass=1; pass<=PASSES; pass++)); do
+    if [ "$GV_ROTATE" = "1" ] && [ "$pass" -gt 1 ]; then
+      URL="$(get_gv_test_url "$(gv_pick_video_id "$pass")")"
+      echo "  (видео на этот проход: $(gv_pick_video_id "$pass") -> новый эдж)"
+    fi
     ncand=$(echo "$candidates" | wc -w)
     if [ "$ncand" -eq 0 ]; then
       echo "--- Проход $pass/$PASSES пропущен: не осталось кандидатов ---"
@@ -212,6 +224,10 @@ else
   current_step=0
 
   for ((pass=1; pass<=PASSES; pass++)); do
+    if [ "$GV_ROTATE" = "1" ] && [ "$pass" -gt 1 ]; then
+      URL="$(get_gv_test_url "$(gv_pick_video_id "$pass")")"
+      echo "  (видео на этот проход: $(gv_pick_video_id "$pass") -> новый эдж)"
+    fi
     echo "--- Проход $pass/$PASSES ---"
     for ((s=1; s<=max_strat; s++)); do
       if [ "$SKIP_CLONE" = "1" ] && is_clone_dependent_strategy "$s"; then
