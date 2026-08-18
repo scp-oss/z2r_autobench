@@ -77,6 +77,61 @@ project names here — same public-repo constraint as README.md.
   target = suspected escalation, not "no working strategy") from day one,
   not bolted on later.
 
+## autotune_daemon.sh — per-profile processes (since 2026-08-18)
+
+- Live incident that forced this: a `systemctl restart autotune-daemon`
+  landed mid-sweep of a GV_TLS (profile 2) retune, killing it before its
+  cleanup ran and leaving `locked.tsv` stuck on a random mid-perebor
+  candidate for hours — but the deeper problem was architectural: ALL
+  profiles shared one sequential loop, so one profile's expensive retune
+  blocked health-check *cadence* for every other profile in the same cycle.
+- Fix: `autotune_daemon.sh --profile N` (N=1..6) runs as an independent
+  process via systemd template unit `autotune-profile@N.service` — own
+  health-check timer, own log (`autotune_state/daemon_profile_N.log`), own
+  status file (`autotune_state/status_profile_N.txt`). The legacy no-arg
+  mode (`autotune-daemon.service`) still exists but is now scoped to ONLY
+  8/9 (FB_TLS/FB_HTTP, permanently in `SKIP_PROFILES` there) — those two
+  are near-permanently skipped anyway (wrong test channel, see below), not
+  worth a dedicated process each.
+- Retunes (the actual strategy sweep) are still serialized across ALL
+  profiles via the shared `TUNE_LOCK_FILE` — `locked.tsv` is one TSV file
+  for every profile, so concurrent writes from independent processes risk
+  a file-level race even when touching different rows/profiles. Only the
+  health-check *cadence* is parallel; only one retune runs system-wide at
+  a time, same safety guarantee as before.
+- GV_TLS (profile 2) depends on YT_TLS (profile 1): `get_gv_test_url()`/
+  `resolve_googlevideo_url()` resolve the real videoplayback URL via
+  `yt-dlp` against youtube.com. If YT_TLS is currently down, GV_TLS's own
+  test is doomed regardless of its own strategy — `--profile 2`'s process
+  reads `failcount_profile_1` directly (plain file read, no coordination
+  needed) before its own cycle and skips with a clear log line if YT_TLS
+  has unresolved failures, instead of wasting an expensive retune and
+  misattributing the failure to GV_TLS's strategy.
+- VOICE_UDP (profile 6) has no `curl`-based health-check — real signal is
+  "does joining a Discord voice channel work." `z2r_test-voice-bot`
+  (separate repo) already exposes `POST 127.0.0.1:8765/probe` for Zenith's
+  own genome testing; extended it to also accept `{"strategy_n": N}`
+  (reuses the bot's own `extract_strategy_lines()` against the live
+  `/opt/zapret2/config`) so `check_profile_voice()`/`rank_voice.sh` can
+  drive it without touching Discord at all. Same sandbox-only guarantee as
+  the bot's existing Discord commands (`/voice_test` etc., see that repo's
+  README "Песочница, не прод") — never touches the live `/opt/zapret2`
+  directly; only the winning strategy gets applied to the real profile 6
+  via the same `set_strategy()` path every other profile uses.
+- `probe_url()` in `z2r_autobench_lib.sh` now requires BOTH TLS 1.2 and
+  1.3 to succeed by default (`PROBE_REQUIRE_BOTH_TLS=1`) — was OR-logic
+  before. Live incident: DS_TLS strategy=29 answered on TLS1.3 but timed
+  out on TLS1.2 for hours while health-check stayed green (OR-logic), and
+  the real (TLS1.2-dependent) Discord client stayed broken the whole time.
+  Override to `0` per-run only if a profile's real server genuinely
+  doesn't serve TLS1.2 at all (not a block, a protocol version the origin
+  doesn't offer) — AND would otherwise falsely fail that profile forever.
+- `rank_strategies.sh`/`rank_quic.sh` now `trap` TERM/INT/EXIT to always
+  revert `locked.tsv` to the entry strategy, whether the run finishes
+  normally or gets killed from outside (e.g. a daemon restart mid-sweep,
+  the exact incident above) — `rank_voice.sh` doesn't need this (never
+  touches `locked.tsv`, sandbox-only).
+
 ## Test domains
 
 - `MIN_BYTES_THRESHOLD=65536` (`probe_url`/`probe_http_url` in

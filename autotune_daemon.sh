@@ -16,13 +16,46 @@
 # из родного zapret-auto.lua (fails=3 по умолчанию), только на внешнем
 # уровне вместо lua.
 #
-# Профили: 1 YT_TLS, 2 GV_TLS, 3 RKN_TLS, 4 DS_TLS, 5 YT_QUIC_UDP (реже,
-# дороже), 8 FB_TLS, 9 FB_HTTP. Профили 6/7 сюда не входят — мы установили
-# ранее, что для них нет надёжного автотеста в этой топологии сети.
+# Профили: 1 YT_TLS, 2 GV_TLS, 3 RKN_TLS, 4 DS_TLS, 5 YT_QUIC_UDP, 6 VOICE_UDP,
+# 8 FB_TLS, 9 FB_HTTP. Профиль 7 сюда не входит — нет надёжного автотеста в
+# этой топологии сети.
+#
+# ДВА РЕЖИМА ЗАПУСКА (с 2026-08-18):
+#   1) Легаси — без --profile, один процесс по кругу проверяет ВСЕ профили
+#      своего набора за один цикл (см. autotune-daemon.service). Раньше это
+#      был единственный режим для всех 1/2/3/4/5/8/9 — теперь оставлен ТОЛЬКО
+#      для 8/9 (FB_TLS/FB_HTTP, постоянный SKIP_PROFILES) — их и так почти
+#      всегда пропускают (см. комментарий у SKIP_PROFILES), возиться с
+#      отдельными процессами под них смысла нет. НЕДОСТАТОК этого режима и
+#      причина завести второй: дорогой ретюн одного профиля (перебор
+#      десятков стратегий, минуты) блокирует health-check ОСТАЛЬНЫХ профилей
+#      того же цикла — живой случай 2026-08-18, зависший ретюн GV_TLS не
+#      давал вовремя проверяться DS_TLS/RKN_TLS в том же процессе.
+#   2) Per-profile — `autotune_daemon.sh --profile N` (N=1..6), поднимается
+#      как systemd template-unit `autotune-profile@N.service` — отдельный
+#      процесс, отдельный health-check таймер, отдельный лог
+#      (autotune_state/daemon_profile_N.log), отдельный файл статуса
+#      (autotune_state/status_profile_N.txt). Сам РЕТЮН (перебор стратегий)
+#      по-прежнему сериализован через общий TUNE_LOCK_FILE (z2r_autobench_lib.sh)
+#      — locked.tsv один файл на все профили, параллельная запись в разные
+#      строки всё равно рискует гонкой на уровне файла, поэтому эту часть
+#      специально НЕ параллелим, только health-check-цикл.
+#      ВАЖНО: GV_TLS (профиль 2) резолвит тестовый URL через yt-dlp против
+#      youtube.com — если YT_TLS (профиль 1) сейчас в провале, GV-тест
+#      обречён провалиться независимо от собственной стратегии профиля 2.
+#      В per-profile режиме процесс профиля 2 перед своим циклом читает
+#      failcount_profile_1 (общий, читается напрямую с диска, координации не
+#      требует) и пропускает цикл, если у YT_TLS есть непогашенные провалы —
+#      чтобы не тратить дорогие ретюны и не путать причину со следствием.
+#      VOICE_UDP (профиль 6) тестируется не health-check-запросом к сайту, а
+#      через HTTP /probe отдельного z2r_test-voice-bot (песочница Zenith, не
+#      боевой /opt/zapret2 — см. z2r_test-voice-bot/README.md), см.
+#      check_profile_voice() и rank_voice.sh.
 #
 # Запуск (напрямую, для отладки):
-#   sudo bash autotune_daemon.sh
-# Запуск как служба — см. autotune-daemon.service ниже в этом же комплекте.
+#   sudo bash autotune_daemon.sh                # легаси, все профили набора
+#   sudo bash autotune_daemon.sh --profile 4     # только DS_TLS
+# Запуск как служба — см. autotune-daemon.service / autotune-profile@.service.
 #
 # Настройки через переменные окружения:
 #   CHECK_INTERVAL=300       — пауза между циклами health-check, сек
@@ -40,12 +73,31 @@
 #                              зависимости (yt-dlp, aioquic) — если появятся
 #                              позже, профиль сам вернётся из пропущенных
 #   DAEMON_LOG_MAX_BYTES=10485760 — ротация daemon.log при превышении
+#   VOICE_PROBE_URL=http://127.0.0.1:8765/probe — HTTP-эндпоинт
+#                              z2r_test-voice-bot для health-check/ретюна
+#                              профиля 6 (см. check_profile_voice/rank_voice.sh)
+#   VOICE_PROBE_TIMEOUT=25    — таймаут на один /probe (connect+hold 5с в
+#                              песочнице + запас)
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="/opt/z2r_autobench/autotune_state"
 LOG_DIR="/opt/z2r_autobench/logs"
+
+PROFILE_MODE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE_MODE="$2"; shift 2 ;;
+    *) echo "Неизвестный аргумент: $1 (доступно: --profile N, N=1..6)" >&2; exit 1 ;;
+  esac
+done
+if [ -n "$PROFILE_MODE" ]; then
+  case "$PROFILE_MODE" in
+    1|2|3|4|5|6) ;;
+    *) echo "--profile должен быть 1..6 (7/8/9 — на старом общем демоне без --profile, см. autotune-daemon.service)" >&2; exit 1 ;;
+  esac
+fi
 
 CHECK_INTERVAL="${CHECK_INTERVAL:-300}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-3}"
@@ -54,15 +106,23 @@ QUIC_CHECK_EVERY="${QUIC_CHECK_EVERY:-3}"
 RETUNE_BACKOFF="${RETUNE_BACKOFF:-1800}"
 DEPCHECK_EVERY="${DEPCHECK_EVERY:-6}"
 DAEMON_LOG_MAX_BYTES="${DAEMON_LOG_MAX_BYTES:-10485760}"
-# Профили, которые демон НЕ проверяет и НЕ ретюнит. По умолчанию 8 и 9
-# (FB_TLS/FB_HTTP) — их тестовый домен (rutracker.org) уже входит в
+VOICE_PROBE_URL="${VOICE_PROBE_URL:-http://127.0.0.1:8765/probe}"
+VOICE_PROBE_TIMEOUT="${VOICE_PROBE_TIMEOUT:-25}"
+# Профили, которые демон НЕ проверяет и НЕ ретюнит. Актуально ТОЛЬКО для
+# легаси-режима (без --profile) — per-profile процессы (--profile N) не
+# читают эту переменную вообще, у них включённость решается тем, какие
+# systemd-инстансы autotune-profile@N.service вообще запущены. По умолчанию
+# 8 и 9 (FB_TLS/FB_HTTP) — их тестовый домен (rutracker.org) уже входит в
 # TCP_RKN_list.txt, поэтому тест всегда бьёт не в тот профиль (реальным
 # трафиком к rutracker.org управляет профиль 3, а не 8) — до тех пор,
 # пока не найдётся домен, не покрытый ни одним курируемым списком, гонять
 # ретюн для 8/9 — трата времени и ложные тревоги. Убери из SKIP_PROFILES,
 # когда решишь эту проблему (см. test_custom_domain.sh --add-to-rkn как
 # альтернативу, или просто новый тестовый домен для case-блока в
-# rank_strategies.sh).
+# rank_strategies.sh). С переездом 1-6 на per-profile процессы легаси-демону
+# следует давать SKIP_PROFILES="1 2 3 4 5 6" (постоянно, через override
+# systemd-юнита) — иначе он и per-profile процессы будут дублировать друг
+# друга на тех же профилях.
 SKIP_PROFILES="${SKIP_PROFILES:-8 9}"
 
 if [ "$(id -u)" != "0" ]; then
@@ -72,23 +132,34 @@ fi
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
-# --- защита от двух одновременно запущенных демонов ---
+# Лог и singleton-лок — отдельные на каждый per-profile процесс (иначе 6
+# параллельных процессов дерутся за один и тот же daemon.log/лок, и второй
+# всегда проигрывает захват). Легаси-режим (без --profile) не меняется.
+if [ -n "$PROFILE_MODE" ]; then
+  DAEMON_LOG_FILE="$STATE_DIR/daemon_profile_${PROFILE_MODE}.log"
+  SINGLETON_LOCK_FILE="$STATE_DIR/daemon.singleton.lock.profile_${PROFILE_MODE}"
+else
+  DAEMON_LOG_FILE="$STATE_DIR/daemon.log"
+  SINGLETON_LOCK_FILE="$STATE_DIR/daemon.singleton.lock"
+fi
+
+# --- защита от двух одновременно запущенных демонов ЭТОГО ЖЕ типа/профиля ---
 # systemd Restart=on-failure + случайный ручной `bash autotune_daemon.sh`
 # поверх уже работающей службы — оба будут независимо считать провалы и
 # независимо запускать ретюны, и будут перебивать стратегии друг у друга.
 # Неблокирующий захват: если лок уже занят — второй экземпляр сразу выходит,
 # а не встаёт в очередь (тут не нужно ждать, тут нужно не запускаться).
-exec {DAEMON_LOCK_FD}>"$STATE_DIR/daemon.singleton.lock"
+exec {DAEMON_LOCK_FD}>"$SINGLETON_LOCK_FILE"
 if ! flock -n "$DAEMON_LOCK_FD"; then
-  echo "Другой экземпляр autotune_daemon.sh уже запущен (лок $STATE_DIR/daemon.singleton.lock занят) — выхожу." >&2
+  echo "Другой экземпляр autotune_daemon.sh (${PROFILE_MODE:+profile=$PROFILE_MODE, }лок $SINGLETON_LOCK_FILE) уже запущен — выхожу." >&2
   exit 1
 fi
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/z2r_autobench_lib.sh"
 
-declare -A PROFILE_TITLE=( [1]="YT_TLS" [2]="GV_TLS" [3]="RKN_TLS" [4]="DS_TLS" [8]="FB_TLS" [9]="FB_HTTP" )
-declare -A PROFILE_PROTO=( [1]="tls http" [2]="tls" [3]="tls" [4]="tls" [8]="tls" [9]="http" )
+declare -A PROFILE_TITLE=( [1]="YT_TLS" [2]="GV_TLS" [3]="RKN_TLS" [4]="DS_TLS" [5]="YT_QUIC_UDP" [6]="VOICE_UDP" [8]="FB_TLS" [9]="FB_HTTP" )
+declare -A PROFILE_PROTO=( [1]="tls http" [2]="tls" [3]="tls" [4]="tls" [5]="udp" [6]="udp" [8]="tls" [9]="http" )
 declare -A PROFILE_URL=(
   [1]="https://www.youtube.com/"
   [3]="https://meduza.io"
@@ -97,11 +168,13 @@ declare -A PROFILE_URL=(
   [9]="http://rutracker.org"
 )
 # профиль 2 (GV) резолвится динамически через yt-dlp — см. check_profile_tls
+# профили 5 (QUIC) и 6 (VOICE_UDP, через z2r_test-voice-bot) — свои функции
+# check_profile_quic()/check_profile_voice(), URL им не нужен.
 
 log() {
   local ts
   ts="$(date -Iseconds)"
-  echo "[$ts] $*" >> "$STATE_DIR/daemon.log"
+  echo "[$ts] $*" >> "$DAEMON_LOG_FILE"
   echo "[$ts] $*" >&2
 }
 
@@ -110,7 +183,7 @@ log() {
 # Простое обрезание хвоста, без logrotate — не хотим тянуть внешнюю
 # зависимость ради одного файла.
 rotate_daemon_log() {
-  local f="$STATE_DIR/daemon.log"
+  local f="$DAEMON_LOG_FILE"
   [ -f "$f" ] || return 0
   local size
   size="$(stat -c%s "$f" 2>/dev/null || echo 0)"
@@ -230,6 +303,31 @@ write_status() {
   } > "$STATE_DIR/status.txt"
 }
 
+# Аналог write_status(), но на один профиль — для per-profile процессов
+# (--profile N), которые ничего не знают о состоянии остальных профилей и
+# не должны пытаться писать общий status.txt (гонка между несколькими
+# независимыми процессами при записи одного файла). Смотреть все сразу:
+# `cat /opt/z2r_autobench/autotune_state/status_profile_*.txt`.
+write_status_single() {
+  local pid="$1"
+  local title="${PROFILE_TITLE[$pid]}"
+  local fc
+  fc="$(get_fail_count "$pid")"
+  local proto="${PROFILE_PROTO[$pid]%% *}"
+  local cur
+  cur="$(orch_locked_get "$pid" "$proto" 2>/dev/null || echo "?")"
+  local backoff_marker=""
+  local until_ts
+  until_ts="$(get_backoff_until "$pid")"
+  if [ "$until_ts" -gt "$(date +%s)" ]; then
+    backoff_marker=" [backoff до $(date -d "@$until_ts" -Iseconds 2>/dev/null || echo "$until_ts")]"
+  fi
+  {
+    echo "autotune-profile@$pid ($title) status @ $(date -Iseconds)"
+    echo "  $pid $title: текущая стратегия=$cur, провалов подряд=$fc/$FAIL_THRESHOLD$backoff_marker"
+  } > "$STATE_DIR/status_profile_$pid.txt"
+}
+
 check_profile_tls() {
   local pid="$1"
   local url="${PROFILE_URL[$pid]:-}"
@@ -264,6 +362,38 @@ print(p)
   [ "${bytes:-0}" -ge 524288 ] 2>/dev/null
 }
 
+# Профиль 6 (VOICE_UDP) не тестируется curl-запросом к сайту — реальная
+# метрика "работает/не работает" это подключение к голосовому каналу
+# Discord. z2r_test-voice-bot держит HTTP /probe {"strategy_n": N} именно
+# для таких внешних вызовов (изначально сделан для Zenith, см.
+# z2r_test-voice-bot/bot.py::handle_probe) — сам достаёт lua-строки текущей
+# стратегии из живого /opt/zapret2/config и применяет их ТОЛЬКО в
+# изолированной песочнице Zenith (боевой конфиг бот не трогает), заходит в
+# тестовый голосовой канал, держит соединение и возвращает {"success",
+# "connect_ms"}. Проверяем ИМЕННО ТЕКУЩУЮ закреплённую стратегию профиля 6
+# (не перебор) — это и есть health-check, а не ранжирование (для ранжирования
+# см. rank_voice.sh, вызывается из retune_profile()).
+check_profile_voice() {
+  local strategy
+  strategy="$(orch_locked_get "6" "udp" 2>/dev/null)"
+  if [ -z "$strategy" ] || [ "$strategy" = "0" ]; then
+    return 1
+  fi
+  local resp
+  resp="$(curl -sS -X POST "$VOICE_PROBE_URL" -H 'Content-Type: application/json' \
+      --max-time "$VOICE_PROBE_TIMEOUT" \
+      -d "{\"strategy_n\": $strategy}" 2>/dev/null)"
+  [ -z "$resp" ] && return 1
+  python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+sys.exit(0 if d.get('success') else 1)
+" "$resp"
+}
+
 retune_profile() {
   local pid="$1"
   local title="${PROFILE_TITLE[$pid]:-YT_QUIC_UDP}"
@@ -283,9 +413,11 @@ retune_profile() {
   rm -f "$ordered_file"
 
   if [ "$pid" = "5" ]; then
-    RETUNE_PASSES_ENV="$RETUNE_PASSES" bash "$SCRIPT_DIR/rank_quic.sh" --passes "$RETUNE_PASSES" --funnel >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
+    RETUNE_PASSES_ENV="$RETUNE_PASSES" bash "$SCRIPT_DIR/rank_quic.sh" --passes "$RETUNE_PASSES" --funnel >> "$DAEMON_LOG_FILE" 2>&1 || rc=$?
+  elif [ "$pid" = "6" ]; then
+    bash "$SCRIPT_DIR/rank_voice.sh" --passes "$RETUNE_PASSES" --funnel >> "$DAEMON_LOG_FILE" 2>&1 || rc=$?
   else
-    bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$RETUNE_PASSES" --funnel >> "$STATE_DIR/daemon.log" 2>&1 || rc=$?
+    bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$RETUNE_PASSES" --funnel >> "$DAEMON_LOG_FILE" 2>&1 || rc=$?
   fi
 
   if [ "$rc" -ne 0 ]; then
@@ -337,6 +469,8 @@ retune_profile() {
     local verify_ok=1
     if [ "$pid" = "5" ]; then
       check_profile_quic || verify_ok=0
+    elif [ "$pid" = "6" ]; then
+      check_profile_voice || verify_ok=0
     else
       check_profile_tls "$pid" || verify_ok=0
     fi
@@ -371,74 +505,163 @@ retune_profile() {
   set_fail_count "$pid" 0
 }
 
-if ! zapret2_running; then
-  log "zapret2 (nfqws2) не запущен на старте — жду и буду перепроверять в цикле."
-else
+startup_stability_check() {
   # Лёгкая проверка стабильности на старте — не блокирует запуск, только
   # предупреждает. В сессии был случай, когда процесс падал/пересоздавался
   # каждые ~10с из-за гонки ручных systemctl-команд во время отладки — если
   # это происходит НЕ по нашей вине, лучше узнать сразу в логе, чем гадать
   # постфактум по чужим health-check провалам.
+  if ! zapret2_running; then
+    log "zapret2 (nfqws2) не запущен на старте — жду и буду перепроверять в цикле."
+    return
+  fi
+  local pid1 pid2
   pid1="$(pidof nfqws2 2>/dev/null | awk '{print $1}')"
   sleep 5
   pid2="$(pidof nfqws2 2>/dev/null | awk '{print $1}')"
   if [ -z "$pid2" ] || [ "$pid1" != "$pid2" ]; then
     log "ВНИМАНИЕ: PID nfqws2 изменился/пропал за 5с на старте ($pid1 -> $pid2) — сервис нестабилен прямо сейчас (не наша операция). Здоровые проверки ниже могут ложно проваливаться, пока это не уляжется."
   fi
-fi
+}
 
-check_dependencies
+run_legacy_daemon() {
+  startup_stability_check
+  check_dependencies
 
-log "autotune_daemon.sh запущен. Профили: 1 2 3 4 5 8 9 (кроме user-skip=$SKIP_PROFILES, dep-skip=${DEP_SKIP_PROFILES:-нет}). CHECK_INTERVAL=${CHECK_INTERVAL}s FAIL_THRESHOLD=${FAIL_THRESHOLD} RETUNE_BACKOFF=${RETUNE_BACKOFF}s"
+  log "autotune_daemon.sh запущен. Профили: 1 2 3 4 5 8 9 (кроме user-skip=$SKIP_PROFILES, dep-skip=${DEP_SKIP_PROFILES:-нет}). CHECK_INTERVAL=${CHECK_INTERVAL}s FAIL_THRESHOLD=${FAIL_THRESHOLD} RETUNE_BACKOFF=${RETUNE_BACKOFF}s"
 
-cycle=0
-while true; do
-  cycle=$((cycle + 1))
+  local cycle=0
+  while true; do
+    cycle=$((cycle + 1))
 
-  rotate_daemon_log
-  if (( cycle % DEPCHECK_EVERY == 0 )); then
-    check_dependencies
-  fi
+    rotate_daemon_log
+    if (( cycle % DEPCHECK_EVERY == 0 )); then
+      check_dependencies
+    fi
 
-  if ! zapret2_running; then
-    log "zapret2 не запущен, пропускаю цикл проверки."
+    if ! zapret2_running; then
+      log "zapret2 не запущен, пропускаю цикл проверки."
+      sleep "$CHECK_INTERVAL"
+      continue
+    fi
+
+    for pid in 1 2 3 4 8 9; do
+      is_skipped "$pid" && continue
+      local fc
+      if check_profile_tls "$pid"; then
+        if [ "$(get_fail_count "$pid")" != "0" ]; then
+          log "OK: profile=$pid (${PROFILE_TITLE[$pid]}) снова работает, сбрасываю счётчик провалов"
+        fi
+        set_fail_count "$pid" 0
+      else
+        fc=$(( $(get_fail_count "$pid") + 1 ))
+        set_fail_count "$pid" "$fc"
+        log "PROBLEM: profile=$pid (${PROFILE_TITLE[$pid]}) провал health-check ($fc/$FAIL_THRESHOLD)"
+        if [ "$fc" -ge "$FAIL_THRESHOLD" ]; then
+          retune_profile "$pid"
+        fi
+      fi
+    done
+
+    if (( cycle % QUIC_CHECK_EVERY == 0 )) && ! is_skipped "5"; then
+      local fc5
+      if check_profile_quic; then
+        if [ "$(get_fail_count "5")" != "0" ]; then
+          log "OK: profile=5 (YT_QUIC_UDP) снова работает, сбрасываю счётчик провалов"
+        fi
+        set_fail_count "5" 0
+      else
+        fc5=$(( $(get_fail_count "5") + 1 ))
+        set_fail_count "5" "$fc5"
+        log "PROBLEM: profile=5 (YT_QUIC_UDP) провал health-check ($fc5/$FAIL_THRESHOLD)"
+        if [ "$fc5" -ge "$FAIL_THRESHOLD" ]; then
+          retune_profile "5"
+        fi
+      fi
+    fi
+
+    write_status
     sleep "$CHECK_INTERVAL"
-    continue
-  fi
+  done
+}
 
-  for pid in 1 2 3 4 8 9; do
-    is_skipped "$pid" && continue
-    if check_profile_tls "$pid"; then
+# Per-profile режим (--profile N, N=1..6) — см. докстринг файла. Каждый
+# профиль в своём процессе, свой health-check таймер; ретюн (перебор
+# стратегий) по-прежнему сериализован через общий TUNE_LOCK_FILE внутри
+# rank_strategies.sh/rank_quic.sh/rank_voice.sh, тут отдельно ничего не
+# синхронизируем.
+run_profile_daemon() {
+  local pid="$1"
+  local title="${PROFILE_TITLE[$pid]}"
+
+  startup_stability_check
+  check_dependencies
+
+  log "autotune_daemon.sh --profile $pid ($title) запущен. CHECK_INTERVAL=${CHECK_INTERVAL}s FAIL_THRESHOLD=${FAIL_THRESHOLD} RETUNE_BACKOFF=${RETUNE_BACKOFF}s"
+
+  local cycle=0
+  while true; do
+    cycle=$((cycle + 1))
+
+    rotate_daemon_log
+    if (( cycle % DEPCHECK_EVERY == 0 )); then
+      check_dependencies
+    fi
+
+    if ! zapret2_running; then
+      log "zapret2 не запущен, пропускаю цикл проверки."
+      sleep "$CHECK_INTERVAL"
+      continue
+    fi
+
+    if is_dep_skipped "$pid"; then
+      sleep "$CHECK_INTERVAL"
+      continue
+    fi
+
+    # GV_TLS зависит от YT_TLS: get_gv_test_url()/resolve_googlevideo_url()
+    # резолвят реальный videoplayback URL через yt-dlp против youtube.com —
+    # если сам YT_TLS (профиль 1) сейчас в провале, GV-тест обречён
+    # провалиться независимо от собственной стратегии профиля 2. Не хотим
+    # тратить дорогие ретюны и ложно винить GV_TLS, пока не восстановится
+    # YT_TLS — читаем его failcount напрямую (файл общий, координации не
+    # требует, независимо от того, каким процессом он поддерживается).
+    if [ "$pid" = "2" ] && [ "$(get_fail_count "1")" != "0" ]; then
+      log "PROPUSK: profile=2 (GV_TLS) — у YT_TLS (профиль 1) есть непогашенные провалы, GV-тест от него зависит — жду восстановления YT_TLS"
+      write_status_single "$pid"
+      sleep "$CHECK_INTERVAL"
+      continue
+    fi
+
+    local ok=1
+    case "$pid" in
+      5) check_profile_quic || ok=0 ;;
+      6) check_profile_voice || ok=0 ;;
+      *) check_profile_tls "$pid" || ok=0 ;;
+    esac
+
+    if [ "$ok" = "1" ]; then
       if [ "$(get_fail_count "$pid")" != "0" ]; then
-        log "OK: profile=$pid (${PROFILE_TITLE[$pid]}) снова работает, сбрасываю счётчик провалов"
+        log "OK: profile=$pid ($title) снова работает, сбрасываю счётчик провалов"
       fi
       set_fail_count "$pid" 0
     else
+      local fc
       fc=$(( $(get_fail_count "$pid") + 1 ))
       set_fail_count "$pid" "$fc"
-      log "PROBLEM: profile=$pid (${PROFILE_TITLE[$pid]}) провал health-check ($fc/$FAIL_THRESHOLD)"
+      log "PROBLEM: profile=$pid ($title) провал health-check ($fc/$FAIL_THRESHOLD)"
       if [ "$fc" -ge "$FAIL_THRESHOLD" ]; then
         retune_profile "$pid"
       fi
     fi
+
+    write_status_single "$pid"
+    sleep "$CHECK_INTERVAL"
   done
+}
 
-  if (( cycle % QUIC_CHECK_EVERY == 0 )) && ! is_skipped "5"; then
-    if check_profile_quic; then
-      if [ "$(get_fail_count "5")" != "0" ]; then
-        log "OK: profile=5 (YT_QUIC_UDP) снова работает, сбрасываю счётчик провалов"
-      fi
-      set_fail_count "5" 0
-    else
-      fc=$(( $(get_fail_count "5") + 1 ))
-      set_fail_count "5" "$fc"
-      log "PROBLEM: profile=5 (YT_QUIC_UDP) провал health-check ($fc/$FAIL_THRESHOLD)"
-      if [ "$fc" -ge "$FAIL_THRESHOLD" ]; then
-        retune_profile "5"
-      fi
-    fi
-  fi
-
-  write_status
-  sleep "$CHECK_INTERVAL"
-done
+if [ -n "$PROFILE_MODE" ]; then
+  run_profile_daemon "$PROFILE_MODE"
+else
+  run_legacy_daemon
+fi
