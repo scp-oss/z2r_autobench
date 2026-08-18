@@ -107,6 +107,40 @@ for p in $PROTO; do
   PREV_STRATEGY["$p"]="$(get_strategy "$PROFILE" "$p")"
 done
 
+# Живой случай на NETH-4, 2026-08-18: `systemctl restart autotune-daemon`
+# попал прямо в середину прогона этого скрипта (демон вызывает его как
+# блокирующий дочерний процесс) — SIGTERM убил перебор посреди пассивной
+# пробы стратегии 30 из 52, откат "к исходной стратегии" (см. ниже) не
+# успел выполниться, locked.tsv застрял на случайном кандидате из
+# середины перебора вместо возврата к рабочей стратегии. GV_TLS "завис"
+# на несколько часов, пока не заметили и не поправили руками.
+# REVERTED_TO_ENTRY — защита от двойного отката (нормальный путь ниже
+# вызывает revert_to_entry_strategy явно для красивого порядка вывода,
+# EXIT-трап подстраховывает на любой другой выход, включая ранние `exit 1`
+# после этой точки — если оба сработают, второй вызов будет no-op).
+REVERTED_TO_ENTRY=0
+revert_to_entry_strategy() {
+  [ "$REVERTED_TO_ENTRY" = "1" ] && return 0
+  REVERTED_TO_ENTRY=1
+  for p in $PROTO; do
+    if [ -n "${PREV_STRATEGY[$p]:-}" ] && [ "${PREV_STRATEGY[$p]}" != "0" ]; then
+      set_strategy "$PROFILE" "$p" "${PREV_STRATEGY[$p]}"
+      echo "  proto=$p -> strategy=${PREV_STRATEGY[$p]}"
+    else
+      orch_locked_clear "$PROFILE" "$p"
+      echo "  proto=$p -> auto (был не задан)"
+    fi
+  done
+}
+handle_interrupt_signal() {
+  echo "" >&2
+  echo "!!! rank_strategies.sh прерван сигналом снаружи (напр. systemctl restart поверх работающего демона) -- откатываю locked.tsv к исходной стратегии перед выходом:" >&2
+  revert_to_entry_strategy
+  exit 143
+}
+trap handle_interrupt_signal TERM INT
+trap revert_to_entry_strategy EXIT
+
 SKIP_CLONE=0
 if [ "$INCLUDE_CLONE" != "1" ] && clone_dependent_profile "$PROFILE"; then
   SKIP_CLONE=1
@@ -213,15 +247,7 @@ fi
 
 echo ""
 echo "Возврат к исходной стратегии (скрипт только измеряет, решение — за тобой):"
-for p in $PROTO; do
-  if [ -n "${PREV_STRATEGY[$p]}" ] && [ "${PREV_STRATEGY[$p]}" != "0" ]; then
-    set_strategy "$PROFILE" "$p" "${PREV_STRATEGY[$p]}"
-    echo "  proto=$p -> strategy=${PREV_STRATEGY[$p]}"
-  else
-    orch_locked_clear "$PROFILE" "$p"
-    echo "  proto=$p -> auto (был не задан)"
-  fi
-done
+revert_to_entry_strategy
 
 echo ""
 echo "=== Агрегация по $PASSES проходам ==="

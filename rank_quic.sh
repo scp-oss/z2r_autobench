@@ -135,6 +135,31 @@ fi
 
 prev_strategy="$(orch_locked_get "$PROFILE" "$PROTO")"
 
+# См. тот же трап в rank_strategies.sh -- защита от того, что прерывание
+# снаружи (напр. systemctl restart автотюн-демона поверх работающего
+# перебора) оставит locked.tsv застрявшим на случайном кандидате из
+# середины прогона вместо отката к рабочей стратегии.
+REVERTED_TO_ENTRY=0
+revert_to_entry_strategy() {
+  [ "$REVERTED_TO_ENTRY" = "1" ] && return 0
+  REVERTED_TO_ENTRY=1
+  if [ -n "$prev_strategy" ] && [ "$prev_strategy" != "0" ]; then
+    orch_locked_set "$PROFILE" "$PROTO" "$prev_strategy"
+    echo "  -> strategy=$prev_strategy"
+  else
+    orch_locked_clear "$PROFILE" "$PROTO"
+    echo "  -> auto (был не задан)"
+  fi
+}
+handle_interrupt_signal() {
+  echo "" >&2
+  echo "!!! rank_quic.sh прерван сигналом снаружи (напр. systemctl restart поверх работающего демона) -- откатываю locked.tsv к исходной стратегии перед выходом:" >&2
+  revert_to_entry_strategy
+  exit 143
+}
+trap handle_interrupt_signal TERM INT
+trap revert_to_entry_strategy EXIT
+
 echo "=== rank_quic.sh: старт $(date) ==="
 if [ "$FUNNEL" = "1" ]; then
   echo "Профиль=5 (YT_QUIC_UDP), стратегии=1..$max_strat, режим=funnel (до $PASSES проходов, отсеивание нерабочих), попыток на стратегию=$ATTEMPTS_PER_STRATEGY"
@@ -226,13 +251,7 @@ fi
 
 echo ""
 echo "Возврат к исходной стратегии:"
-if [ -n "$prev_strategy" ] && [ "$prev_strategy" != "0" ]; then
-  orch_locked_set "$PROFILE" "$PROTO" "$prev_strategy"
-  echo "  -> strategy=$prev_strategy"
-else
-  orch_locked_clear "$PROFILE" "$PROTO"
-  echo "  -> auto (был не задан)"
-fi
+revert_to_entry_strategy
 
 echo ""
 echo "=== Агрегация по $PASSES проходам ==="
