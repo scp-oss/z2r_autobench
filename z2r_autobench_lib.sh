@@ -390,13 +390,23 @@ tune_profile_exhaustive() {
 # ведёт на конкретный /videoplayback?... с корректными itag/expire.
 DEFAULT_TEST_VIDEO_ID="${DEFAULT_TEST_VIDEO_ID:-dQw4w9WgXcQ}"
 
+# Живой случай на NETH-4, 2026-08-18: у yt-dlp тут нет своего внешнего
+# таймаута -- при деградировавшей связности до YouTube (ровно то, что
+# профиль 2 время от времени и ловит) внутренние ретраи yt-dlp могут
+# растянуться на минуты. Раньше это просто задерживало один шаг общего
+# последовательного цикла демона; теперь, когда профиль 2 -- отдельный
+# процесс (autotune-profile@2), незамеченный хэнг здесь означает, что ЭТОТ
+# health-check не завершится вообще, пока не повезёт с сетью. YT_RESOLVE_TIMEOUT
+# ограничивает худший случай явно, вместо неопределённого ожидания.
+YT_RESOLVE_TIMEOUT="${YT_RESOLVE_TIMEOUT:-25}"
+
 resolve_googlevideo_url() {
   local video_id="${1:-$DEFAULT_TEST_VIDEO_ID}"
   if ! command -v yt-dlp >/dev/null 2>&1; then
-    echo "" 
+    echo ""
     return 1
   fi
-  yt-dlp -f 'best[height<=480]' --get-url \
+  timeout "$YT_RESOLVE_TIMEOUT" yt-dlp -f 'best[height<=480]' --get-url \
     "https://www.youtube.com/watch?v=${video_id}" 2>/dev/null | tail -n1
 }
 
