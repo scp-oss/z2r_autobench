@@ -72,6 +72,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/z2r_autobench"
 INSTALLED_Z0R="$INSTALL_DIR/z0r"
+Z0R_BIN_LINK="/usr/local/bin/z0r"
 REPO_URL="https://github.com/scp-oss/z2r_autobench.git"
 LOG_DIR="/opt/z2r_autobench/logs"
 LOCKED_TSV="/opt/zapret2/extra_strats/cache/orchestra/locked.tsv"
@@ -2246,6 +2247,26 @@ uninstall_tg_relay() {
 # больше из скрипта не трогаем. z2r, autotune-daemon.service и Discord_bot
 # НЕ трогает — для них отдельные пункты (16/17/18), чтобы не сносить
 # что-то по ошибке заодно.
+# Ставит команду "z0r" в PATH (симлинк на $INSTALLED_Z0R), чтобы можно было
+# звать из любого каталога, как и родной "z2r" (тот себя ставит в
+# /usr/local/bin/z2r сам, см. установщик автора). Идемпотентно — если
+# симлинк уже правильный, молчит; если там что-то постороннее с этим же
+# именем (не наш симлинк) — не трогает и предупреждает.
+ensure_z0r_command() {
+  [ -f "$INSTALLED_Z0R" ] || return 0
+  if [ -L "$Z0R_BIN_LINK" ]; then
+    [ "$(readlink -f "$Z0R_BIN_LINK" 2>/dev/null)" = "$(readlink -f "$INSTALLED_Z0R" 2>/dev/null)" ] && return 0
+    echo "$Z0R_BIN_LINK уже ведёт куда-то ещё — не трогаю." >&2
+    return 0
+  fi
+  if [ -e "$Z0R_BIN_LINK" ]; then
+    echo "$Z0R_BIN_LINK уже существует и это не симлинк — не трогаю." >&2
+    return 0
+  fi
+  ln -s "$INSTALLED_Z0R" "$Z0R_BIN_LINK" 2>/dev/null \
+    && echo "Команда 'z0r' установлена ($Z0R_BIN_LINK -> $INSTALLED_Z0R)."
+}
+
 uninstall_autobench_self() {
   echo "ВНИМАНИЕ: удалит весь $INSTALL_DIR — сам этот инструмент и все его файлы"
   echo "(включая логи тестов и Discord_bot внутри него, если он тут склонирован)."
@@ -2253,6 +2274,10 @@ uninstall_autobench_self() {
   read -re -p "Точно удалить z2r_autobench? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
     echo "Удаляю $INSTALL_DIR..."
+    if [ -L "$Z0R_BIN_LINK" ] && [ "$(readlink -f "$Z0R_BIN_LINK" 2>/dev/null)" = "$(readlink -f "$INSTALLED_Z0R" 2>/dev/null)" ]; then
+      rm -f "$Z0R_BIN_LINK"
+      echo "Команда 'z0r' ($Z0R_BIN_LINK) удалена."
+    fi
     rm -rf "$INSTALL_DIR"
     echo "z2r_autobench удалён."
     exit 0
@@ -2325,6 +2350,7 @@ if [ "$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")" != "$INSTALLED_Z0R" ]; the
     exit 1
   fi
   chmod +x "$INSTALLED_Z0R"
+  ensure_z0r_command
 
   if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
     echo ""
@@ -2341,6 +2367,7 @@ fi
 
 # мы точно /opt/z2r_autobench/z0r — обычный (не bootstrap) запуск: тихо
 # подтягиваем обновления, если есть доступ к GitHub, и продолжаем как обычно
+ensure_z0r_command
 if [ -d "$INSTALL_DIR/.git" ]; then
   ( cd "$INSTALL_DIR" && git pull --ff-only origin main >/dev/null 2>&1 ) || true
 fi
