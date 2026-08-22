@@ -1568,40 +1568,87 @@ zenith_menu() {
 # "Обновление" = git pull --ff-only от main (не от текущей рабочей
 # ветки -- продакшен подтягивает то, что реально смержено) +
 # специфичный для проекта рестарт, вся логика -- в autoupdate.sh.
+#
+# Меню сокращено до одного общего переключателя -- сам определяет, какие
+# модули реально установлены (по наличию каталога), и включает/выключает
+# их все разом. Zenith намеренно исключён из общего переключателя -- его
+# "обновление" это полная пересборка docker-контейнера, а не лёгкий git
+# pull + рестарт, как у остальных, поэтому оставлен отдельным пунктом.
+autoupdate_included_projects() {
+  local projects=(z2r_autobench)
+  [ -d "$PANEL_DIR" ] && projects+=(panel)
+  [ -d "$TGRELAY_DIR" ] && projects+=(tgrelay)
+  printf '%s\n' "${projects[@]}"
+}
+
+autoupdate_project_label() {
+  case "$1" in
+    z2r_autobench) echo "z2r_autobench (сам инструмент + autotune-daemon)" ;;
+    panel) echo "z0r-panel (pip install + systemctl restart zenith-panel)" ;;
+    tgrelay) echo "Zenith-TG (pip install + systemctl restart tg-transparent-relay)" ;;
+    zenith) echo "Zenith (docker compose up -d --build)" ;;
+  esac
+}
+
+autoupdate_master_status() {
+  local p
+  while IFS= read -r p; do
+    [ "$(autoupdate_conf_get "$p")" = "1" ] || { echo "0"; return; }
+  done < <(autoupdate_included_projects)
+  echo "1"
+}
+
+autoupdate_set_master() {
+  local value="$1" p
+  while IFS= read -r p; do
+    autoupdate_conf_set "$p" "$value"
+  done < <(autoupdate_included_projects)
+}
+
+autoupdate_offer_timer() {
+  [ "$(get_autoupdate_timer_status)" = "ON" ] && return 0
+  read -re -p "Таймер автообновления ещё не запущен -- установить и включить сейчас? [Y/n]: " ans
+  case "$ans" in n|N) ;; *) install_autoupdate_timer ;; esac
+}
+
 autoupdate_menu() {
-  local projects=(z2r_autobench zenith panel tgrelay)
-  local labels=(
-    "z2r_autobench (сам инструмент + autotune-daemon)"
-    "Zenith (docker compose up -d --build)"
-    "z0r-panel (pip install + systemctl restart zenith-panel)"
-    "Zenith-TG (pip install + systemctl restart tg-transparent-relay)"
-  )
   while true; do
     echo ""
     echo "=== Автообновление (таймер: $(color_tag "$(get_autoupdate_timer_status)"), проверка ~раз в 20 мин) ==="
     echo ""
-    local i
-    for i in "${!projects[@]}"; do
-      local project="${projects[$i]}" enabled
-      enabled="$(autoupdate_conf_get "$project")"
-      printf "  %d) [%s] %s\n" "$((i + 1))" "$([ "$enabled" = "1" ] && echo "ВКЛ" || echo "выкл")" "${labels[$i]}"
-      printf "     последнее обновление: %s\n" "$(autoupdate_last_update "$project")"
-    done
+    local master; master="$(autoupdate_master_status)"
+    printf "  1) [%s] Автообновление установленных модулей\n" "$([ "$master" = "1" ] && echo "ВКЛ" || echo "выкл")"
+    local p
+    while IFS= read -r p; do
+      printf "     - %s -- последнее обновление: %s\n" "$(autoupdate_project_label "$p")" "$(autoupdate_last_update "$p")"
+    done < <(autoupdate_included_projects)
+    if [ -d "$ZENITH_DIR" ]; then
+      local zenith_enabled; zenith_enabled="$(autoupdate_conf_get zenith)"
+      printf "  2) [%s] %s\n" "$([ "$zenith_enabled" = "1" ] && echo "ВКЛ" || echo "выкл")" "$(autoupdate_project_label zenith)"
+      printf "     последнее обновление: %s\n" "$(autoupdate_last_update zenith)"
+    fi
     echo ""
     echo "  r) Прогнать обновление прямо сейчас (для всех включённых)"
     echo "  0) Назад"
     echo ""
     read -re -p "Автообновление > " achoice
     case "$achoice" in
-      1|2|3|4)
-        local idx=$((achoice - 1)) project="${projects[$((achoice - 1))]}" current new
-        current="$(autoupdate_conf_get "$project")"
-        new=$([ "$current" = "1" ] && echo "0" || echo "1")
-        autoupdate_conf_set "$project" "$new"
-        echo "${labels[$idx]}: $([ "$new" = "1" ] && echo "включено" || echo "выключено")."
-        if [ "$new" = "1" ] && [ "$(get_autoupdate_timer_status)" != "ON" ]; then
-          read -re -p "Таймер автообновления ещё не запущен -- установить и включить сейчас? [Y/n]: " ans
-          case "$ans" in n|N) ;; *) install_autoupdate_timer ;; esac
+      1)
+        local new; new=$([ "$master" = "1" ] && echo "0" || echo "1")
+        autoupdate_set_master "$new"
+        echo "Автообновление установленных модулей: $([ "$new" = "1" ] && echo "включено" || echo "выключено")."
+        [ "$new" = "1" ] && autoupdate_offer_timer
+        ;;
+      2)
+        if [ -d "$ZENITH_DIR" ]; then
+          local current new
+          current="$(autoupdate_conf_get zenith)"
+          new=$([ "$current" = "1" ] && echo "0" || echo "1")
+          autoupdate_conf_set zenith "$new"
+          echo "Zenith: $([ "$new" = "1" ] && echo "включено" || echo "выключено")."
+          [ "$new" = "1" ] && autoupdate_offer_timer
+        else
+          echo "Неизвестный выбор."
         fi
         ;;
       r|R)
