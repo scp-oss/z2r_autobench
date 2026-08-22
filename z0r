@@ -109,6 +109,18 @@ PANEL_SERVICE="zenith-panel"
 TGRELAY_DIR="$INSTALL_DIR/Zenith-TG"
 TGRELAY_REPO_URL="https://github.com/scp-oss/Zenith-TG.git"
 TGRELAY_SERVICE="tg-transparent-relay"
+# DNSCrypt-proxy -- локальный DoH-резолвер, не самописный компонент этого
+# репозитория, а обычный пакет дистрибутива. Появился из живого случая
+# 2026-08-22 (NETH-4): провайдер начал резать обычный DNS/DoT/DoH к
+# популярным резолверам (кроме Яндекса, который сам подчиняется реестру
+# и на заблокированных доменах отдаёт то же самое, что и блокировка) --
+# youtube.com резолвился в NXDOMAIN даже через 8.8.8.8, но нормально через
+# DoH к cloudflare-dns.com/dns.nextdns.io/dns.sb. Ограничиваем server_names
+# именно этими тремя подтверждёнными вживую, не полагаемся на дефолтный
+# список пакета.
+DNSCRYPT_TOML="/etc/dnscrypt-proxy/dnscrypt-proxy.toml"
+DNSCRYPT_SERVER_NAMES="server_names = ['cloudflare', 'cloudflare-ipv6', 'nextdns', 'sb']"
+DNSCRYPT_DHCPCD_MARKER="# z0r-dnscrypt: локальный DoH-резолвер (dnscrypt-proxy), добавлено z0r"
 # Автообновление всей экосистемы (z2r_autobench/Zenith/z0r-panel/
 # Zenith-TG) -- общий конфиг с z0r-panel (веб тоже читает/пишет ЭТОТ ЖЕ
 # файл, см. autoupdate.sh и README z0r-panel), не свой отдельный.
@@ -414,6 +426,11 @@ get_tg_relay_status() {
   systemctl is-active --quiet "$TGRELAY_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
 }
 
+get_dnscrypt_status() {
+  command -v dnscrypt-proxy >/dev/null 2>&1 || { echo "NONE"; return; }
+  systemctl is-active --quiet dnscrypt-proxy 2>/dev/null && echo "ON" || echo "OFF"
+}
+
 autoupdate_conf_get() {
   local project="$1"
   [ -f "$AUTOUPDATE_CONF" ] || { echo "0"; return; }
@@ -548,6 +565,7 @@ show_menu() {
   echo " 22) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
   echo " 24) Zenith-TG $(color_tag "$(get_tg_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
   echo " 26) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-TG)" >&2
+  echo " 28) DNSCrypt-proxy $(color_tag "$(get_dnscrypt_status)") (локальный DoH-резолвер — на случай блокировки DoT/DoH к обычным резолверам)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
   echo "" >&2
@@ -558,8 +576,9 @@ show_menu() {
   echo " 20) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
   echo " 23) Удалить Zenith" >&2
   echo " 25) Удалить Zenith-TG" >&2
+  echo " 29) Удалить DNSCrypt-proxy" >&2
   echo "" >&2
-  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + web_panel + Zenith + Zenith-TG)" >&2
+  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + web_panel + Zenith + Zenith-TG + DNSCrypt-proxy)" >&2
   echo "" >&2
   echo "  0) Выход" >&2
   echo "" >&2
@@ -2289,6 +2308,139 @@ uninstall_tg_relay() {
   esac
 }
 
+# Реальный слушающий адрес пакета Debian -- 127.0.2.1 (не 127.0.0.1, чтобы
+# не конфликтовать с типичным использованием последнего другими
+# резолверами), но не хардкодим -- вдруг другой дистрибутив/версия даст
+# другой дефолт. Фолбэк на 127.0.2.1, если распарсить не удалось.
+dnscrypt_listen_addr() {
+  local line addr
+  line="$(grep -E '^\s*listen_addresses' "$DNSCRYPT_TOML" 2>/dev/null | head -1)"
+  addr="$(echo "$line" | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | head -1)"
+  echo "${addr:-127.0.2.1}"
+}
+
+# Прописывает локальный резолвер в системный DNS. Знаем только про dhcpcd
+# (единственная реально встреченная схема пока) -- для остального просто
+# подсказываем адрес и не лезем гадать формат чужого сетевого менеджера.
+# Метка $DNSCRYPT_DHCPCD_MARKER нужна, чтобы uninstall_dnscrypt() снял
+# ТОЛЬКО то, что добавили сами, не трогая чужие static-записи.
+dnscrypt_wire_resolver() {
+  local addr="$1" iface
+  if ! command -v dhcpcd >/dev/null 2>&1 || ! pgrep -x dhcpcd >/dev/null 2>&1; then
+    echo "Не нашёл dhcpcd -- пропиши резолвер ($addr) вручную в своей сетевой конфигурации (systemd-resolved/NetworkManager/interfaces/etc)." >&2
+    return 1
+  fi
+  if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
+    echo "dhcpcd уже настроен на локальный резолвер (запись z0r-dnscrypt уже есть) -- не трогаю."
+    return 0
+  fi
+  {
+    echo "$DNSCRYPT_DHCPCD_MARKER"
+    echo "static domain_name_servers=${addr}"
+  } >> /etc/dhcpcd.conf
+  iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+  if [ -n "$iface" ]; then
+    dhcpcd -n "$iface" >/dev/null 2>&1
+    echo "Системный DNS переключён на $addr (через dhcpcd, интерфейс $iface)."
+  else
+    echo "Запись добавлена, но не удалось определить интерфейс -- примени вручную: dhcpcd -n <интерфейс>." >&2
+  fi
+}
+
+install_dnscrypt() {
+  if ! command -v dnscrypt-proxy >/dev/null 2>&1; then
+    apt-get update >/dev/null 2>&1
+    apt-get install -y dnscrypt-proxy >/dev/null 2>&1 \
+      || opkg install dnscrypt-proxy >/dev/null 2>&1 \
+      || apk add dnscrypt-proxy >/dev/null 2>&1
+  fi
+  if ! command -v dnscrypt-proxy >/dev/null 2>&1; then
+    echo "Не удалось поставить dnscrypt-proxy автоматически -- поставь пакет вручную и повтори." >&2
+    return 1
+  fi
+  if [ -f "$DNSCRYPT_TOML" ]; then
+    sed -i "s/^#\?[[:space:]]*server_names[[:space:]]*=.*/${DNSCRYPT_SERVER_NAMES}/" "$DNSCRYPT_TOML"
+  fi
+  systemctl enable --now dnscrypt-proxy.socket >/dev/null 2>&1
+  systemctl restart dnscrypt-proxy
+  sleep 1
+  echo "dnscrypt-proxy установлен и запущен (server_names: cloudflare, cloudflare-ipv6, nextdns, sb)."
+}
+
+manage_dnscrypt() {
+  local st; st="$(get_dnscrypt_status)"
+  echo "DNSCrypt-proxy (локальный DoH-резолвер): $st"
+  case "$st" in
+    NONE)
+      echo "Полезно, когда провайдер режет обычный DNS/DoT/DoH к популярным резолверам"
+      echo "(живой случай 2026-08-22: youtube.com отдавал NXDOMAIN даже через 8.8.8.8,"
+      echo "но резолвился нормально через DoH к cloudflare-dns.com/dns.nextdns.io/dns.sb)."
+      read -re -p "Поставить и настроить dnscrypt-proxy? [y/N]: " ans
+      case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+      install_dnscrypt || return 1
+      local addr; addr="$(dnscrypt_listen_addr)"
+      if command -v dig >/dev/null 2>&1; then
+        echo "Проверка: dig @$addr youtube.com +short"
+        dig "@$addr" youtube.com +short
+      fi
+      read -re -p "Переключить системный DNS на локальный резолвер ($addr) прямо сейчас? [y/N]: " ans2
+      case "$ans2" in
+        y|Y) dnscrypt_wire_resolver "$addr" ;;
+        *) echo "Ок, резолвер поднят на $addr, но система пока на старом DNS -- переключи вручную, когда будешь готов (или зайди в этот пункт ещё раз)." ;;
+      esac
+      ;;
+    OFF)
+      read -re -p "Сервис остановлен. Запустить? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl enable --now dnscrypt-proxy.socket dnscrypt-proxy >/dev/null 2>&1; echo "Запущен." ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+    ON)
+      read -re -p "Сервис работает. Остановить? [y/N]: " ans
+      case "$ans" in
+        y|Y)
+          systemctl disable --now dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1
+          echo "Остановлен (пакет и переключение системного DNS не тронуты -- пункт удаления снимает полностью)."
+          ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+  esac
+}
+
+uninstall_dnscrypt() {
+  if ! command -v dnscrypt-proxy >/dev/null 2>&1; then
+    echo "dnscrypt-proxy не установлен -- нечего удалять."
+    return 0
+  fi
+  read -re -p "Остановить, снять переключение DNS (если делали через z0r) и удалить пакет dnscrypt-proxy? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl disable --now dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1 || true
+      if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
+        # awk, не sed -- маркер содержит "#" и скобки, которые ломают
+        # sed-паттерн при использовании как разделителя/regex. Точное
+        # строковое сравнение через -v убирает саму строку-маркер и
+        # ровно одну следующую (нашу static domain_name_servers=...).
+        awk -v marker="$DNSCRYPT_DHCPCD_MARKER" '
+          $0 == marker { skip = 2; next }
+          skip > 0 { skip--; next }
+          { print }
+        ' /etc/dhcpcd.conf > /etc/dhcpcd.conf.z0r-tmp && mv /etc/dhcpcd.conf.z0r-tmp /etc/dhcpcd.conf
+        local iface; iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+        [ -n "$iface" ] && dhcpcd -n "$iface" >/dev/null 2>&1
+        echo "Запись переключения DNS в dhcpcd.conf снята, интерфейс перечитал конфиг."
+      fi
+      apt-get remove -y dnscrypt-proxy >/dev/null 2>&1 \
+        || opkg remove dnscrypt-proxy >/dev/null 2>&1 \
+        || apk del dnscrypt-proxy >/dev/null 2>&1
+      echo "dnscrypt-proxy удалён."
+      ;;
+    *) echo "Отмена, dnscrypt-proxy не тронут." ;;
+  esac
+}
+
 # Удаляет весь z2r_autobench (сам себя) — файл, из которого мы прямо сейчас
 # исполняемся, тоже пропадёт, поэтому сразу выходим после rm -rf, ничего
 # больше из скрипта не трогаем. z2r, autotune-daemon.service и Discord_bot
@@ -2357,6 +2509,8 @@ uninstall_everything() {
   uninstall_zenith
   echo ""
   uninstall_tg_relay
+  echo ""
+  uninstall_dnscrypt
   echo ""
   uninstall_autobench_self
 }
@@ -2501,6 +2655,8 @@ while true; do
     24) manage_tg_relay ;;
     25) uninstall_tg_relay ;;
     26) autoupdate_menu ;;
+    28) manage_dnscrypt ;;
+    29) uninstall_dnscrypt ;;
     999) uninstall_everything ;;
     *)
       # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
