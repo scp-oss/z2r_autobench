@@ -199,6 +199,27 @@ project names here — same public-repo constraint as README.md.
   doesn't touch `blob_tune.sh`'s own separate hardcoded
   `FAKE_DIR=/opt/zapret2/files/fake` — same class of bug, not yet fixed,
   lower priority since it's not on the critical path most tools hit.
+- `z0r` (the top-level menu script) does **not** source
+  `z2r_autobench_lib.sh` — it's a standalone script with its own
+  `LOCKED_TSV`/`LOCKED_MANUAL_TSV`, previously hardcoded to
+  `/opt/zapret2/extra_strats/...` independently of the fix above, so it
+  never picked it up. Live symptom on miha (MTS): every profile showed
+  `[#0]`/auto in the menu (item 111, manual strategy switch) even though
+  `set_strategy_cli.sh` (which *does* source the lib) had genuinely locked
+  real strategies — the display was silently reading a file that doesn't
+  exist on this layout. Fixed 2026-08-23 by replicating the same tiny
+  base-detection snippet inline in `z0r` rather than sourcing the whole
+  lib (risk of name collisions with `z0r`'s own functions). Two more
+  known instances of this exact class, found but **not yet fixed** (lower
+  priority, same reasoning as `blob_tune.sh` above): `test_custom_domain.sh`
+  reads `TCP_YT_list.txt`/`TCP_Discord.txt`/`TCP_RKN_list.txt`/
+  `TCP_Custom.txt` from a hardcoded `/opt/zapret2/extra_strats/` (silently
+  misclassifies domains on a split install, no error), and `blob_tune.sh`
+  also has a second hardcoded path beyond the already-noted `FAKE_DIR`:
+  `CFG_BACKUP_DIR=/opt/zapret2/extra_strats/cache/orchestra/config_backups`.
+  Before trusting ANY tool's read of `locked.tsv`/hostlists/backups on a
+  new box, grep it for a bare `/opt/zapret2/` path first — sourcing the
+  lib isn't universal, several tools still hardcode.
 - `zapret2.service` has **no self-healing** if it dies for an unrelated
   reason (crash, a bad config push, another tool restarting it into a
   broken state) — `autotune_daemon.sh` only detected "not running" and
