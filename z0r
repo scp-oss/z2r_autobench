@@ -2621,6 +2621,28 @@ dnscrypt_leak_check() {
   fi
 
   echo ""
+  echo "--- Спец. домены-\"канарейки\" (тот же принцип, что у dnsleaktest.com и"
+  echo "    подобных сервисов -- домен, ответ на который называет резолвер,"
+  echo "    который на самом деле его спросил, а не просто пингует IP) ---"
+  if command -v dig >/dev/null 2>&1; then
+    local canary_default canary_dnscrypt
+    canary_default="$(dig +short TXT o-o.myaddr.l.google.com +time=5 +tries=1 2>/dev/null | tr -d '"')"
+    canary_dnscrypt="$(dig "@$addr" +short TXT o-o.myaddr.l.google.com +time=5 +tries=1 2>/dev/null | tr -d '"')"
+    echo "Google o-o.myaddr.l.google.com, как видит обычное приложение: ${canary_default:-(нет ответа)}"
+    echo "Google o-o.myaddr.l.google.com, явно через dnscrypt ($addr):  ${canary_dnscrypt:-(нет ответа)}"
+    if [ -n "$canary_default" ] && [ "$canary_default" != "$canary_dnscrypt" ]; then
+      echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: обычный путь и явный dnscrypt называют разный резолвер."
+    elif [ -n "$canary_default" ]; then
+      echo "OK: обычный путь и dnscrypt называют один и тот же резолвер."
+    fi
+    echo "Значение выше -- IP САМОГО РЕЗОЛВЕРА (не твой адрес). Сверь его руками (whois <IP>) --"
+    echo "если он попадает в диапазон твоего интернет-провайдера, а не Cloudflare/dnscrypt-серверов,"
+    echo "запросы реально уходят через инфраструктуру провайдера в обход DoH."
+  else
+    echo "dig не найден -- эту проверку пропускаю."
+  fi
+
+  echo ""
   echo "--- IPv6 ---"
   if [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
     echo "На интерфейсе есть IPv6-маршрут по умолчанию, а dnscrypt-proxy слушает только на $addr (IPv4)."
@@ -2631,32 +2653,74 @@ dnscrypt_leak_check() {
   fi
 }
 
-# Прописывает локальный резолвер в системный DNS. Знаем только про dhcpcd
-# (единственная реально встреченная схема пока) -- для остального просто
-# подсказываем адрес и не лезем гадать формат чужого сетевого менеджера.
+# Прописывает локальный резолвер в системный DNS -- пробует по очереди
+# все реально встреченные схемы (не только dhcpcd, как раньше), потому
+# что "только подсказать адрес и не лезть" на практике означало, что
+# install_dnscrypt() ставил и запускал резолвер, а resolv.conf так и
+# оставался со старым nameserver, пока кто-то не пропишет его руками --
+# живой случай 2026-08-23: ни dhcpcd не было, ни явного вопроса не было
+# задано вовремя, дырявость (пункт 30) поймала это уже постфактум.
 # Метка $DNSCRYPT_DHCPCD_MARKER нужна, чтобы uninstall_dnscrypt() снял
-# ТОЛЬКО то, что добавили сами, не трогая чужие static-записи.
+# ТОЛЬКО то, что добавили сами, не трогая чужие static-записи (тот же
+# принцип и для прямой записи resolv.conf ниже).
 dnscrypt_wire_resolver() {
   local addr="$1" iface
-  if ! command -v dhcpcd >/dev/null 2>&1 || ! pgrep -x dhcpcd >/dev/null 2>&1; then
-    echo "Не нашёл dhcpcd -- пропиши резолвер ($addr) вручную в своей сетевой конфигурации (systemd-resolved/NetworkManager/interfaces/etc)." >&2
-    return 1
+
+  # systemd-resolved -- современный Debian/Ubuntu по умолчанию. DNS=
+  # через resolvectl держится поверх того, что присылает DHCP -- не
+  # затирается следующим же обновлением аренды, в отличие от resolv.conf.
+  if command -v resolvectl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+    if [ -n "$iface" ] && resolvectl dns "$iface" "$addr" >/dev/null 2>&1; then
+      resolvectl domain "$iface" '~.' >/dev/null 2>&1
+      echo "Системный DNS переключён на $addr (через systemd-resolved, интерфейс $iface)."
+      return 0
+    fi
   fi
-  if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
-    echo "dhcpcd уже настроен на локальный резолвер (запись z0r-dnscrypt уже есть) -- не трогаю."
+
+  # NetworkManager -- через nmcli на активное соединение.
+  if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    local conn
+    conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -n "$conn" ] && nmcli connection modify "$conn" ipv4.dns "$addr" ipv4.ignore-auto-dns yes >/dev/null 2>&1; then
+      nmcli connection up "$conn" >/dev/null 2>&1
+      echo "Системный DNS переключён на $addr (через NetworkManager, соединение '$conn')."
+      return 0
+    fi
+  fi
+
+  # dhcpcd -- как раньше, единственная схема, что была тут изначально.
+  if command -v dhcpcd >/dev/null 2>&1 && pgrep -x dhcpcd >/dev/null 2>&1; then
+    if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
+      echo "dhcpcd уже настроен на локальный резолвер (запись z0r-dnscrypt уже есть) -- не трогаю."
+      return 0
+    fi
+    {
+      echo "$DNSCRYPT_DHCPCD_MARKER"
+      echo "static domain_name_servers=${addr}"
+    } >> /etc/dhcpcd.conf
+    iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+    if [ -n "$iface" ]; then
+      dhcpcd -n "$iface" >/dev/null 2>&1
+      echo "Системный DNS переключён на $addr (через dhcpcd, интерфейс $iface)."
+      return 0
+    fi
+  fi
+
+  # Ничего из известного не подошло -- пишем resolv.conf напрямую с
+  # бэкапом. Не самый надёжный способ (следующий DHCP/NetworkManager может
+  # перезаписать), но лучше молчаливого ничего -- предупреждаем прямым
+  # текстом и советуем перепроверить пунктом 30 после ребута/переподключения.
+  if [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+    cp -f /etc/resolv.conf /etc/resolv.conf.z0r-dnscrypt.bak 2>/dev/null
+    { echo "# $DNSCRYPT_DHCPCD_MARKER (прямая запись resolv.conf, другие механизмы не подошли)"; echo "nameserver $addr"; } > /etc/resolv.conf
+    echo "Системный DNS переключён на $addr (прямая запись /etc/resolv.conf, бэкап: /etc/resolv.conf.z0r-dnscrypt.bak)."
+    echo "!!! DHCP/NetworkManager может перезаписать resolv.conf позже -- перепроверь пунктом 30 после ребута/переподключения сети."
     return 0
   fi
-  {
-    echo "$DNSCRYPT_DHCPCD_MARKER"
-    echo "static domain_name_servers=${addr}"
-  } >> /etc/dhcpcd.conf
-  iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
-  if [ -n "$iface" ]; then
-    dhcpcd -n "$iface" >/dev/null 2>&1
-    echo "Системный DNS переключён на $addr (через dhcpcd, интерфейс $iface)."
-  else
-    echo "Запись добавлена, но не удалось определить интерфейс -- примени вручную: dhcpcd -n <интерфейс>." >&2
-  fi
+
+  echo "Не нашёл известный механизм (systemd-resolved/NetworkManager/dhcpcd), а resolv.conf недоступен для прямой записи (симлинк?) -- пропиши резолвер ($addr) вручную." >&2
+  return 1
 }
 
 install_dnscrypt() {
@@ -2677,6 +2741,14 @@ install_dnscrypt() {
   systemctl restart dnscrypt-proxy
   sleep 1
   echo "dnscrypt-proxy установлен и запущен (server_names: cloudflare, cloudflare-ipv6, nextdns, sb)."
+
+  # Автоматически, не отдельным вопросом -- ставить резолвер и НЕ включать
+  # его в системный DNS означало, что живой трафик продолжал идти через
+  # старый (возможно, режущийся ISP) резолвер, пока кто-то не зайдёт и не
+  # переключит вручную. Живой случай 2026-08-23: спросили бы -- забыли
+  # бы ответить "да", как и было на деле.
+  local addr; addr="$(dnscrypt_listen_addr)"
+  dnscrypt_wire_resolver "$addr"
 }
 
 manage_dnscrypt() {
@@ -2695,11 +2767,7 @@ manage_dnscrypt() {
         echo "Проверка: dig @$addr youtube.com +short"
         dig "@$addr" youtube.com +short
       fi
-      read -re -p "Переключить системный DNS на локальный резолвер ($addr) прямо сейчас? [y/N]: " ans2
-      case "$ans2" in
-        y|Y) dnscrypt_wire_resolver "$addr" ;;
-        *) echo "Ок, резолвер поднят на $addr, но система пока на старом DNS -- переключи вручную, когда будешь готов (или зайди в этот пункт ещё раз)." ;;
-      esac
+      echo "Проверь, что системный DNS реально переключился -- пункт 30 (проверка на дырявость)."
       ;;
     OFF)
       read -re -p "Сервис остановлен. Запустить? [y/N]: " ans
@@ -2730,6 +2798,8 @@ uninstall_dnscrypt() {
   case "$ans" in
     y|Y)
       systemctl disable --now dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1 || true
+      local iface
+      iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
       if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
         # awk, не sed -- маркер содержит "#" и скобки, которые ломают
         # sed-паттерн при использовании как разделителя/regex. Точное
@@ -2740,9 +2810,28 @@ uninstall_dnscrypt() {
           skip > 0 { skip--; next }
           { print }
         ' /etc/dhcpcd.conf > /etc/dhcpcd.conf.z0r-tmp && mv /etc/dhcpcd.conf.z0r-tmp /etc/dhcpcd.conf
-        local iface; iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
         [ -n "$iface" ] && dhcpcd -n "$iface" >/dev/null 2>&1
         echo "Запись переключения DNS в dhcpcd.conf снята, интерфейс перечитал конфиг."
+      fi
+      # systemd-resolved/NetworkManager (см. dnscrypt_wire_resolver) не
+      # оставляют текстовую метку так же явно, как dhcpcd.conf -- лучшее,
+      # что можно сделать без риска задеть настройки, поставленные не
+      # нами -- откатить конкретно то, на что сами переключали (DNS=)/
+      # (ipv4.dns), а не трогать интерфейс/соединение целиком.
+      if [ -n "$iface" ] && command -v resolvectl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        resolvectl revert "$iface" >/dev/null 2>&1 && echo "systemd-resolved DNS на $iface возвращён к автоматическому (DHCP)."
+      fi
+      if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        local conn; conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | head -1 | cut -d: -f1)"
+        if [ -n "$conn" ]; then
+          nmcli connection modify "$conn" ipv4.dns "" ipv4.ignore-auto-dns no >/dev/null 2>&1 \
+            && nmcli connection up "$conn" >/dev/null 2>&1 \
+            && echo "NetworkManager DNS на '$conn' возвращён к автоматическому."
+        fi
+      fi
+      if [ -f /etc/resolv.conf.z0r-dnscrypt.bak ]; then
+        mv -f /etc/resolv.conf.z0r-dnscrypt.bak /etc/resolv.conf
+        echo "/etc/resolv.conf восстановлен из бэкапа (прямая запись z0r-dnscrypt снята)."
       fi
       apt-get remove -y dnscrypt-proxy >/dev/null 2>&1 \
         || opkg remove dnscrypt-proxy >/dev/null 2>&1 \
