@@ -1831,6 +1831,14 @@ install_zenith_service() {
 # человека, см. Zenith/README.md "Автономный режим") -- оба
 # НЕЗАВИСИМЫ от z0r-panel, читай п.4 докстрин выше. Панель, если
 # установлена, просто дублирует start/stop/log поверх ЭТИХ ЖЕ юнитов.
+# Читает ZENITH_PROFILES из .env для отображения в меню -- пусто = все 4
+# (YT_TLS/RKN_TLS/DS_TLS/VOICE_UDP), см. zenith_autorun.sh/auto_promoter.py,
+# которые читают ЭТУ ЖЕ переменную напрямую.
+zenith_profiles_display() {
+  local val; val="$(zenith_env_get ZENITH_PROFILES)"
+  echo "${val:-все (YT_TLS,RKN_TLS,DS_TLS,VOICE_UDP)}"
+}
+
 zenith_autonomy_menu() {
   while true; do
     local ar_st pr_st
@@ -1842,6 +1850,7 @@ zenith_autonomy_menu() {
     echo "  2) zenith-promoter (автопродвижение в прод) $(color_tag "$pr_st")"
     echo "  3) Лог zenith-autorun (journalctl -f, Ctrl+C для выхода)"
     echo "  4) Лог zenith-promoter (journalctl -f, Ctrl+C для выхода)"
+    echo "  5) Профили: $(zenith_profiles_display)"
     echo "  0) Назад"
     echo ""
     read -re -p "Автономный режим > " achoice
@@ -1880,6 +1889,42 @@ zenith_autonomy_menu() {
         ;;
       3) journalctl -u zenith-autorun -f ;;
       4) journalctl -u zenith-promoter -f ;;
+      5)
+        [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 22)." >&2; continue; }
+        echo ""
+        echo "Текущий выбор: $(zenith_profiles_display)"
+        echo "Доступные профили: YT_TLS RKN_TLS DS_TLS VOICE_UDP"
+        read -re -p "Профили через запятую/пробел (Enter — все 4): " psel
+        if [ -z "$psel" ]; then
+          if grep -q '^ZENITH_PROFILES=' "$ZENITH_DIR/.env" 2>/dev/null; then
+            sed -i 's/^ZENITH_PROFILES=.*/ZENITH_PROFILES=/' "$ZENITH_DIR/.env"
+          else
+            echo "ZENITH_PROFILES=" >> "$ZENITH_DIR/.env"
+          fi
+          echo "Автономный режим будет работать со всеми 4 профилями."
+        else
+          local norm tok valid=1 out=""
+          norm="$(echo "$psel" | tr ',' ' ')"
+          for tok in $norm; do
+            case "$tok" in
+              YT_TLS|RKN_TLS|DS_TLS|VOICE_UDP) out="${out:+$out,}$tok" ;;
+              "") ;;
+              *) echo "Неизвестный профиль: $tok (доступны: YT_TLS RKN_TLS DS_TLS VOICE_UDP)" >&2; valid=0 ;;
+            esac
+          done
+          if [ "$valid" = "1" ] && [ -n "$out" ]; then
+            if grep -q '^ZENITH_PROFILES=' "$ZENITH_DIR/.env" 2>/dev/null; then
+              sed -i "s/^ZENITH_PROFILES=.*/ZENITH_PROFILES=$out/" "$ZENITH_DIR/.env"
+            else
+              echo "ZENITH_PROFILES=$out" >> "$ZENITH_DIR/.env"
+            fi
+            echo "Сохранено: $out"
+            echo "Применится при следующем запуске zenith-autorun/zenith-promoter -- если уже включены (см. [ON] выше), перезапусти их (пункты 1/2 дважды: выкл/вкл), иначе сработает только со следующего рестарта сервиса."
+          else
+            echo "Не сохранено — есть неизвестные профили."
+          fi
+        fi
+        ;;
       0|q|Q|"") return 0 ;;
       *) echo "Неизвестный выбор." ;;
     esac
