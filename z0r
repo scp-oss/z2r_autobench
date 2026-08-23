@@ -80,8 +80,25 @@ INSTALLED_Z0R="$INSTALL_DIR/z0r"
 Z0R_BIN_LINK="/usr/local/bin/z0r"
 REPO_URL="https://github.com/scp-oss/z2r_autobench.git"
 LOG_DIR="/opt/z2r_autobench/logs"
-LOCKED_TSV="/opt/zapret2/extra_strats/cache/orchestra/locked.tsv"
-LOCKED_MANUAL_TSV="/opt/zapret2/extra_strats/cache/orchestra/locked.manual.tsv"
+# Та же автодетекция базы, что в z2r_autobench_lib.sh::_z2r_detect_base()
+# (z0r не сорсит эту lib — отдельный скрипт, копия логики держит оба места
+# в согласии). Живой баг 2026-08-23 на miha: тут было жёстко зашито
+# /opt/zapret2/..., а на этом сервере (штатная раскладка апстрим-
+# установщика, см. lib) z2r_lib/extra_strats реально лежат под /opt/zator
+# без symlink — locked.tsv по факту писался туда через set_strategy_cli.sh
+# (который сорсит lib и подхватывает правильный путь), а z0r читал вечно
+# пустой /opt/zapret2/... и показывал [#0]/auto для всех профилей, даже
+# для реально залоченных (set_strategy_cli.sh max тем временем показывал
+# верные номера — расхождение и выдало баг).
+if [ -d "/opt/zapret2/z2r_lib" ]; then
+  Z0R_ORCH_BASE="/opt/zapret2"
+elif [ -d "/opt/zator/z2r_lib" ]; then
+  Z0R_ORCH_BASE="/opt/zator"
+else
+  Z0R_ORCH_BASE="/opt/zapret2"
+fi
+LOCKED_TSV="$Z0R_ORCH_BASE/extra_strats/cache/orchestra/locked.tsv"
+LOCKED_MANUAL_TSV="$Z0R_ORCH_BASE/extra_strats/cache/orchestra/locked.manual.tsv"
 PROVIDER_CACHE="$INSTALL_DIR/.provider_cache"
 # z2r_test-voice-bot — отдельный репозиторий (не часть z2r_autobench),
 # клонируем по требованию сюда. У него нет своего systemd-юнита — держим
