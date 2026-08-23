@@ -73,7 +73,7 @@ acquire_tune_lock "rank_quic.sh" 10 || exit 1
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RAW_FILE="$LOG_DIR/rank_quic_${RUN_TS}.raw.tsv"
-echo -e "pass\tstrategy\tattempt\tsuccess\tbytes" > "$RAW_FILE"
+echo -e "pass\tstrategy\tattempt\tsuccess\tbytes\tms" > "$RAW_FILE"
 autobench_backup_locks "$RUN_TS"
 
 # ISP блокирует не домен целиком, а конкретные эджи/подсети, поэтому для
@@ -189,14 +189,15 @@ if [ "$FUNNEL" = "1" ]; then
 
       pass_ok=0
       for ((attempt=1; attempt<=ATTEMPTS_PER_STRATEGY; attempt++)); do
-        bytes_received="$(python3 "$SCRIPT_DIR/quic_probe.py" "$GV_HOST" "$GV_PATH" \
+        quic_out="$(python3 "$SCRIPT_DIR/quic_probe.py" "$GV_HOST" "$GV_PATH" \
             --range-bytes "$RANGE_BYTES" --timeout "$QUIC_TIMEOUT" 2>>"$LOG_DIR/rank_quic_${RUN_TS}.stderr.log")"
         rc=$?
+        IFS=$'\t' read -r bytes_received ms_elapsed <<< "$quic_out"
         success=0
         if [ "$rc" -eq 0 ] && [ "${bytes_received:-0}" -ge "$RANGE_BYTES" ] 2>/dev/null; then
           success=1
         fi
-        printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "${bytes_received:-0}" >> "$RAW_FILE"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "${bytes_received:-0}" "${ms_elapsed:-0}" >> "$RAW_FILE"
         [ "$success" = "1" ] && pass_ok=1
       done
       [ "$pass_ok" = "1" ] && next_candidates="$next_candidates$s "
@@ -225,14 +226,15 @@ else
       sleep "$SETTLE_SECONDS"
 
       for ((attempt=1; attempt<=ATTEMPTS_PER_STRATEGY; attempt++)); do
-        bytes_received="$(python3 "$SCRIPT_DIR/quic_probe.py" "$GV_HOST" "$GV_PATH" \
+        quic_out="$(python3 "$SCRIPT_DIR/quic_probe.py" "$GV_HOST" "$GV_PATH" \
             --range-bytes "$RANGE_BYTES" --timeout "$QUIC_TIMEOUT" 2>>"$LOG_DIR/rank_quic_${RUN_TS}.stderr.log")"
         rc=$?
+        IFS=$'\t' read -r bytes_received ms_elapsed <<< "$quic_out"
         success=0
         if [ "$rc" -eq 0 ] && [ "${bytes_received:-0}" -ge "$RANGE_BYTES" ] 2>/dev/null; then
           success=1
         fi
-        printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "${bytes_received:-0}" >> "$RAW_FILE"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "${bytes_received:-0}" "${ms_elapsed:-0}" >> "$RAW_FILE"
       done
       current_step=$((current_step + 1))
       print_progress "$current_step" "$total_steps" "проход=$pass strategy=$s (QUIC, медленно)"
@@ -254,17 +256,23 @@ awk -F'\t' '
   BEGIN { nstrat = 0 }
   NR==1 { next }
   {
-    pass = $1; strat = $2; succ = $4; bytes = $5
+    pass = $1; strat = $2; succ = $4; bytes = $5; ms = $6
     total[strat]++
     if (pass+0 > maxpass[strat]+0) maxpass[strat] = pass+0
     if (succ == 1) {
       successes[strat]++
       sumbytes[strat] += bytes
       cntbytes[strat]++
+      summs[strat] += ms
     }
   }
   END {
-    printf "%-10s %-12s %-15s %-10s %-6s\n", "Стратегия", "Успех", "Ср.байт", "Надёжность", "Раунд"
+    # Живой инцидент 2026-08-23: при фиксированном --range-bytes успешный
+    # ответ ВСЕГДА возвращает одинаковое число байт -- сортировка по
+    # avgbytes (как было раньше) не различала стратегии вообще. Теперь
+    # основной критерий качества внутри одного уровня надёжности -- время
+    # (мс), меньше лучше.
+    printf "%-10s %-12s %-10s %-10s %-10s %-6s\n", "Стратегия", "Успех", "Ср.мс", "Ср.байт", "Надёжность", "Раунд"
     n = 0
     max_s = 0
     for (s in total) { if (s+0 > max_s) max_s = s+0 }
@@ -273,22 +281,24 @@ awk -F'\t' '
       if ((s in total) && (s in successes) && successes[s] > 0) {
         rate = successes[s] / total[s]
         avgb = sumbytes[s] / cntbytes[s]
-        order[n] = s SUBSEP rate SUBSEP avgb SUBSEP maxpass[s]
+        avgms = summs[s] / cntbytes[s]
+        order[n] = s SUBSEP rate SUBSEP avgms SUBSEP maxpass[s]
         n++
       }
     }
     for (i = 0; i < n; i++) {
       for (j = i+1; j < n; j++) {
         split(order[i], a, SUBSEP); split(order[j], b, SUBSEP)
-        if (b[4]+0 > a[4]+0 || (b[4]+0 == a[4]+0 && (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 > a[3]+0)))) {
+        if (b[4]+0 > a[4]+0 || (b[4]+0 == a[4]+0 && (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 < a[3]+0)))) {
           tmp = order[i]; order[i] = order[j]; order[j] = tmp
         }
       }
     }
     for (i = 0; i < n; i++) {
       split(order[i], a, SUBSEP)
-      s = a[1]; rate = a[2]; avgb = a[3]; mp = a[4]
-      printf "%-10s %-12s %-15.0f %-10s %-6s\n", s, successes[s]"/"total[s], avgb, sprintf("%.0f%%", rate*100), mp
+      s = a[1]; rate = a[2]; avgms = a[3]; mp = a[4]
+      avgb = sumbytes[s] / cntbytes[s]
+      printf "%-10s %-12s %-10.0f %-10.0f %-10s %-6s\n", s, successes[s]"/"total[s], avgms, avgb, sprintf("%.0f%%", rate*100), mp
     }
     print ""
     print "Провалились во всех попытках всех проходов:"
@@ -316,11 +326,11 @@ awk -F'\t' '
   BEGIN { nstrat = 0 }
   NR==1 { next }
   {
-    pass = $1; strat = $2; succ = $4; bytes = $5
+    pass = $1; strat = $2; succ = $4; ms = $6
     if (!(strat in total)) { stratlist[nstrat] = strat; nstrat++ }
     total[strat]++
     if (pass+0 > maxpass[strat]+0) maxpass[strat] = pass+0
-    if (succ == 1) { successes[strat]++; sumbytes[strat] += bytes; cntbytes[strat]++ }
+    if (succ == 1) { successes[strat]++; summs[strat] += ms; cntbytes[strat]++ }
   }
   END {
     n = 0
@@ -328,15 +338,15 @@ awk -F'\t' '
       s = stratlist[k]
       if ((s in successes) && successes[s] > 0) {
         rate = successes[s] / total[s]
-        avgb = sumbytes[s] / cntbytes[s]
-        order[n] = s SUBSEP rate SUBSEP avgb SUBSEP maxpass[s]
+        avgms = summs[s] / cntbytes[s]
+        order[n] = s SUBSEP rate SUBSEP avgms SUBSEP maxpass[s]
         n++
       }
     }
     for (i = 0; i < n; i++) {
       for (j = i+1; j < n; j++) {
         split(order[i], a, SUBSEP); split(order[j], b, SUBSEP)
-        if (b[4]+0 > a[4]+0 || (b[4]+0 == a[4]+0 && (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 > a[3]+0)))) {
+        if (b[4]+0 > a[4]+0 || (b[4]+0 == a[4]+0 && (b[2]+0 > a[2]+0 || (b[2]+0 == a[2]+0 && b[3]+0 < a[3]+0)))) {
           tmp = order[i]; order[i] = order[j]; order[j] = tmp
         }
       }

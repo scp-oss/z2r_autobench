@@ -264,6 +264,27 @@ project names here — same public-repo constraint as README.md.
   wait for upstream SABR support. Re-test by rerunning `shorts_probe.sh`
   after a `yt-dlp` upgrade, not by touching strategies or z2r_autobench
   code.
+- `quic_probe.py` originally printed only received-byte-count. Live
+  incident 2026-08-23: with a fixed `--range-bytes`, a *successful*
+  fetch always returns the exact same byte count regardless of
+  strategy — so `rank_quic.sh`'s "Ср.байт" column couldn't distinguish
+  a fast strategy from a slow one, only pass/fail. A profile-5 sweep of
+  all 13 strategies came back 100%-success on every single one with
+  identical byte counts, looking like "any strategy is equally fine"
+  when actually nothing about speed had been measured at all. Fixed:
+  `quic_probe.py` now times the fetch and prints `bytes\tms` on one
+  stdout line instead of just `bytes`. **This changed the stdout
+  contract for every caller** — `rank_quic.sh` (both probe loops +
+  both aggregation `awk` blocks, now sorts by avg ms ascending instead
+  of avg bytes descending within the same reliability tier),
+  `quic_tune.sh` (probe loop + `LOG_FILE` header gained an `ms`
+  column), and `check_profile_quic()` in `autotune_daemon.sh` (splits
+  on the first `\t` to keep just the byte count for its threshold
+  check) were all updated together — if you ever touch `quic_probe.py`'s
+  output format again, grep for every caller first
+  (`grep -rn quic_probe.py *.sh`), a stale caller silently breaks (bash
+  arithmetic comparison on a two-field string doesn't error loudly, it
+  just evaluates false and looks like every strategy failing).
 
 ## Zenith-TG (scp-oss/Zenith-TG)
 

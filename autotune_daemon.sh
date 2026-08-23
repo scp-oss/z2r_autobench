@@ -402,8 +402,11 @@ if u.query:
     p += '?' + u.query
 print(p)
 " "$gv_url")"
-  local bytes
-  bytes="$(python3 "$SCRIPT_DIR/quic_probe.py" "$host" "$path" --range-bytes 524288 --timeout 4 2>/dev/null)"
+  local quic_out bytes
+  quic_out="$(python3 "$SCRIPT_DIR/quic_probe.py" "$host" "$path" --range-bytes 524288 --timeout 4 2>/dev/null)"
+  # quic_probe.py печатает "байты\tms" одной строкой (с 2026-08-23, см.
+  # rank_quic.sh) -- нужны только байты для health-check.
+  bytes="${quic_out%%$'\t'*}"
   [ "${bytes:-0}" -ge 524288 ] 2>/dev/null
 }
 

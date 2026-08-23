@@ -17,9 +17,18 @@ Python + pip, HTTP/3 "из коробки".
     python3 quic_probe.py rr3---sn-xxx.googlevideo.com "/videoplayback?..." \\
         --range-bytes 524288 --timeout 4
 
-Печатает в stdout ОДНО число — количество полученных байт (0 при провале/
+Печатает в stdout ОДНУ строку "байты\tмиллисекунды" (0\t0 при провале/
 таймауте/ошибке handshake). Диагностика — в stderr. Exit code: 0 если
 получен хотя бы 1 байт, иначе 1 — удобно использовать в bash-условиях.
+
+Живой инцидент 2026-08-23: изначально печатались только байты. При
+запросе диапазона фиксированного размера (--range-bytes) успешный ответ
+ВСЕГДА возвращает одно и то же число байт — значит "байты" сами по себе
+не различают быструю и медленную стратегию, только успех/провал. Задним
+числом это выяснилось при разборе жалобы "шортсы на мобильном тормозят" —
+rank_quic.sh показал 13 одинаковых "успешных" стратегий с одинаковым
+количеством байт и не мог сказать, какая из них реально быстрее. Время —
+единственная метрика, которая на это отвечает.
 
 ВАЖНО: скрипт написан по документированному API aioquic (проверено на
 установленной версии 1.3.0), но НЕ протестирован против реального YouTube/
@@ -33,6 +42,7 @@ import argparse
 import asyncio
 import ssl
 import sys
+import time
 
 from aioquic.asyncio import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -114,11 +124,13 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=4.0)
     args = parser.parse_args()
 
+    start = time.monotonic()
     received, status = asyncio.run(
         run(args.host, args.path, args.range_bytes, args.timeout)
     )
+    elapsed_ms = (time.monotonic() - start) * 1000
     print(f"http_status={status}", file=sys.stderr)
-    print(received)
+    print(f"{received}\t{elapsed_ms:.0f}")
     sys.exit(0 if received > 0 else 1)
 
 
