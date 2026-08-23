@@ -6,8 +6,32 @@
 # библиотеки (config.sh, orchestra_state.sh, netcheck.sh), как это делает
 # сам z2r.sh.
 
-LIB_DIR="${LIB_DIR:-/opt/zapret2/z2r_lib}"
-ORCH_DIR="${ORCH_DIR:-/opt/zapret2/extra_strats/cache/orchestra}"
+# Живой факт, подтверждённый 2026-08-23 на ДВУХ разных серверах (NETH-4
+# после восстановления и МТС-нода на абсолютно свежей, только что
+# развёрнутой установке): апстрим-установщик z2r кладёт z2r_lib/
+# extra_strats НЕ в /opt/zapret2, а в /opt/zator — это штатная раскладка
+# инсталлятора (z2r.sh), не повреждение конкретного сервера. Раньше
+# LIB_DIR/ORCH_DIR были жёстко зашиты на /opt/zapret2/..., и КАЖДАЯ
+# свежая установка спотыкалась об "Не найден .../z2r_lib/config.sh —
+# прерываю", пока кто-то не проставит symlink вручную. Теперь
+# автоопределяем базу по тому, где реально лежит z2r_lib — если он есть
+# под /opt/zapret2 (как на серверах, где symlink уже когда-то поставили
+# вручную), используем её, иначе — /opt/zator. Если не нашли ни там, ни
+# там, оставляем дефолт /opt/zapret2, чтобы ниже сработала явная,
+# понятная ошибка "не найден", а не тихий неправильный путь.
+_z2r_detect_base() {
+  if [ -d "/opt/zapret2/z2r_lib" ]; then
+    echo "/opt/zapret2"
+  elif [ -d "/opt/zator/z2r_lib" ]; then
+    echo "/opt/zator"
+  else
+    echo "/opt/zapret2"
+  fi
+}
+Z2R_BASE="${Z2R_BASE:-$(_z2r_detect_base)}"
+
+LIB_DIR="${LIB_DIR:-$Z2R_BASE/z2r_lib}"
+ORCH_DIR="${ORCH_DIR:-$Z2R_BASE/extra_strats/cache/orchestra}"
 
 # --- общий лок на "кто сейчас крутит стратегии" ---
 # Ретюн (свой или демона) переключает locked.tsv десятки раз за один прогон.

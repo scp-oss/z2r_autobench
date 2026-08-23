@@ -182,6 +182,23 @@ project names here — same public-repo constraint as README.md.
   only symlink what's genuinely referenced from both sides (daemon writes
   vs. what `--lua-init=`/`--hostlist=`/`--blob=` load) — not the whole
   parent directory.
+- **Correction, 2026-08-23 later same day: this is not NETH-4-incident-
+  specific — it's the upstream z2r installer's standard layout.** A
+  second server (fresh MTS deploy, installed minutes earlier, never
+  touched by any recovery) showed the identical split: `z2r_lib` exists
+  only under `/opt/zator/z2r_lib`, `/opt/zapret2/z2r_lib` doesn't exist
+  at all. `rank_strategies.sh` failed immediately with `Не найден
+  /opt/zapret2/z2r_lib/config.sh — прерываю` — every fresh z2r install
+  hits this same wall, not just recovered/incident boxes. Fixed at the
+  code level instead of requiring a manual symlink on every install:
+  `z2r_autobench_lib.sh` now auto-detects the base
+  (`_z2r_detect_base()` — uses `/opt/zapret2` if `z2r_lib` exists there,
+  else falls back to `/opt/zator`, else defaults to `/opt/zapret2` so the
+  original clear "не найден" error still fires rather than a silent
+  wrong path) instead of hardcoding `LIB_DIR=/opt/zapret2/z2r_lib`. This
+  doesn't touch `blob_tune.sh`'s own separate hardcoded
+  `FAKE_DIR=/opt/zapret2/files/fake` — same class of bug, not yet fixed,
+  lower priority since it's not on the critical path most tools hit.
 - `zapret2.service` has **no self-healing** if it dies for an unrelated
   reason (crash, a bad config push, another tool restarting it into a
   broken state) — `autotune_daemon.sh` only detected "not running" and
