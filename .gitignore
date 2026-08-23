@@ -5,3 +5,4 @@ logs/
 # и venv — точно не должен попасть в этот репозиторий.
 z2r_test-voice-bot/
 .provider_cache
+__pycache__/
