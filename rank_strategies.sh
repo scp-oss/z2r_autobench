@@ -208,6 +208,11 @@ if [ "$FUNNEL" = "1" ]; then
             bytes=$(( b12 > b13 ? b12 : b13 ))
           fi
         fi
+        # см. PROFILE_EXTRA_URL/extra_check_ok в z2r_autobench_lib.sh —
+        # основной $URL профиля может пройти, а второстепенный, но реально
+        # нужный клиенту домен (напр. youtubei.googleapis.com для профиля 1)
+        # под той же стратегией — нет (живой инцидент 2026-08-23).
+        [ "$success" = "1" ] && ! extra_check_ok "$PROFILE" && success=0
         printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "$bytes" >> "$RAW_FILE"
         [ "$success" = "1" ] && pass_ok=1
       done
@@ -251,6 +256,11 @@ else
             bytes=$(( b12 > b13 ? b12 : b13 ))
           fi
         fi
+        # см. PROFILE_EXTRA_URL/extra_check_ok в z2r_autobench_lib.sh —
+        # основной $URL профиля может пройти, а второстепенный, но реально
+        # нужный клиенту домен (напр. youtubei.googleapis.com для профиля 1)
+        # под той же стратегией — нет (живой инцидент 2026-08-23).
+        [ "$success" = "1" ] && ! extra_check_ok "$PROFILE" && success=0
         printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "$bytes" >> "$RAW_FILE"
       done
       current_step=$((current_step + 1))

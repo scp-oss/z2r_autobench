@@ -157,6 +157,47 @@ probe_http_url() {
   [ "${bytes:-0}" -ge "$MIN_BYTES_THRESHOLD" ] 2>/dev/null
 }
 
+# Лёгкая проверка достижимости — просто что TLS+HTTP реально дошли и
+# вернули осмысленный код ответа (не 000/таймаут), без байтового порога
+# probe_url/probe_http_url. Нужна для доменов вроде youtubei.googleapis.com,
+# у которых нет большой статической страницы, чтобы пройти MIN_BYTES_THRESHOLD,
+# но которые реально нужны клиенту.
+#
+# Живой инцидент 2026-08-23 на NETH-4: rank_strategies.sh тестировал
+# профиль 1 (YT_TLS) только через https://www.youtube.com/ (голая HTML-
+# обёртка сайта) и выбрал strategy=19 — она честно проходила по этому URL,
+# но youtubei.googleapis.com (InnerTube API, через который реальные клиенты
+# — включая мобильное приложение и ТВ — тянут фид/поиск/данные интерфейса)
+# под той же strategy=19 стабильно давал TCP/TLS-таймаут. Итог: "сайт
+# открывается", а сам YouTube-клиент не грузится, и ни health-check, ни
+# ретюн этого не ловили, потому что оба смотрели только на www.youtube.com.
+probe_reachable() {
+  local url="$1"
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' \
+      --connect-timeout 3 --max-time "${THROUGHPUT_TIMEOUT:-4}" "$url" 2>/dev/null)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# Профили, для которых один URL недостаточно представителен для реального
+# клиента (см. probe_reachable() выше) — дополнительный домен, который
+# ОБЯЗАН быть достижим (не байтовый порог, просто не 000), иначе кандидат
+# считается проваленным, даже если основной test_url профиля прошёл.
+declare -A PROFILE_EXTRA_URL=(
+  [1]="https://youtubei.googleapis.com/"
+)
+
+# Использование: после успешного probe_url/probe_http_url по основному URL
+# профиля — extra_check_ok "$profile" должен тоже пройти, иначе кандидат не
+# засчитывается. Профили без записи в PROFILE_EXTRA_URL всегда проходят
+# (return 0) — не меняет поведение для профилей, которым это не нужно.
+extra_check_ok() {
+  local profile="$1"
+  local url="${PROFILE_EXTRA_URL[$profile]:-}"
+  [ -z "$url" ] && return 0
+  probe_reachable "$url"
+}
+
 # --- обёртка над orch_locked_set/get с учётом профилей 8/9 (fallback -> locked.manual.tsv) ---
 set_strategy() {
   local profile="$1" proto="$2" strategy="$3"
@@ -234,6 +275,12 @@ tune_profile() {
         else
           log_row "$log_file" "$profile" "$title" "$proto_list" "$s" "$attempt" "$TLS12_OK" "$TLS13_OK" "0" "fail"
         fi
+      fi
+      # см. PROFILE_EXTRA_URL/extra_check_ok выше — основной $test_url может
+      # пройти, а реально нужный клиенту второстепенный домен под той же
+      # стратегией — нет (живой инцидент 2026-08-23, профиль 1).
+      if [ "$ok_any" -eq 1 ] && ! extra_check_ok "$profile"; then
+        ok_any=0
       fi
       [ "$ok_any" -eq 1 ] && break
     done
@@ -340,6 +387,13 @@ tune_profile_exhaustive() {
         fi
       fi
     done
+
+    # см. PROFILE_EXTRA_URL/extra_check_ok выше — основной $test_url может
+    # пройти, а реально нужный клиенту второстепенный домен под той же
+    # стратегией — нет (живой инцидент 2026-08-23, профиль 1).
+    if [ "$any_ok" -eq 1 ] && ! extra_check_ok "$profile"; then
+      any_ok=0
+    fi
 
     if [ "$any_ok" -eq 1 ]; then
       EXHAUSTIVE_RESULTS[$s]="$best_bytes"

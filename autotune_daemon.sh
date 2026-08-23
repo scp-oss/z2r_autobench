@@ -212,6 +212,46 @@ set_backoff_until() { echo "$2" > "$(backoff_file "$1")"; }
 clear_backoff() { rm -f "$(backoff_file "$1")"; }
 in_backoff() { [ "$(get_backoff_until "$1")" -gt "$(date +%s)" ]; }
 
+# --- watchdog: сам zapret2.service, а не отдельные профили ---
+# Живой инцидент 2026-08-23 на NETH-4: сторонний механизм (промоут/роллбэк
+# стратегии профиля 3 через z0r-panel/Zenith) перезапустил zapret2.service,
+# nfqws2 не поднялся (сломанный lua-init путь — отдельная история), и
+# zapret2.service тихо пролежал мёртвым 7 часов — все профильные демоны
+# (per-profile процессы, см. заголовок файла) просто циклически писали
+# "zapret2 не запущен, пропускаю цикл проверки" и ничего не предпринимали.
+# Раньше это было терпимо (процесс годами не падал сам), но раз сторонние
+# механизмы теперь сами дёргают systemctl restart zapret2.service, отсутствие
+# самовосстановления стало реальным риском простоя на часы без единого
+# сигнала. ZAPRET2_WATCHDOG_STATE — общий файл-таймстамп на ВСЕ профильные
+# процессы (per-profile-архитектура — несколько независимых systemd-юнитов),
+# чтобы не устроить рестарт-шторм, если несколько демонов заметят падение
+# в одном цикле.
+ZAPRET2_WATCHDOG_STATE="$STATE_DIR/zapret2_watchdog_last_restart"
+ZAPRET2_WATCHDOG_COOLDOWN="${ZAPRET2_WATCHDOG_COOLDOWN:-600}"
+
+maybe_restart_zapret2() {
+  local now last
+  now=$(date +%s)
+  last="$(cat "$ZAPRET2_WATCHDOG_STATE" 2>/dev/null || echo 0)"
+  if [ $(( now - last )) -lt "$ZAPRET2_WATCHDOG_COOLDOWN" ]; then
+    return 1
+  fi
+  mkdir -p "$STATE_DIR"
+  echo "$now" > "$ZAPRET2_WATCHDOG_STATE"
+  log "WATCHDOG: zapret2.service не активен — пробую 'systemctl restart zapret2.service' (не чаще раза в ${ZAPRET2_WATCHDOG_COOLDOWN}s, чтобы не устроить рестарт-шторм)."
+  if ! systemctl restart zapret2.service 2>>"$DAEMON_LOG_FILE"; then
+    log "WATCHDOG: 'systemctl restart zapret2.service' завершился с ошибкой — см. 'journalctl -u zapret2.service', само не починится дальнейшими попытками рестарта."
+    return 1
+  fi
+  sleep 5
+  if zapret2_running; then
+    log "WATCHDOG: zapret2.service поднят успешно."
+    return 0
+  fi
+  log "WATCHDOG: рестарт прошёл, но nfqws2 всё ещё не виден — см. 'journalctl -u zapret2.service', похоже проблема в конфиге/lua-init, а не во временном сбое (живой случай 2026-08-23 — сломанный путь до zapret-lib.lua)."
+  return 1
+}
+
 # Профили, отключённые ВРЕМЕННО из-за отсутствующей внешней зависимости
 # (yt-dlp/aioquic), а не по воле оператора. Отдельно от SKIP_PROFILES, чтобы
 # в status.txt/логах было видно причину, и чтобы профиль сам вернулся в
@@ -336,10 +376,15 @@ check_profile_tls() {
     [ -z "$url" ] && return 1
   fi
   if [ "$pid" = "9" ]; then
-    probe_http_url "$url"
+    probe_http_url "$url" || return 1
   else
-    probe_url "$url"
+    probe_url "$url" || return 1
   fi
+  # см. PROFILE_EXTRA_URL в z2r_autobench_lib.sh — для части профилей одного
+  # основного URL недостаточно представительно (живой инцидент 2026-08-23,
+  # www.youtube.com проходил, youtubei.googleapis.com — нет, под той же
+  # стратегией).
+  extra_check_ok "$pid"
 }
 
 check_profile_quic() {
@@ -541,6 +586,7 @@ run_legacy_daemon() {
 
     if ! zapret2_running; then
       log "zapret2 не запущен, пропускаю цикл проверки."
+      maybe_restart_zapret2
       sleep "$CHECK_INTERVAL"
       continue
     fi
@@ -610,6 +656,7 @@ run_profile_daemon() {
 
     if ! zapret2_running; then
       log "zapret2 не запущен, пропускаю цикл проверки."
+      maybe_restart_zapret2
       sleep "$CHECK_INTERVAL"
       continue
     fi

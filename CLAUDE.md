@@ -33,6 +33,14 @@ project names here — same public-repo constraint as README.md.
   a bootstrap/reinstall — a plain `git clone` with no branch arg lands on
   the repo's default branch. Confirm via `git branch --show-current`
   before trusting `git log` output from there.
+- All entry-point `*.sh` scripts are tracked `100755` (executable) in git
+  as of 2026-08-23 — `rank_strategies.sh` and several others were `100644`
+  before that, meaning every fresh clone/pull needed a manual `chmod +x`
+  before it could run at all (`sudo ./script.sh` fails with a misleading
+  "команда не найдена", not "Permission denied"). `z2r_autobench_lib.sh`
+  is the one deliberate exception — it's sourced, never executed directly,
+  so it stays `100644`. When adding a new top-level script meant to be run
+  directly, `chmod +x` it before `git add`, or the mode won't stick.
 
 ## zapret1 vs zapret2 — do not mix syntax
 
@@ -132,6 +140,63 @@ project names here — same public-repo constraint as README.md.
   the exact incident above) — `rank_voice.sh` doesn't need this (never
   touches `locked.tsv`, sandbox-only).
 
+## `/opt/zapret2` vs `/opt/zator` — two real directories, not a symlink pair (since 2026-08-23)
+
+- Live incident on NETH-4: after a core-file recovery, `/opt/zapret2` and
+  `/opt/zator` ended up as two independent real directories instead of the
+  (apparent, pre-incident) symlink relationship. The live `config`'s
+  `--lua-init=`/`--hostlist=`/`--blob=` arguments explicitly hardcode
+  `/opt/zator/...` paths (that's baked into the config text itself, not a
+  bug), while every z2r_autobench tool (`LIB_DIR`/`ORCH_DIR` in
+  `z2r_autobench_lib.sh`) defaults to `/opt/zapret2/...`. Net effect: the
+  daemon spent ~14 hours writing strategy changes to
+  `/opt/zapret2/extra_strats/cache/orchestra/locked.tsv`, a file the live
+  `nfqws2` process (loading `locked.lua` from `/opt/zator/lua/`, whose own
+  `LOCKED_PATH` constant pointed at the zator-side file) never read —
+  every retune that day was writing into a void, and a full 62-strategy
+  `rank_strategies.sh` sweep failed 100% simply because none of its
+  candidate switches ever reached production traffic.
+- **The fix is narrow: only `extra_strats` needs to be a symlink**
+  (`/opt/zapret2/extra_strats -> /opt/zator/extra_strats`) — that's where
+  `locked.tsv`/`locked.manual.tsv`/hostlists actually live, and it's the
+  only thing that needs to be shared between what the daemon writes and
+  what the live `locked.lua` reads.
+  **Do NOT also symlink `/opt/zapret2/lua`** — this was tried and caused a
+  second, worse outage: the config's *base* `--lua-init=` args
+  (`zapret-lib.lua`, `zapret-antidpi.lua`, `zapret-auto.lua`, the actual
+  upstream zapret2 core) always load from the real `/opt/zapret2/lua/`,
+  which has always had them; `/opt/zator/lua/` only ever contained
+  `locked.lua`/`rst-guard.lua`/detector scripts, never the core library.
+  Symlinking the whole `lua` directory hides those core files, and
+  `nfqws2` refuses to start ("LUA file '.../zapret-lib.lua' ... not
+  accessible") on its *next* restart — which can be hours later, triggered
+  by something unrelated (e.g. a promoted-strategy apply/rollback via
+  z0r-panel/Zenith calling `systemctl restart zapret2.service`), silently
+  turning a config-path mistake into a multi-hour full outage with no
+  DPI-bypass at all. Same reasoning applies to `/opt/zapret2/files` — the
+  config's `--blob=` args already explicitly say `/opt/zator/files/...`,
+  nothing references `/opt/zapret2/files/...` directly, so there's no need
+  to touch it either.
+- Before touching either directory again: `grep -n '/opt/za' /opt/zapret2/config`
+  to see exactly which paths the *live* config actually references, and
+  only symlink what's genuinely referenced from both sides (daemon writes
+  vs. what `--lua-init=`/`--hostlist=`/`--blob=` load) — not the whole
+  parent directory.
+- `zapret2.service` has **no self-healing** if it dies for an unrelated
+  reason (crash, a bad config push, another tool restarting it into a
+  broken state) — `autotune_daemon.sh` only detected "not running" and
+  skipped its cycle forever, silently, with no restart attempt and no loud
+  signal. Since 2026-08-23, both the legacy loop and the `--profile N`
+  loop call `maybe_restart_zapret2()` (in `autotune_daemon.sh`) on every
+  cycle where `zapret2_running` is false — tries `systemctl restart
+  zapret2.service` at most once per `ZAPRET2_WATCHDOG_COOLDOWN` (default
+  600s, shared across all per-profile processes via one state file, to
+  avoid a restart storm if several profile daemons notice the same outage
+  in the same cycle), and logs loudly either way (fixed vs. still broken
+  — the latter points at `journalctl -u zapret2.service`, since a repeat
+  failure after restart is a config/lua problem, not something more
+  retries will fix).
+
 ## Test domains
 
 - `MIN_BYTES_THRESHOLD=65536` (`probe_url`/`probe_http_url` in
@@ -141,6 +206,25 @@ project names here — same public-repo constraint as README.md.
 - Domains rot over time and dense probing risks the *site's own* WAF, not
   just DPI/ISP blocking. Prefer CDN/static-asset endpoints over ordinary
   human-facing sites when picking new test targets.
+- A profile's single `test_url` can be unrepresentative of what a real
+  client actually needs — live case 2026-08-23: profile 1 (YT_TLS) only
+  ever tested `https://www.youtube.com/` (the static HTML shell), and
+  `rank_strategies.sh` picked a strategy that passed that check cleanly
+  while `youtubei.googleapis.com` (the InnerTube API every real
+  YouTube client — including mobile and TV — actually uses for
+  feed/search/interface data) timed out completely under the same
+  strategy. The site "worked" by every test the tooling ran; the app
+  didn't load for any real user. Fixed via `PROFILE_EXTRA_URL`/
+  `extra_check_ok()` in `z2r_autobench_lib.sh` — a lightweight
+  reachability-only check (`probe_reachable()`, no byte threshold, just
+  "not HTTP 000") layered on top of a profile's normal probe; a candidate
+  only counts as working if *both* pass. Wired into `check_profile_tls()`
+  (health-check), `rank_strategies.sh` (both funnel and full-sweep probe
+  sites), and the shared `tune_profile()`/`tune_profile_exhaustive()` in
+  the lib. Currently only profile 1 has an entry
+  (`youtubei.googleapis.com`) — add more profiles here if the same
+  "passes the site check, fails the client" pattern shows up elsewhere,
+  rather than chasing it ad hoc per incident.
 
 ## Zenith-TG (scp-oss/Zenith-TG)
 
