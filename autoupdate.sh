@@ -138,7 +138,15 @@ fi
 
 if should_run "zenith"; then
   if update_git_repo zenith "$ZENITH_DIR" main; then
-    if ( cd "$ZENITH_DIR" && docker compose up -d --build ) >>"$LOG_DIR/zenith.log" 2>&1; then
+    # ZENITH_DB_BACKEND=native -- локальная БД не в docker-compose (см. z0r
+    # ask_zenith_db_backend/README "Нативная БД вместо Docker"), тут нечего
+    # поднимать -- mariadb.service живёт своей жизнью, git pull выше уже
+    # обновил код оркестратора (venv не трогаем, requirements.txt тут
+    # меняется редко и не автообновляется -- как и раньше).
+    backend="$(grep -E '^ZENITH_DB_BACKEND=' "$ZENITH_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-)"
+    if [ "${backend:-docker}" = "native" ]; then
+      _log zenith "ZENITH_DB_BACKEND=native -- Docker не трогаю, БД управляется через systemctl mariadb"
+    elif ( cd "$ZENITH_DIR" && docker compose up -d --build ) >>"$LOG_DIR/zenith.log" 2>&1; then
       _log zenith "docker compose up -d --build выполнен"
     else
       _log zenith "docker compose up -d --build НЕ удался -- разберитесь руками"

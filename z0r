@@ -69,7 +69,12 @@ fi
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# readlink -f -- ${BASH_SOURCE[0]} не резолвится сам через симлинк (напр.
+# /usr/local/bin/z0r -> $INSTALL_DIR/z0r, см. ensure_z0r_command) -- без
+# этого SCRIPT_DIR при запуске через симлинк указывал бы на /usr/local/bin,
+# ломая и все bash "$SCRIPT_DIR/..." вызовы ниже, и сравнение с
+# INSTALLED_Z0R в самом низу файла (ложное "Первый запуск").
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
 INSTALL_DIR="/opt/z2r_autobench"
 INSTALLED_Z0R="$INSTALL_DIR/z0r"
 Z0R_BIN_LINK="/usr/local/bin/z0r"
@@ -391,6 +396,18 @@ zenith_db_mode() {
   echo "${mode:-docker}"
 }
 
+# docker | native -- откуда берётся локальная MySQL/MariaDB, только имеет
+# смысл когда zenith_db_mode()=docker (своя БД есть; в api своей БД нет
+# вообще, бэкенд не проверяется). native = уже установлена в систему
+# отдельно (mariadb-server/mysql-server) и настроена вручную (см. README
+# Zenith "Нативная БД вместо Docker") -- z0r в этом случае НЕ трогает
+# Docker: не поднимает docker-compose, статус/старт-стоп смотрят на
+# systemd-юнит mariadb напрямую. См. ask_zenith_db_backend().
+zenith_db_backend() {
+  local backend; backend="$(zenith_env_get ZENITH_DB_BACKEND)"
+  echo "${backend:-docker}"
+}
+
 # HTTP-пинг панели для ZENITH_DB_MODE=api -- своей БД тут нет вообще, "SELECT
 # 1" недоступен, поэтому статус -- тот же authenticated-запрос, что
 # orchestrator/db_api.py делает на каждую реальную операцию.
@@ -411,6 +428,8 @@ get_zenith_status() {
   [ -d "$ZENITH_DIR" ] || { echo "NONE"; return; }
   if [ "$(zenith_db_mode)" = "api" ]; then
     zenith_panel_ping && echo "ON" || echo "OFF"
+  elif [ "$(zenith_db_backend)" = "native" ]; then
+    systemctl is-active --quiet mariadb 2>/dev/null && echo "ON" || echo "OFF"
   else
     ( cd "$ZENITH_DIR" && docker compose ps --status running -q 2>/dev/null | grep -q . ) && echo "ON" || echo "OFF"
   fi
@@ -491,7 +510,13 @@ zenith_mysql_query() {
   # Пароль через MYSQL_PWD, не -p"$pass" — иначе mysql на каждый вызов
   # плюётся "[Warning] Using a password on the command line interface
   # can be insecure" в stderr, а мы его больше не глушим (см. выше).
-  ( cd "$ZENITH_DIR" && docker compose exec -T -e MYSQL_PWD="$pass" mysql mysql -u"$user" "$db" -e "$sql" )
+  if [ "$(zenith_db_backend)" = "native" ]; then
+    local client_bin=mariadb
+    command -v mariadb >/dev/null 2>&1 || client_bin=mysql
+    MYSQL_PWD="$pass" "$client_bin" -u"$user" "$db" -e "$sql"
+  else
+    ( cd "$ZENITH_DIR" && docker compose exec -T -e MYSQL_PWD="$pass" mysql mysql -u"$user" "$db" -e "$sql" )
+  fi
 }
 
 # Текущая залоченная стратегия профиля (для "[#N]" в списке профилей).
@@ -1450,6 +1475,34 @@ apply_env_paste_block() {
   echo "$applied"
 }
 
+# Спрашивает докер-контейнер или уже-нативную БД при ZENITH_DB_MODE=docker
+# -- пишет ZENITH_DB_BACKEND в .env, читается zenith_db_backend() выше.
+# native подразумевает, что схема+миграции (db/schema.sql, db/migrations/)
+# уже применены заранее вручную -- z0r их сам не накатывает.
+ask_zenith_db_backend() {
+  local envfile="$1" ans
+  echo ""
+  read -re -p "Локальная БД: поднять в Docker, или уже стоит нативно в системе (mariadb-server/mysql-server)? [D/n]: " ans
+  case "$ans" in
+    n|N)
+      if grep -q '^ZENITH_DB_BACKEND=' "$envfile" 2>/dev/null; then
+        sed -i 's/^ZENITH_DB_BACKEND=.*/ZENITH_DB_BACKEND=native/' "$envfile"
+      else
+        echo "ZENITH_DB_BACKEND=native" >> "$envfile"
+      fi
+      echo "Нативная БД: z0r не трогает Docker, статус/старт-стоп идут через systemctl (mariadb.service)."
+      echo "Проверь, что схема применена: cat $ZENITH_DIR/db/schema.sql | mariadb -u<user> -p <db>"
+      ;;
+    *)
+      if grep -q '^ZENITH_DB_BACKEND=' "$envfile" 2>/dev/null; then
+        sed -i 's/^ZENITH_DB_BACKEND=.*/ZENITH_DB_BACKEND=docker/' "$envfile"
+      else
+        echo "ZENITH_DB_BACKEND=docker" >> "$envfile"
+      fi
+      ;;
+  esac
+}
+
 # Пункт 22 — если Zenith ещё не склонирован, сначала предлагает это
 # сделать и спрашивает про БД (своя в Docker или уже существующая), а
 # дальше — независимо от того, только что склонировали или он уже стоял —
@@ -1503,6 +1556,7 @@ manage_zenith() {
 
     if [ "$sync_with_panel" = "0" ]; then
       sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=docker/' "$ZENITH_DIR/.env"
+      ask_zenith_db_backend "$ZENITH_DIR/.env"
       echo "При желании поменяй пароли: $ZENITH_DIR/.env"
       echo "Изолированная нода -- своя локальная БД, без панели."
     else
@@ -1527,6 +1581,7 @@ manage_zenith() {
           ;;
         *)
           sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=docker/' "$ZENITH_DIR/.env"
+          ask_zenith_db_backend "$ZENITH_DIR/.env"
           echo "При желании поменяй пароли: $ZENITH_DIR/.env"
           echo "Настроено: локальная БД как буфер + синк с панелью."
           ;;
@@ -1560,9 +1615,11 @@ manage_zenith() {
 # пока генератор не перенесён и не начал их наполнять.
 zenith_menu() {
   while true; do
-    local st mode; st="$(get_zenith_status)"; mode="$(zenith_db_mode)"
+    local st mode backend_suffix; st="$(get_zenith_status)"; mode="$(zenith_db_mode)"
+    backend_suffix=""
+    [ "$mode" = "docker" ] && [ "$(zenith_db_backend)" = "native" ] && backend_suffix="/native"
     echo ""
-    echo "=== Zenith $(color_tag "$st") (БД: $mode) ==="
+    echo "=== Zenith $(color_tag "$st") (БД: $mode$backend_suffix) ==="
     echo "  1) Запуск/Стоп"
     echo "  2) Стратегии для текущего провайдера"
     echo "  3) Стратегии по профилям"
@@ -1605,7 +1662,13 @@ autoupdate_project_label() {
     z2r_autobench) echo "z2r_autobench (сам инструмент + autotune-daemon)" ;;
     panel) echo "z0r-panel (pip install + systemctl restart zenith-panel)" ;;
     tgrelay) echo "Zenith-TG (pip install + systemctl restart tg-transparent-relay)" ;;
-    zenith) echo "Zenith (docker compose up -d --build)" ;;
+    zenith)
+      if [ "$(zenith_db_backend)" = "native" ]; then
+        echo "Zenith (git pull, БД нативная -- Docker не трогаю)"
+      else
+        echo "Zenith (docker compose up -d --build)"
+      fi
+      ;;
   esac
 }
 
@@ -1771,6 +1834,16 @@ zenith_toggle() {
     fi
     return 0
   fi
+  if [ "$(zenith_db_backend)" = "native" ]; then
+    if [ "$(get_zenith_status)" = "ON" ]; then
+      systemctl stop mariadb
+      echo "mariadb остановлена."
+    else
+      systemctl start mariadb
+      echo "mariadb запущена."
+    fi
+    return 0
+  fi
   if ! ensure_docker; then return 1; fi
   if [ "$(get_zenith_status)" = "ON" ]; then
     ( cd "$ZENITH_DIR" && docker compose down )
@@ -1897,6 +1970,8 @@ uninstall_zenith() {
   fi
   if [ "$(zenith_db_mode)" = "api" ]; then
     read -re -p "Найден $ZENITH_DIR (БД — панель, тут нечего останавливать) — удалить папку? [y/N]: " ans
+  elif [ "$(zenith_db_backend)" = "native" ]; then
+    read -re -p "Найден $ZENITH_DIR — удалить папку? (БД нативная, mariadb НЕ трогаю) [y/N]: " ans
   else
     read -re -p "Найден $ZENITH_DIR — остановить контейнеры и удалить (вместе с БД в volume)? [y/N]: " ans
   fi
@@ -1913,7 +1988,9 @@ uninstall_zenith() {
         fi
       done
       systemctl daemon-reload 2>/dev/null || true
-      [ "$(zenith_db_mode)" = "api" ] || ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
+      if [ "$(zenith_db_mode)" != "api" ] && [ "$(zenith_db_backend)" != "native" ]; then
+        ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
+      fi
       rm -rf "$ZENITH_DIR"
       echo "Zenith удалён."
       ;;
