@@ -474,6 +474,22 @@ gv_pick_video_id() {
 # ограничивает худший случай явно, вместо неопределённого ожидания.
 YT_RESOLVE_TIMEOUT="${YT_RESOLVE_TIMEOUT:-25}"
 
+# Живой инцидент 2026-08-23: yt-dlp без явного --extractor-args извлекал
+# через клиент ANDROID_VR (виден в самом URL как c=ANDROID_VR) — googlevideo
+# стабильно отдавал 403 именно для НЕГО с этого сервера (датацентровый IP,
+# не резидентский), причём даже полноценный даунлоад самим yt-dlp (с его
+# собственными, корректными заголовками под этот клиент) получал тот же
+# 403 — то есть дело не в недостающих заголовках отдельного curl (это
+# проверено и отдельно отклонено), а именно в клиенте. Проверены вживую:
+# web/mweb не годятся (на сервере нет JS-раннера для решения sig/n-
+# challenge — отдельная, не сетевая проблема), tv — "page needs to be
+# reloaded", android — работает чисто (реальный файл, полная скорость).
+# Из-за этого ВСЯ методика проверки профиля 2 (health-check,
+# rank_strategies.sh, shorts_probe.sh) до этого коммита давала ложный
+# 100%-провал независимо от активной стратегии — проблема была не в DPI,
+# а в том, каким клиентом yt-dlp резолвил URL.
+YT_PLAYER_CLIENT="${YT_PLAYER_CLIENT:-android}"
+
 resolve_googlevideo_url() {
   local video_id="${1:-$DEFAULT_TEST_VIDEO_ID}"
   if ! command -v yt-dlp >/dev/null 2>&1; then
@@ -481,6 +497,7 @@ resolve_googlevideo_url() {
     return 1
   fi
   timeout "$YT_RESOLVE_TIMEOUT" yt-dlp -f 'best[height<=480]' --get-url \
+    --extractor-args "youtube:player_client=${YT_PLAYER_CLIENT}" \
     "https://www.youtube.com/watch?v=${video_id}" 2>/dev/null | tail -n1
 }
 

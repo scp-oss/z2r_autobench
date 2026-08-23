@@ -225,6 +225,29 @@ project names here — same public-repo constraint as README.md.
   (`youtubei.googleapis.com`) — add more profiles here if the same
   "passes the site check, fails the client" pattern shows up elsewhere,
   rather than chasing it ad hoc per incident.
+- `resolve_googlevideo_url()` (profile 2/GV_TLS, also used by profile
+  5/QUIC and `shorts_probe.sh`) depends on `yt-dlp`'s own choice of
+  YouTube "player client" to extract a `videoplayback` URL — this can
+  itself be a false-failure source, separate from DPI/desync entirely.
+  Live incident 2026-08-23: without an explicit `--extractor-args`,
+  `yt-dlp` picked `ANDROID_VR`, and `googlevideo.com` returned an instant
+  `403` for that client from this server's (datacenter, not residential)
+  IP — reproduced even via `yt-dlp`'s own full downloader (correct
+  headers for that client included), so it wasn't a missing-header
+  problem in the separate `curl` probe step either. This produced 100%
+  failure across every strategy in every profile-2 sweep for hours,
+  looking exactly like "no working strategy" when the actual cause was
+  test methodology. `web`/`mweb` clients don't work here either, but for
+  an unrelated reason (no JS runtime on the server to solve YouTube's
+  sig/n challenge — see the `EJS`/`PO-Token` warnings if you try them).
+  `android` client works cleanly (verified: real file, full speed). Fixed
+  via `YT_PLAYER_CLIENT` (default `android`) in `z2r_autobench_lib.sh`,
+  passed as `--extractor-args "youtube:player_client=$YT_PLAYER_CLIENT"`.
+  If `android` ever also starts getting blocked, override the env var
+  rather than hardcoding a new client inline — and re-check with the
+  same `yt-dlp -f 'best[height<=480]' -o test.mp4 --extractor-args
+  "youtube:player_client=X" <url>` loop across clients before assuming
+  it's DPI again.
 
 ## Zenith-TG (scp-oss/Zenith-TG)
 
