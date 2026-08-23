@@ -248,6 +248,22 @@ project names here — same public-repo constraint as README.md.
   same `yt-dlp -f 'best[height<=480]' -o test.mp4 --extractor-args
   "youtube:player_client=X" <url>` loop across clients before assuming
   it's DPI again.
+- **`shorts_probe.sh` specifically cannot work right now, for anyone, on
+  any server** — not a z2r_autobench bug, not DPI, not this box. Verified
+  2026-08-23: regular long-form video extracts fine via the `android`
+  fix above, but YouTube Shorts fail on *every* client tested (`android`,
+  `android_vr`, `ios`, `web`, `web_embedded`, `mweb`) — `-v` output shows
+  `youtube is forcing SABR streaming for this client` for Shorts
+  specifically. SABR is a segmented streaming protocol, not a flat URL —
+  `yt-dlp` doesn't support downloading it yet (tracked upstream:
+  `yt-dlp/yt-dlp#12482`). Installing a JS runtime (`deno`, confirmed
+  installed and working here) fixes the *unrelated* sig/n-challenge
+  failure that `web`/`mweb` show for ordinary videos, but does not touch
+  SABR-forcing at all — don't re-chase this by trying yet another
+  `--extractor-args` client combination; it's a `yt-dlp` capability gap,
+  wait for upstream SABR support. Re-test by rerunning `shorts_probe.sh`
+  after a `yt-dlp` upgrade, not by touching strategies or z2r_autobench
+  code.
 
 ## Zenith-TG (scp-oss/Zenith-TG)
 
