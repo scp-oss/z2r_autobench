@@ -336,6 +336,32 @@ project names here — same public-repo constraint as README.md.
   `sed`-rewrites that path to the real `$TGRELAY_DIR` before installing
   the unit, don't `cp` it as-is like `manage_panel` does.
 
+## autotune-daemon vs Zenith — two independent auto-tuners, not layers (since 2026-08-23)
+
+- `autotune-daemon` (this repo, `autotune_daemon.sh`) and Zenith
+  (`zenith-autorun`/`zenith-promoter`, separate repo, see below) are **two
+  fully independent systems**, not parts of one another, despite both
+  living under z0r menu item 22 (Zenith) as of this note — user asked to
+  move autotune-daemon's control entry (menu item 13 → item 22 → 5) into
+  the Zenith submenu purely for UX convenience ("one place for all
+  auto-tuning"), explicitly NOT as a functional merge. Nothing about
+  their behavior changed; they still don't know about each other.
+- `autotune-daemon` predates Zenith: it's the simpler, DB-less mechanism
+  built into z2r_autobench itself — periodically reruns
+  `rank_strategies.sh`/`rank_quic.sh` inside a single profile's own
+  candidate list and applies the winner via `set_strategy_cli.sh`. Zenith
+  is a separate MySQL-backed genome generator (mutation/crossover/UCB)
+  with its own promotion pipeline (`auto_promoter.py`).
+- **Both independently write `/opt/zapret2/config` and independently
+  restart `zapret2.service` for the same profiles when both are
+  enabled** — nothing coordinates or locks between them (they don't share
+  `TUNE_LOCK_FILE`/`locked.tsv` semantics the way per-profile
+  `autotune-daemon` processes do with each other). Running
+  `autotune-daemon` and `zenith-promoter` for the *same profile*
+  simultaneously is untested and not recommended — pick one per profile
+  until this is actually verified safe, don't assume the menu grouping
+  implies any safety coordination.
+
 ## Zenith (scp-oss/zenith)
 
 - Separate repo/service: strategy *generator* (mutation/crossover/UCB over

@@ -584,7 +584,6 @@ show_menu() {
   echo "=== Управление ===" >&2
   echo "" >&2
   echo " 12) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
-  echo " 13) autotune-daemon $(color_tag "$(get_daemon_status)") (сервис автотестирования и подстройки)" >&2
   echo " 14) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
   echo " 15) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
   echo " 22) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
@@ -1289,7 +1288,7 @@ manage_daemon() {
       case "$ans" in
         y|Y)
           systemctl disable --now autotune-daemon 2>/dev/null || true
-          echo "autotune-daemon остановлен и отключён (юнит остался — включить снова тем же пунктом 13)."
+          echo "autotune-daemon остановлен и отключён (юнит остался — включить снова: пункт 22 -> 5)."
           ;;
         *) echo "Ок, не трогаю." ;;
       esac
@@ -1624,6 +1623,12 @@ zenith_menu() {
     echo "  2) Стратегии для текущего провайдера"
     echo "  3) Стратегии по профилям"
     echo "  4) Автономный режим (генерация + автопродвижение БЕЗ человека)"
+    echo "  5) autotune-daemon $(color_tag "$(get_daemon_status)") -- НЕ часть Zenith, отдельный"
+    echo "     независимый механизм z2r_autobench (rank_strategies.sh-подбор внутри"
+    echo "     профиля, без БД/геномов) -- собран тут просто для удобства, одно место"
+    echo "     для всего авто-тюнинга. Пункты 4 и 5 пишут в один и тот же боевой"
+    echo "     конфиг и рестартуют zapret2 НЕЗАВИСИМО друг от друга -- держать оба"
+    echo "     включёнными разом не проверялось, см. CLAUDE.md."
     echo "  0) Назад в главное меню"
     echo ""
     read -re -p "Zenith > " zchoice
@@ -1632,6 +1637,7 @@ zenith_menu() {
       2) zenith_show_provider_strategies ;;
       3) zenith_profiles_submenu ;;
       4) zenith_autonomy_menu ;;
+      5) manage_daemon ;;
       0|q|Q|"") return 0 ;;
       *) echo "Неизвестный выбор." ;;
     esac
@@ -2137,8 +2143,10 @@ ensure_panel_runtime_grants() {
 
   # Старт/стоп/статус/лог autotune-daemon.service с /controls (см.
   # z0r-panel/daemon_ctl.py) -- ровно то же самое, что человек делает
-  # руками через пункт 13 этого же z0r-скрипта, просто кнопкой вместо
-  # SSH. Команды фиксированы буквально (никаких "*") -- меньше
+  # руками через пункт 22 -> 5 этого же z0r-скрипта (autotune-daemon --
+  # независимый от Zenith механизм, живёт в меню Zenith для удобства, см.
+  # CLAUDE.md), просто кнопкой вместо SSH. Команды фиксированы буквально
+  # (никаких "*") -- меньше
   # привилегий, чем даже у запуска main.py выше, никакого произвольного
   # выбора юнита или доп. флагов.
   local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
@@ -2719,7 +2727,6 @@ while true; do
     11) launch_z2r ;;
     21) manual_switch_strategy ;;
     12) manage_zapret ;;
-    13) manage_daemon ;;
     14) manage_voice_bot ;;
     15) manage_panel ;;
     16) uninstall_z2r ;;
