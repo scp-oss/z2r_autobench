@@ -610,9 +610,12 @@ show_menu() {
   echo "$choice"
 }
 
-# После теста профиля предлагает применить лучшую (первую в ORDERED_SUCCESS)
-# стратегию — то же самое, что делает retune_profile() в autotune_daemon.sh,
+# После теста профиля применяет лучшую (первую в ORDERED_SUCCESS) стратегию
+# без вопроса — то же самое, что делает retune_profile() в autotune_daemon.sh,
 # но через set_strategy_cli.sh (не сорсим лишний раз всю lib внутри z0r).
+# Раньше тут был read -p "применить? [y/N]" -- убрано по прямому запросу
+# (2026-08-23): раз профиль уже прогнали через test_profile(), применение
+# найденной рабочей стратегии больше не требует отдельного подтверждения.
 offer_apply_best() {
   local pid="$1" ordered best proto
   case "$pid" in 6|7) return 0 ;; esac
@@ -620,22 +623,10 @@ offer_apply_best() {
   best="$(awk '{print $1; exit}' <<< "$ordered")"
   [ -n "$best" ] || return 0
 
-  # Не в интерактиве (например, z0r --profiles ... из cron/автоматизации,
-  # без TTY) — не виснем на read, просто сообщаем находку.
-  if [ ! -t 0 ]; then
-    echo "Профиль $pid (${TITLES[$pid]}): лучшая стратегия $best (не интерактив — не применяю автоматически, см. --apply-механизм демона для авто-режима)."
-    return 0
-  fi
-
-  read -re -p "Профиль $pid (${TITLES[$pid]}): применить лучшую стратегию $best? [y/N]: " ans
-  case "$ans" in
-    y|Y)
-      for proto in ${PROFILE_PROTO[$pid]:-tls}; do
-        bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
-      done
-      ;;
-    *) echo "Пропускаю профиль $pid — стратегия не применена." ;;
-  esac
+  echo "Профиль $pid (${TITLES[$pid]}): применяю стратегию $best автоматически, без вопроса."
+  for proto in ${PROFILE_PROTO[$pid]:-tls}; do
+    bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
+  done
 }
 
 # Без вопроса применяет лучшую стратегию профиля — используется вместо
@@ -695,6 +686,26 @@ manual_switch_strategy() {
       ;;
     *) echo "Отменено." ;;
   esac
+}
+
+# Фоновый запуск длинного прогона (111/список профилей) -- вместо попытки
+# фонить bash-функцию текущего процесса (run_all/run_selected пишут прямо
+# в терминал и не рассчитаны на детач сами по себе), перезапускает сам z0r
+# с --all/--profiles уже ОТДЕЛЬНЫМ детачнутым процессом + лог-файлом.
+# offer_apply_best() сама определяет неинтерактивный режим (нет TTY —
+# не виснет на read, просто печатает находку без применения, см. её
+# докстринг) — детачу здесь для этого ничего специально готовить не нужно.
+run_test_background() {
+  mkdir -p "$INSTALL_DIR/logs/testruns"
+  local log="$INSTALL_DIR/logs/testruns/$(date -u +%Y%m%dT%H%M%SZ).log"
+  nohup bash "$INSTALLED_Z0R" "$@" >"$log" 2>&1 </dev/null &
+  local pid=$!
+  disown
+  echo "Запущено в фоне (PID $pid). Лог: $log"
+  echo "Смотреть вживую: tail -f $log"
+  echo "Профили этого прогона не применяются автоматически (кроме тех, что"
+  echo "сами являются зависимостью для другого тестируемого профиля) — не"
+  echo "интерактив, смотри лог и примени вручную (пункт 21) то, что найдётся."
 }
 
 run_all() {
@@ -1300,6 +1311,44 @@ manage_daemon() {
 # z2r_test-voice-bot — отдельный репозиторий, без своего systemd-юнита
 # (запускается как "venv/bin/python3 bot.py" через run.sh) — юнит для него
 # держим у себя (z2r-test-voice-bot.service).
+# Клонирует z2r_test-voice-bot + ставит venv, БЕЗ вопроса -- вызывается и
+# из manage_voice_bot() (после её "клонировать? y/n"), и напрямую из
+# первого запуска (см. first_run_install_modules). Токен Discord и т.п.
+# нельзя автозаполнить -- дальше всё равно нужен ручной шаг с .env, тут
+# только сам клон+зависимости.
+voice_bot_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$VOICE_BOT_REPO_URL" "$VOICE_BOT_DIR"; then
+    echo "Не удалось склонировать $VOICE_BOT_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 не найден, пробую поставить..." >&2
+    apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+  fi
+  if ! ( cd "$VOICE_BOT_DIR" && python3 -m venv venv \
+         && venv/bin/pip install -q -r requirements.txt \
+         && venv/bin/pip install -q "discord.py[voice]" ); then
+    echo "Не удалось поставить зависимости бота — доразберись руками в $VOICE_BOT_DIR." >&2
+    return 1
+  fi
+  [ -f "$VOICE_BOT_DIR/.env" ] || cp "$VOICE_BOT_DIR/.env.example" "$VOICE_BOT_DIR/.env"
+
+  echo ""
+  echo "Склонирован и готов к настройке. Перед включением (пункт 14 ещё раз):"
+  echo "  1. Заполни реальными значениями: $VOICE_BOT_DIR/.env"
+  echo "     (DISCORD_TOKEN, GUILD_ID, TEST_VOICE_CHANNEL_ID, OWNER_USER_ID)"
+  echo "     Список стратегий бот строит сам динамически (set_strategy_cli.sh"
+  echo "     max) — отдельного файла со списком заводить не нужно."
+  echo "  2. Нужен уже поставленный Zenith (пункт 22) — бот тестирует через"
+  echo "     его песочницу, юзера zenith-voice-bot без него не будет."
+}
+
 manage_voice_bot() {
   local st; st="$(get_voice_bot_status)"
   echo "Discord_bot: $st"
@@ -1307,37 +1356,7 @@ manage_voice_bot() {
     NONE)
       read -re -p "Склонировать и подготовить z2r_test-voice-bot в $VOICE_BOT_DIR? [y/N]: " ans
       case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
-
-      if ! command -v git >/dev/null 2>&1; then
-        echo "git не найден, пробую поставить..." >&2
-        apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
-        apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
-      fi
-      if ! git clone "$VOICE_BOT_REPO_URL" "$VOICE_BOT_DIR"; then
-        echo "Не удалось склонировать $VOICE_BOT_REPO_URL — GitHub недоступен?" >&2
-        return 1
-      fi
-
-      if ! command -v python3 >/dev/null 2>&1; then
-        echo "python3 не найден, пробую поставить..." >&2
-        apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
-      fi
-      if ! ( cd "$VOICE_BOT_DIR" && python3 -m venv venv \
-             && venv/bin/pip install -q -r requirements.txt \
-             && venv/bin/pip install -q "discord.py[voice]" ); then
-        echo "Не удалось поставить зависимости бота — доразберись руками в $VOICE_BOT_DIR." >&2
-        return 1
-      fi
-      [ -f "$VOICE_BOT_DIR/.env" ] || cp "$VOICE_BOT_DIR/.env.example" "$VOICE_BOT_DIR/.env"
-
-      echo ""
-      echo "Склонирован и готов к настройке. Перед включением (пункт 14 ещё раз):"
-      echo "  1. Заполни реальными значениями: $VOICE_BOT_DIR/.env"
-      echo "     (DISCORD_TOKEN, GUILD_ID, TEST_VOICE_CHANNEL_ID, OWNER_USER_ID)"
-      echo "     Список стратегий бот строит сам динамически (set_strategy_cli.sh"
-      echo "     max) — отдельного файла со списком заводить не нужно."
-      echo "  2. Нужен уже поставленный Zenith (пункт 22) — бот тестирует через"
-      echo "     его песочницу, юзера zenith-voice-bot без него не будет."
+      voice_bot_install_files
       ;;
     OFF)
       if ! id zenith-voice-bot >/dev/null 2>&1; then
@@ -1506,41 +1525,62 @@ ask_zenith_db_backend() {
 # сделать и спрашивает про БД (своя в Docker или уже существующая), а
 # дальше — независимо от того, только что склонировали или он уже стоял —
 # открывает его собственное подменю (zenith_menu).
-manage_zenith() {
-  local st; st="$(get_zenith_status)"
-  echo "Zenith: $st"
+# Клонирует Zenith + готовит venv, БЕЗ единого интерактивного вопроса --
+# вызывается и из manage_zenith() (после её собственного "клонировать? y/n"),
+# и напрямую из первого запуска z0r (см. first_run_install_modules), где
+# согласие уже дано выбором модуля в чек-листе. Настройка (БД/синк с
+# панелью) -- отдельно, см. zenith_configure_wizard() ниже.
+zenith_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
+    echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+  cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
 
-  if [ "$st" = "NONE" ]; then
-    read -re -p "Склонировать Zenith в $ZENITH_DIR? [y/N]: " ans
-    case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+  # Имя/провайдер ноды -- автоматически, не руками (по прямому запросу:
+  # готовимся к деплою на МТС, там должно пройти без ручной доводки).
+  # Имя -- hostname этой машины (уникальность внутри флота обеспечивает
+  # panel self_report_node -- при конфликте вернёт понятную 409, поправить
+  # руками останется только в этом редком случае). Провайдер -- тот же
+  # детектор ISP, что уже используется в шапке меню (get_provider),
+  # слагифицирован в машинный вид. Применяется ко ВСЕМ веткам ниже,
+  # включая полностью локальную (иначе там осталось бы "prod-domru" из
+  # .env.example нетронутым).
+  local auto_name auto_provider
+  auto_name="$(hostname)"
+  auto_provider="$(slugify_provider "$(get_provider)")"
+  sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$auto_name/" "$ZENITH_DIR/.env"
+  sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$auto_provider/" "$ZENITH_DIR/.env"
+  echo "Имя ноды: $auto_name, провайдер: $auto_provider (определено автоматически)."
 
-    if ! command -v git >/dev/null 2>&1; then
-      echo "git не найден, пробую поставить..." >&2
-      apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
-      apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  echo ""
+  echo "Готовлю Python-окружение оркестратора..."
+  if ensure_python_venv; then
+    if ( cd "$ZENITH_DIR/orchestrator" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
+      echo "venv готов: $ZENITH_DIR/orchestrator/venv"
+      echo "После установки песочницы (см. README Zenith \"VOICE_UDP\"/\"Как тестируются"
+      echo "новые геномы\") можно сразу:"
+      echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 bootstrap.py --profile <PROFILE>"
+    else
+      echo "venv создался, но pip install упал -- проверь requirements.txt/сеть вручную." >&2
     fi
-    if ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
-      echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
-      return 1
-    fi
-    cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
+  else
+    echo "Не удалось поставить рабочий python3-venv -- подготовь venv руками:" >&2
+    echo "  cd $ZENITH_DIR/orchestrator && python3 -m venv venv && venv/bin/pip install -r requirements.txt" >&2
+  fi
+}
 
-    # Имя/провайдер ноды -- автоматически, не руками (по прямому запросу:
-    # готовимся к деплою на МТС, там должно пройти без ручной доводки).
-    # Имя -- hostname этой машины (уникальность внутри флота обеспечивает
-    # panel self_report_node -- при конфликте вернёт понятную 409, поправить
-    # руками останется только в этом редком случае). Провайдер -- тот же
-    # детектор ISP, что уже используется в шапке меню (get_provider),
-    # слагифицирован в машинный вид. Применяется ко ВСЕМ веткам ниже,
-    # включая полностью локальную (иначе там осталось бы "prod-domru" из
-    # .env.example нетронутым).
-    local auto_name auto_provider
-    auto_name="$(hostname)"
-    auto_provider="$(slugify_provider "$(get_provider)")"
-    sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$auto_name/" "$ZENITH_DIR/.env"
-    sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$auto_provider/" "$ZENITH_DIR/.env"
-    echo "Имя ноды: $auto_name, провайдер: $auto_provider (определено автоматически)."
-
+# Мастер настройки (режим БД, синк с панелью) -- требует РЕАЛЬНОГО решения
+# человека (нет безопасного дефолта для "синкаться с какой панелью"),
+# поэтому не сворачивается в чек-лист первого запуска -- вызывается сразу
+# после zenith_install_files(), что из manage_zenith(), что из первого
+# запуска, чтобы настройка не потерялась где-то "на потом".
+zenith_configure_wizard() {
     # Два вопроса вместо трёх пунктов меню -- см. README Zenith "Два
     # режима БД". Раньше был выбор 1/2/3 сразу (локальная/hub-and-
     # spoke/центральная-напрямую) -- центральная-напрямую (сырой MySQL
@@ -1587,22 +1627,21 @@ manage_zenith() {
       esac
       echo "Подключено."
     fi
+}
 
-    echo ""
-    echo "Готовлю Python-окружение оркестратора..."
-    if ensure_python_venv; then
-      if ( cd "$ZENITH_DIR/orchestrator" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
-        echo "venv готов: $ZENITH_DIR/orchestrator/venv"
-        echo "После установки песочницы (см. README Zenith \"VOICE_UDP\"/\"Как тестируются"
-        echo "новые геномы\") можно сразу:"
-        echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 bootstrap.py --profile <PROFILE>"
-      else
-        echo "venv создался, но pip install упал -- проверь requirements.txt/сеть вручную." >&2
-      fi
-    else
-      echo "Не удалось поставить рабочий python3-venv -- подготовь venv руками:" >&2
-      echo "  cd $ZENITH_DIR/orchestrator && python3 -m venv venv && venv/bin/pip install -r requirements.txt" >&2
-    fi
+# Пункт 22 — если Zenith ещё не склонирован, сначала предлагает это
+# сделать и спрашивает про БД (своя в Docker или уже существующая), а
+# дальше — независимо от того, только что склонировали или он уже стоял —
+# открывает его собственное подменю (zenith_menu).
+manage_zenith() {
+  local st; st="$(get_zenith_status)"
+  echo "Zenith: $st"
+
+  if [ "$st" = "NONE" ]; then
+    read -re -p "Склонировать Zenith в $ZENITH_DIR? [y/N]: " ans
+    case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+    zenith_install_files || return 1
+    zenith_configure_wizard
   fi
 
   zenith_menu
@@ -2182,6 +2221,62 @@ ensure_panel_runtime_grants() {
   fi
 }
 
+# Клонирует z0r-panel + ставит venv/пользователя, БЕЗ вопроса -- вызывается
+# и из manage_panel() (после её "клонировать? y/n"), и напрямую из первого
+# запуска (см. first_run_install_modules). Пароль/секрет всё равно нужно
+# заполнить руками -- тут только сам клон+зависимости.
+panel_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$PANEL_REPO_URL" "$PANEL_DIR"; then
+    echo "Не удалось склонировать $PANEL_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 не найден, пробую поставить..." >&2
+    apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+  fi
+  if ! ( cd "$PANEL_DIR" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
+    echo "Не удалось поставить зависимости панели — доразберись руками в $PANEL_DIR." >&2
+    return 1
+  fi
+
+  if [ ! -f "$PANEL_DIR/.env" ]; then
+    cp "$PANEL_DIR/.env.example" "$PANEL_DIR/.env"
+    # Панель ходит в ТУ ЖЕ БД, что и Zenith на этом сервере — если он
+    # уже настроен, подхватываем его MYSQL_*/ZENITH_ENVIRONMENT_*
+    # вместо повторного ввода тех же значений руками (zenith_env_get
+    # читает именно $ZENITH_DIR/.env).
+    if [ -f "$ZENITH_DIR/.env" ]; then
+      local var val
+      for var in MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD \
+                 ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER; do
+        val="$(zenith_env_get "$var")"
+        [ -n "$val" ] && sed -i "s#^${var}=.*#${var}=${val}#" "$PANEL_DIR/.env"
+      done
+      echo "Подхватил MYSQL_*/ZENITH_ENVIRONMENT_* из $ZENITH_DIR/.env."
+    fi
+  fi
+
+  if ! id zenith-panel >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin zenith-panel
+  fi
+  ensure_panel_runtime_grants
+
+  echo ""
+  echo "Склонирован и готов к настройке. Перед включением (пункт 15 ещё раз):"
+  echo "  1. Проверь/заполни: $PANEL_DIR/.env — PANEL_ADMIN_PASSWORD_HASH"
+  echo "     ($PANEL_DIR/gen_password_hash.py) и PANEL_SESSION_SECRET"
+  echo "     (python3 -c 'import secrets; print(secrets.token_hex(32))')."
+  echo "  2. Для доступа снаружи через Cloudflare — см. README панели"
+  echo "     \"Публикация через Cloudflare\" (Origin CA сертификат в"
+  echo "     $PANEL_DIR/tls/, альт-порт)."
+}
+
 manage_panel() {
   local st; st="$(get_panel_status)"
   echo "web_panel: $st"
@@ -2190,55 +2285,7 @@ manage_panel() {
     NONE)
       read -re -p "Склонировать и подготовить z0r-panel в $PANEL_DIR? [y/N]: " ans
       case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
-
-      if ! command -v git >/dev/null 2>&1; then
-        echo "git не найден, пробую поставить..." >&2
-        apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
-        apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
-      fi
-      if ! git clone "$PANEL_REPO_URL" "$PANEL_DIR"; then
-        echo "Не удалось склонировать $PANEL_REPO_URL — GitHub недоступен?" >&2
-        return 1
-      fi
-
-      if ! command -v python3 >/dev/null 2>&1; then
-        echo "python3 не найден, пробую поставить..." >&2
-        apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
-      fi
-      if ! ( cd "$PANEL_DIR" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
-        echo "Не удалось поставить зависимости панели — доразберись руками в $PANEL_DIR." >&2
-        return 1
-      fi
-
-      if [ ! -f "$PANEL_DIR/.env" ]; then
-        cp "$PANEL_DIR/.env.example" "$PANEL_DIR/.env"
-        # Панель ходит в ТУ ЖЕ БД, что и Zenith на этом сервере — если он
-        # уже настроен, подхватываем его MYSQL_*/ZENITH_ENVIRONMENT_*
-        # вместо повторного ввода тех же значений руками (zenith_env_get
-        # читает именно $ZENITH_DIR/.env).
-        if [ -f "$ZENITH_DIR/.env" ]; then
-          for var in MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD \
-                     ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER; do
-            val="$(zenith_env_get "$var")"
-            [ -n "$val" ] && sed -i "s#^${var}=.*#${var}=${val}#" "$PANEL_DIR/.env"
-          done
-          echo "Подхватил MYSQL_*/ZENITH_ENVIRONMENT_* из $ZENITH_DIR/.env."
-        fi
-      fi
-
-      if ! id zenith-panel >/dev/null 2>&1; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin zenith-panel
-      fi
-      ensure_panel_runtime_grants
-
-      echo ""
-      echo "Склонирован и готов к настройке. Перед включением (пункт 15 ещё раз):"
-      echo "  1. Проверь/заполни: $PANEL_DIR/.env — PANEL_ADMIN_PASSWORD_HASH"
-      echo "     ($PANEL_DIR/gen_password_hash.py) и PANEL_SESSION_SECRET"
-      echo "     (python3 -c 'import secrets; print(secrets.token_hex(32))')."
-      echo "  2. Для доступа снаружи через Cloudflare — см. README панели"
-      echo "     \"Публикация через Cloudflare\" (Origin CA сертификат в"
-      echo "     $PANEL_DIR/tls/, альт-порт)."
+      panel_install_files
       ;;
     OFF)
       if [ ! -f "/etc/systemd/system/${PANEL_SERVICE}.service" ]; then
@@ -2291,6 +2338,47 @@ uninstall_panel() {
 # поэтому подставляем реальный $TGRELAY_DIR при копировании юнита, а не
 # копируем как есть (см. manage_panel — там копия 1:1, т.к. её юнит уже
 # ссылается на $PANEL_DIR по той же конвенции).
+# Клонирует Zenith-TG + ставит venv/пользователя, БЕЗ вопроса -- вызывается
+# и из manage_tg_relay() (после её "клонировать? y/n"), и напрямую из
+# первого запуска (см. first_run_install_modules). Включение (сервис +
+# iptables REDIRECT) сюда намеренно НЕ входит -- сетевое изменение,
+# отдельный осознанный шаг через пункт 24 ещё раз.
+tgrelay_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$TGRELAY_REPO_URL" "$TGRELAY_DIR"; then
+    echo "Не удалось склонировать $TGRELAY_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 не найден, пробую поставить..." >&2
+    apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+  fi
+  if ! ( cd "$TGRELAY_DIR" && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt ); then
+    echo "Не удалось поставить зависимости relay — доразберись руками в $TGRELAY_DIR." >&2
+    return 1
+  fi
+
+  if ! bash "$TGRELAY_DIR/cidr/fetch_telegram_cidr.sh"; then
+    echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
+    return 1
+  fi
+
+  if ! id tgrelay >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay
+  fi
+  chown -R tgrelay:tgrelay "$TGRELAY_DIR"
+
+  echo ""
+  echo "Склонирован и готов. Включи сейчас же (пункт ещё раз) — при включении"
+  echo "поднимется сервис И встанет прозрачный iptables REDIRECT на подсети"
+  echo "Telegram (см. README репозитория, 'Что требует внимания при эксплуатации')."
+}
+
 manage_tg_relay() {
   local st; st="$(get_tg_relay_status)"
   echo "Zenith-TG (Telegram relay): $st"
@@ -2298,40 +2386,7 @@ manage_tg_relay() {
     NONE)
       read -re -p "Склонировать и подготовить Zenith-TG в $TGRELAY_DIR? [y/N]: " ans
       case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
-
-      if ! command -v git >/dev/null 2>&1; then
-        echo "git не найден, пробую поставить..." >&2
-        apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
-        apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
-      fi
-      if ! git clone "$TGRELAY_REPO_URL" "$TGRELAY_DIR"; then
-        echo "Не удалось склонировать $TGRELAY_REPO_URL — GitHub недоступен?" >&2
-        return 1
-      fi
-
-      if ! command -v python3 >/dev/null 2>&1; then
-        echo "python3 не найден, пробую поставить..." >&2
-        apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
-      fi
-      if ! ( cd "$TGRELAY_DIR" && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt ); then
-        echo "Не удалось поставить зависимости relay — доразберись руками в $TGRELAY_DIR." >&2
-        return 1
-      fi
-
-      if ! bash "$TGRELAY_DIR/cidr/fetch_telegram_cidr.sh"; then
-        echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
-        return 1
-      fi
-
-      if ! id tgrelay >/dev/null 2>&1; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay
-      fi
-      chown -R tgrelay:tgrelay "$TGRELAY_DIR"
-
-      echo ""
-      echo "Склонирован и готов. Включи сейчас же (пункт ещё раз) — при включении"
-      echo "поднимется сервис И встанет прозрачный iptables REDIRECT на подсети"
-      echo "Telegram (см. README репозитория, 'Что требует внимания при эксплуатации')."
+      tgrelay_install_files
       ;;
     OFF)
       if [ ! -f "/etc/systemd/system/${TGRELAY_SERVICE}.service" ]; then
@@ -2600,6 +2655,97 @@ uninstall_everything() {
   uninstall_autobench_self
 }
 
+# Чек-лист доп. модулей на первом запуске -- один экран вместо вопроса
+# y/n по каждому модулю по отдельности. Сам факт выбора номера в списке
+# уже согласие ставить -- дальше без доп. "точно?" на каждый модуль.
+# Настройка, требующая РЕАЛЬНОГО решения человека (у Zenith -- режим БД/
+# синк с панелью, тут нет безопасного дефолта), не сворачивается -- идёт
+# сразу следом через zenith_configure_wizard, а не потом через меню.
+# У панели/бота настройка -- это правка .env токеном/паролем руками, тут
+# автоматизировать нечего, install_files печатает точные инструкции.
+# DNSCrypt/Zenith-TG -- install_files и всё, доп. мастера нет.
+first_run_install_modules() {
+  echo ""
+  echo "Какие дополнительные модули поставить? (номера через запятую/пробел,"
+  echo "Enter — ничего, только базовый z2r_autobench; можно доставить позже"
+  echo "через соответствующий пункт меню)"
+  echo "  1) autotune-daemon -- автотестирование и подстройка стратегий"
+  echo "  2) Zenith           -- автоподборщик-генератор стратегий (БД + автономный режим)"
+  echo "  3) web_panel        -- управление через браузер"
+  echo "  4) Discord_bot      -- тестирование VOICE_UDP"
+  echo "  5) DNSCrypt-proxy   -- локальный DoH-резолвер"
+  echo "  6) Zenith-TG        -- прозрачный доступ к Telegram"
+  read -re -p "Модули: " modsel
+
+  local norm tok
+  local want_daemon=0 want_zenith=0 want_panel=0 want_bot=0 want_dnscrypt=0 want_tgrelay=0
+  norm="$(echo "$modsel" | tr ',' ' ')"
+  for tok in $norm; do
+    case "$tok" in
+      1) want_daemon=1 ;;
+      2) want_zenith=1 ;;
+      3) want_panel=1 ;;
+      4) want_bot=1 ;;
+      5) want_dnscrypt=1 ;;
+      6) want_tgrelay=1 ;;
+      "") ;;
+      *) echo "Пропускаю неизвестный номер: $tok" >&2 ;;
+    esac
+  done
+
+  if [ "$want_daemon" = "1" ]; then
+    echo ""; echo "--- autotune-daemon ---"
+    install_daemon_service 1
+  fi
+  if [ "$want_zenith" = "1" ]; then
+    echo ""; echo "--- Zenith ---"
+    zenith_install_files && zenith_configure_wizard
+  fi
+  if [ "$want_panel" = "1" ]; then
+    echo ""; echo "--- web_panel ---"
+    panel_install_files
+  fi
+  if [ "$want_bot" = "1" ]; then
+    echo ""; echo "--- Discord_bot ---"
+    voice_bot_install_files
+  fi
+  if [ "$want_dnscrypt" = "1" ]; then
+    echo ""; echo "--- DNSCrypt-proxy ---"
+    install_dnscrypt
+    echo "Переключить системный DNS на локальный резолвер -- позже через пункт 28."
+  fi
+  if [ "$want_tgrelay" = "1" ]; then
+    echo ""; echo "--- Zenith-TG ---"
+    tgrelay_install_files
+  fi
+
+  echo ""
+  echo "=== Установка модулей завершена ==="
+  if ! z2r_installed; then
+    echo "z2r (ядро DPI-обхода) ещё не установлен -- тесты профилей работать не будут, пока не поставишь (пункт 12 в меню)."
+    return 0
+  fi
+
+  echo ""
+  echo "Прогнать тест стратегий сейчас? Enter — пропустить; номер(а) профиля(ей)"
+  echo "через запятую/пробел (1-9); 111 — все готовые сразу."
+  read -re -p "Тест: " testsel
+  [ -n "$testsel" ] || return 0
+
+  local bgans
+  read -re -p "В фоне, не блокируя терминал (лог отдельно)? [y/N]: " bgans
+  case "$bgans" in
+    y|Y)
+      if [ "$testsel" = "111" ]; then run_test_background --all
+      else run_test_background --profiles "$testsel"; fi
+      ;;
+    *)
+      if [ "$testsel" = "111" ]; then run_all
+      else run_selected "$testsel"; fi
+      ;;
+  esac
+}
+
 # --- bootstrap: свежескачанный файл (curl -O .../z0r && sh z0r) вне
 # /opt/z2r_autobench разворачивает полный автобенч и перезапускается уже
 # из установленной копии — тот же трюк, что в установщике z2r (сравнение
@@ -2638,15 +2784,7 @@ if [ "$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")" != "$INSTALLED_Z0R" ]; the
   chmod +x "$INSTALLED_Z0R"
   ensure_z0r_command
 
-  if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
-    echo ""
-    echo "Сервис автотестирования-автоподстройки (autotune-daemon) ещё не установлен."
-    read -re -p "Установить и включить его сейчас? [y/N]: " ans
-    case "$ans" in
-      y|Y) bash "$INSTALLED_Z0R" --install-service ;;
-      *) echo "Пропускаю — предложу снова при следующем запуске." ;;
-    esac
-  fi
+  first_run_install_modules
 
   exec bash "$INSTALLED_Z0R" "${ORIG_ARGS[@]}"
 fi
@@ -2713,7 +2851,10 @@ while true; do
   choice="$(show_menu)"
   case "$choice" in
     q|Q|0|"") echo "Выход."; exit 0 ;;
-    111) run_all ;;
+    111)
+      read -re -p "В фоне, не блокируя терминал (лог отдельно)? [y/N]: " bgans
+      case "$bgans" in y|Y) run_test_background --all ;; *) run_all ;; esac
+      ;;
     1|2|3|4|5|6|7|8|9) test_profile "$choice" ;;
     10)
       read -re -p "Домен (например example.com, без https://): " dom
@@ -2753,7 +2894,8 @@ while true; do
         [ -n "${TITLES[$tok]:-}" ] || valid=0
       done
       if [ "$valid" = "1" ] && [ "$count" -ge 2 ]; then
-        run_selected "$choice"
+        read -re -p "В фоне, не блокируя терминал (лог отдельно)? [y/N]: " bgans
+        case "$bgans" in y|Y) run_test_background --profiles "$choice" ;; *) run_selected "$choice" ;; esac
       else
         echo "Некорректный выбор."
       fi
