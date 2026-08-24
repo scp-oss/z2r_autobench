@@ -641,6 +641,9 @@ show_menu() {
   echo " 14) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
   echo " 15) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
   echo " 22) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
+  if [ -d "$ZENITH_DIR" ]; then
+    echo " 31) zenith-promoter $(color_tag "$(get_zenith_promoter_status)") (автопродвижение в прод БЕЗ человека -- быстрый доступ, тот же тумблер, что 22 -> 4 -> 2)" >&2
+  fi
   echo " 24) Zenith-TG $(color_tag "$(get_tg_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
   echo " 26) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-TG)" >&2
   echo " 28) DNSCrypt-proxy $(color_tag "$(get_dnscrypt_status)") (локальный DoH-резолвер — на случай блокировки DoT/DoH к обычным резолверам)" >&2
@@ -1877,6 +1880,32 @@ zenith_profiles_display() {
   echo "${val:-все (YT_TLS,RKN_TLS,DS_TLS,VOICE_UDP)}"
 }
 
+# Вынесено из zenith_autonomy_menu(), чтобы дёргать тем же кодом и из
+# главного меню (пункт 31, для быстрого доступа без 22 -> 4 -> 2) -- сама
+# логика ТОЛЬКО тут, обе точки входа зовут эту функцию, а не дублируют.
+zenith_promoter_toggle() {
+  local pr_st; pr_st="$(get_zenith_promoter_status)"
+  install_zenith_service zenith-promoter || return 1
+  if [ "$pr_st" = "ON" ]; then
+    systemctl disable --now zenith-promoter
+    echo "zenith-promoter остановлен и отключён."
+  else
+    echo "!!! zenith-promoter пишет /opt/zapret2/config и рестартует zapret2"
+    echo "БЕЗ подтверждения человека на каждом срабатывании. Перед первым"
+    echo "включением на этом сервере рекомендуется проверить руками:"
+    echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 auto_promoter.py --profile <PROFILE>"
+    read -re -p "Включить zenith-promoter сейчас? [y/N]: " ans
+    case "$ans" in
+      y|Y)
+        systemctl enable --now zenith-promoter
+        sleep 1
+        systemctl status zenith-promoter --no-pager
+        ;;
+      *) echo "Отмена." ;;
+    esac
+  fi
+}
+
 zenith_autonomy_menu() {
   while true; do
     local ar_st pr_st
@@ -1904,27 +1933,7 @@ zenith_autonomy_menu() {
           systemctl status zenith-autorun --no-pager
         fi
         ;;
-      2)
-        install_zenith_service zenith-promoter || continue
-        if [ "$pr_st" = "ON" ]; then
-          systemctl disable --now zenith-promoter
-          echo "zenith-promoter остановлен и отключён."
-        else
-          echo "!!! zenith-promoter пишет /opt/zapret2/config и рестартует zapret2"
-          echo "БЕЗ подтверждения человека на каждом срабатывании. Перед первым"
-          echo "включением на этом сервере рекомендуется проверить руками:"
-          echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 auto_promoter.py --profile <PROFILE>"
-          read -re -p "Включить zenith-promoter сейчас? [y/N]: " ans
-          case "$ans" in
-            y|Y)
-              systemctl enable --now zenith-promoter
-              sleep 1
-              systemctl status zenith-promoter --no-pager
-              ;;
-            *) echo "Отмена." ;;
-          esac
-        fi
-        ;;
+      2) zenith_promoter_toggle ;;
       3) journalctl -u zenith-autorun -f ;;
       4) journalctl -u zenith-promoter -f ;;
       5)
@@ -3158,6 +3167,13 @@ while true; do
         dnscrypt_leak_check
       else
         echo "DNSCrypt-proxy не установлен (пункт 28)." >&2
+      fi
+      ;;
+    31)
+      if [ -d "$ZENITH_DIR" ]; then
+        zenith_promoter_toggle
+      else
+        echo "Zenith ещё не установлен (пункт 22)." >&2
       fi
       ;;
     999) uninstall_everything ;;
