@@ -368,6 +368,41 @@ project names here — same public-repo constraint as README.md.
   (how it was first deployed by hand); `manage_tg_relay()` in `z0r`
   `sed`-rewrites that path to the real `$TGRELAY_DIR` before installing
   the unit, don't `cp` it as-is like `manage_panel` does.
+- **First MTS deploy (2026-08-24) hit two real bugs in that install path,
+  both now fixed and confirmed working end-to-end on `miha`:**
+  1. `.service` has `User=tgrelay`/`Group=tgrelay`; the system user wasn't
+     getting created reliably (or didn't survive an uninstall/reinstall
+     cycle via the menu — root cause not fully pinned down, `useradd` run
+     by hand worked fine every time), so `systemctl` failed with
+     `status=217/USER` ("Failed to determine user credentials: No such
+     process") and crash-looped on `Restart=on-failure` — 8000+ restarts
+     before it was caught, `get_tg_relay_status()` just reports this as
+     plain `OFF`, no hint that the real problem was a missing user, not
+     "not started yet". Fixed: `ensure_tgrelay_user()` now runs
+     unconditionally on every visit to `manage_tg_relay()` while
+     Zenith-TG is installed (same self-healing pattern as
+     `ensure_panel_runtime_grants`/`dnscrypt_wire_resolver`), not only
+     during the original clone.
+  2. Once the user existed, the service *still* failed to start, now with
+     `status=226/NAMESPACE`. The `sed` rewrite above only covered
+     `/opt/Zenith-TG/relay` and `/opt/Zenith-TG/.venv` — it missed a bare
+     `ReadWritePaths=/opt/Zenith-TG` (no `/relay`/`/.venv` suffix) further
+     down the same file. Combined with `ProtectSystem=strict`, systemd
+     tried to bind-mount that literal (nonexistent on this layout) path
+     read-write and failed to set up the mount namespace before Python
+     ever started. Fixed: one general `s#/opt/Zenith-TG#$TGRELAY_DIR#g`
+     substitution instead of two narrow ones, robust against any other
+     directive in the unit that references the same base path.
+  Both fixes are **unconditional on every menu visit**, not just at first
+  install (`cmp`-compare the regenerated unit against the one on disk,
+  same idiom as `install_zenith_service()`) — the already-broken unit
+  file sitting on disk from the original install would never have picked
+  up either fix otherwise, no matter how many times `git pull` ran.
+  Also: install (clone+deps) and enable (systemd unit + iptables
+  REDIRECT) used to require visiting menu item 20 twice in a row for a
+  fresh install — merged into one visit (`tgrelay_enable()` called
+  directly after a successful install), the `[y/N]` before applying
+  REDIRECT stays since it's a live network change.
 
 ## z0r main menu renumbering (2026-08-24)
 
