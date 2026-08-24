@@ -197,8 +197,8 @@ project names here — same public-repo constraint as README.md.
   original clear "не найден" error still fires rather than a silent
   wrong path) instead of hardcoding `LIB_DIR=/opt/zapret2/z2r_lib`. This
   doesn't touch `blob_tune.sh`'s own separate hardcoded
-  `FAKE_DIR=/opt/zapret2/files/fake` — same class of bug, not yet fixed,
-  lower priority since it's not on the critical path most tools hit.
+  `FAKE_DIR=/opt/zapret2/files/fake` — same class of bug (fixed
+  2026-08-24, see below).
 - `z0r` (the top-level menu script) does **not** source
   `z2r_autobench_lib.sh` — it's a standalone script with its own
   `LOCKED_TSV`/`LOCKED_MANUAL_TSV`, previously hardcoded to
@@ -210,16 +210,27 @@ project names here — same public-repo constraint as README.md.
   exist on this layout. Fixed 2026-08-23 by replicating the same tiny
   base-detection snippet inline in `z0r` rather than sourcing the whole
   lib (risk of name collisions with `z0r`'s own functions). Two more
-  known instances of this exact class, found but **not yet fixed** (lower
-  priority, same reasoning as `blob_tune.sh` above): `test_custom_domain.sh`
-  reads `TCP_YT_list.txt`/`TCP_Discord.txt`/`TCP_RKN_list.txt`/
-  `TCP_Custom.txt` from a hardcoded `/opt/zapret2/extra_strats/` (silently
-  misclassifies domains on a split install, no error), and `blob_tune.sh`
-  also has a second hardcoded path beyond the already-noted `FAKE_DIR`:
-  `CFG_BACKUP_DIR=/opt/zapret2/extra_strats/cache/orchestra/config_backups`.
-  Before trusting ANY tool's read of `locked.tsv`/hostlists/backups on a
-  new box, grep it for a bare `/opt/zapret2/` path first — sourcing the
-  lib isn't universal, several tools still hardcode.
+  known instances of this exact class, found and **fixed 2026-08-24**:
+  `test_custom_domain.sh` read `TCP_YT_list.txt`/`TCP_Discord.txt`/
+  `TCP_RKN_list.txt`/`TCP_Custom.txt` from a hardcoded
+  `/opt/zapret2/extra_strats/` (silently misclassified domains on a split
+  install, no error) — now uses `$Z2R_BASE` from the already-sourced lib,
+  same as everything else. `blob_tune.sh` had a second hardcoded path
+  beyond `FAKE_DIR` (see above):
+  `CFG_BACKUP_DIR=/opt/zapret2/extra_strats/cache/orchestra/config_backups`
+  — now `$ORCH_DIR/config_backups`. `blob_tune.sh`'s `FAKE_DIR` and the
+  `--blob=maxru:@.../fake/` prefix (used in three places: parsing the
+  current blob, writing a new one, printing the final result) are no
+  longer hardcoded to either base guess at all — parsed directly out of
+  the live config's own `--blob=maxru:@` argument instead (the config
+  itself is the ground truth for this one; CLAUDE.md already noted it
+  explicitly points at `/opt/zator/files/...` on split installs, so
+  reading it beats guessing). Falls back to `$Z2R_BASE/files/fake` with a
+  loud warning only if the config isn't in `maxru` mode yet (e.g. before
+  the first blob switch ever runs). Before trusting ANY tool's read of
+  `locked.tsv`/hostlists/backups on a new box, grep it for a bare
+  `/opt/zapret2/` path first — sourcing the lib isn't universal, some
+  tools may still hardcode a path outside what's covered here.
 - `zapret2.service` has **no self-healing** if it dies for an unrelated
   reason (crash, a bad config push, another tool restarting it into a
   broken state) — `autotune_daemon.sh` only detected "not running" and
