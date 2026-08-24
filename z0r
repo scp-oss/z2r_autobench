@@ -2519,16 +2519,28 @@ ensure_tgrelay_user() {
 # поэтому вопрос [y/N] остаётся явным, просто больше не требует отдельного
 # захода в меню.
 tgrelay_enable() {
-  if [ ! -f "/etc/systemd/system/${TGRELAY_SERVICE}.service" ]; then
-    if [ ! -f "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" ]; then
-      echo "Не найден $TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
-      return 1
-    fi
-    sed -e "s#/opt/Zenith-TG/relay#${TGRELAY_DIR}/relay#g" \
-        -e "s#/opt/Zenith-TG/\.venv#${TGRELAY_DIR}/.venv#g" \
-        "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" \
-        > "/etc/systemd/system/${TGRELAY_SERVICE}.service"
+  if [ ! -f "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" ]; then
+    echo "Не найден $TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
+    return 1
+  fi
+  # Один общий sed вместо двух точечных (были только на /opt/Zenith-TG/relay
+  # и /opt/Zenith-TG/.venv) -- пропускал ReadWritePaths=/opt/Zenith-TG (без
+  # хвоста /relay или /.venv), с ProtectSystem=strict это указывало на
+  # несуществующий путь и systemd падал с status=226/NAMESPACE (не
+  # мог настроить mount namespace) -- живой случай на MTS 2026-08-24,
+  # сервис даже не доходил до старта python. Регенерируем БЕЗУСЛОВНО при
+  # каждом заходе (сравниваем через cmp, не просто "файла ещё нет") --
+  # тот же принцип, что ensure_tgrelay_user/dnscrypt_wire_resolver: чтобы
+  # починка сама долетела до уже установленного (сломанного) юнита, а не
+  # только до новых установок.
+  local tmp_unit; tmp_unit="$(mktemp)"
+  sed "s#/opt/Zenith-TG#${TGRELAY_DIR}#g" "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" > "$tmp_unit"
+  if [ ! -f "/etc/systemd/system/${TGRELAY_SERVICE}.service" ] || ! cmp -s "$tmp_unit" "/etc/systemd/system/${TGRELAY_SERVICE}.service"; then
+    mv -f "$tmp_unit" "/etc/systemd/system/${TGRELAY_SERVICE}.service"
     systemctl daemon-reload
+    echo "Юнит установлен/обновлён: /etc/systemd/system/${TGRELAY_SERVICE}.service"
+  else
+    rm -f "$tmp_unit"
   fi
   read -re -p "Включить сейчас (сервис + REDIRECT)? [y/N]: " ans
   case "$ans" in
