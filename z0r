@@ -2586,12 +2586,18 @@ dnscrypt_leak_check() {
   echo ""
   echo "=== Проверка DNSCrypt на дырявость (локальный резолвер: $addr) ==="
 
+  local nm_active=0
+  command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null && nm_active=1
+
   echo ""
   echo "--- /etc/resolv.conf ---"
   if [ -L /etc/resolv.conf ] && readlink -f /etc/resolv.conf 2>/dev/null | grep -qi systemd; then
     echo "resolv.conf -- симлинк на systemd-resolved stub, реальный апстрим смотри в resolvectl ниже."
   elif grep -qE "^nameserver[[:space:]]+${addr//./\\.}(\$|[[:space:]])" /etc/resolv.conf 2>/dev/null; then
     echo "OK: nameserver в resolv.conf указывает на локальный резолвер ($addr)."
+  elif [ "$nm_active" = "1" ] && grep -qE '^nameserver[[:space:]]+127\.0\.0\.1([[:space:]]|$)' /etc/resolv.conf 2>/dev/null; then
+    echo "resolv.conf показывает 127.0.0.1 -- похоже на локальный dnsmasq-стаб NetworkManager"
+    echo "(dns=dnsmasq) -- само по себе это НЕ утечка, реальный апстрим смотри в nmcli ниже."
   else
     echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: resolv.conf НЕ указывает на $addr:"
     grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/    /' || echo "    (nameserver-строк не найдено)"
@@ -2607,6 +2613,22 @@ dnscrypt_leak_check() {
       echo "OK: $addr виден среди DNS Servers systemd-resolved."
     else
       echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: $addr НЕ виден в DNS Servers systemd-resolved -- запросы могут идти в обход dnscrypt."
+    fi
+  fi
+
+  if [ "$nm_active" = "1" ]; then
+    echo ""
+    echo "--- nmcli (что реально настроено в NetworkManager) ---"
+    local nm_conn nm_dns
+    nm_conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -n "$nm_conn" ]; then
+      nm_dns="$(nmcli -g ipv4.dns connection show "$nm_conn" 2>/dev/null)"
+      echo "Соединение '$nm_conn': ipv4.dns = ${nm_dns:-(пусто)}"
+      if [ -n "$nm_dns" ] && echo "$nm_dns" | grep -qF "$addr"; then
+        echo "OK: $addr виден в ipv4.dns соединения '$nm_conn'."
+      else
+        echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: $addr НЕ виден в ipv4.dns соединения '$nm_conn' -- запросы могут идти в обход dnscrypt."
+      fi
     fi
   fi
 
@@ -2676,6 +2698,13 @@ dnscrypt_leak_check() {
 # Метка $DNSCRYPT_DHCPCD_MARKER нужна, чтобы uninstall_dnscrypt() снял
 # ТОЛЬКО то, что добавили сами, не трогая чужие static-записи (тот же
 # принцип и для прямой записи resolv.conf ниже).
+# Каждая ветка сначала ПРОВЕРЯЕТ текущее состояние и молча выходит, если
+# уже настроено правильно -- нужно для того, чтобы эту функцию можно было
+# безопасно звать безусловно при каждом заходе в manage_dnscrypt() (тот же
+# принцип, что ensure_panel_runtime_grants -- обновление логики само
+# доезжает до уже установленного экземпляра, не только до новых установок,
+# см. живой случай ниже), не дёргая nmcli/resolvectl впустую и не гоняя
+# NetworkManager-соединение через reconnect на каждый заход в меню.
 dnscrypt_wire_resolver() {
   local addr="$1" iface
 
@@ -2684,28 +2713,41 @@ dnscrypt_wire_resolver() {
   # затирается следующим же обновлением аренды, в отличие от resolv.conf.
   if command -v resolvectl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
     iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
-    if [ -n "$iface" ] && resolvectl dns "$iface" "$addr" >/dev/null 2>&1; then
-      resolvectl domain "$iface" '~.' >/dev/null 2>&1
-      echo "Системный DNS переключён на $addr (через systemd-resolved, интерфейс $iface)."
-      return 0
+    if [ -n "$iface" ]; then
+      if resolvectl status "$iface" 2>/dev/null | grep -qF "$addr"; then
+        return 0
+      fi
+      if resolvectl dns "$iface" "$addr" >/dev/null 2>&1; then
+        resolvectl domain "$iface" '~.' >/dev/null 2>&1
+        echo "Системный DNS переключён на $addr (через systemd-resolved, интерфейс $iface)."
+        return 0
+      fi
     fi
   fi
 
-  # NetworkManager -- через nmcli на активное соединение.
+  # NetworkManager -- через nmcli на активное соединение. На системах с
+  # dns=dnsmasq (NM держит свой локальный кэширующий стаб) resolv.conf
+  # ВСЕГДА показывает 127.0.0.1 (стаб NM), даже когда апстрим настроен
+  # верно -- см. dnscrypt_leak_check(), там это отдельно учтено, чтобы не
+  # путать с реальной утечкой.
   if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
     local conn
     conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | head -1 | cut -d: -f1)"
-    if [ -n "$conn" ] && nmcli connection modify "$conn" ipv4.dns "$addr" ipv4.ignore-auto-dns yes >/dev/null 2>&1; then
-      nmcli connection up "$conn" >/dev/null 2>&1
-      echo "Системный DNS переключён на $addr (через NetworkManager, соединение '$conn')."
-      return 0
+    if [ -n "$conn" ]; then
+      if nmcli -g ipv4.dns connection show "$conn" 2>/dev/null | grep -qF "$addr"; then
+        return 0
+      fi
+      if nmcli connection modify "$conn" ipv4.dns "$addr" ipv4.ignore-auto-dns yes >/dev/null 2>&1; then
+        nmcli connection up "$conn" >/dev/null 2>&1
+        echo "Системный DNS переключён на $addr (через NetworkManager, соединение '$conn')."
+        return 0
+      fi
     fi
   fi
 
   # dhcpcd -- как раньше, единственная схема, что была тут изначально.
   if command -v dhcpcd >/dev/null 2>&1 && pgrep -x dhcpcd >/dev/null 2>&1; then
     if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
-      echo "dhcpcd уже настроен на локальный резолвер (запись z0r-dnscrypt уже есть) -- не трогаю."
       return 0
     fi
     {
@@ -2725,6 +2767,9 @@ dnscrypt_wire_resolver() {
   # перезаписать), но лучше молчаливого ничего -- предупреждаем прямым
   # текстом и советуем перепроверить пунктом 15 после ребута/переподключения.
   if [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+    if grep -qE "^nameserver[[:space:]]+${addr//./\\.}(\$|[[:space:]])" /etc/resolv.conf 2>/dev/null; then
+      return 0
+    fi
     cp -f /etc/resolv.conf /etc/resolv.conf.z0r-dnscrypt.bak 2>/dev/null
     { echo "# $DNSCRYPT_DHCPCD_MARKER (прямая запись resolv.conf, другие механизмы не подошли)"; echo "nameserver $addr"; } > /etc/resolv.conf
     echo "Системный DNS переключён на $addr (прямая запись /etc/resolv.conf, бэкап: /etc/resolv.conf.z0r-dnscrypt.bak)."
@@ -2767,6 +2812,18 @@ install_dnscrypt() {
 manage_dnscrypt() {
   local st; st="$(get_dnscrypt_status)"
   echo "DNSCrypt-proxy (локальный DoH-резолвер): $st"
+  # Безусловно, на КАЖДЫЙ заход, а не только при первой установке -- та же
+  # причина, что у ensure_panel_runtime_grants (см. её комментарий): апдейт
+  # z0r, принёсший новую/починенную логику wire_resolver(), иначе никогда
+  # не долетает до уже установленного экземпляра. Живой случай 2026-08-24:
+  # dnscrypt-proxy был установлен ДО того, как install_dnscrypt() начал
+  # сам звать dnscrypt_wire_resolver() -- resolv.conf так и остался
+  # непрописанным, пока это не стало отдельной идемпотентной проверкой,
+  # вызываемой всегда (сама функция теперь безопасна для повторных
+  # вызовов -- см. её докстринг).
+  if [ "$st" != "NONE" ]; then
+    dnscrypt_wire_resolver "$(dnscrypt_listen_addr)"
+  fi
   case "$st" in
     NONE)
       echo "Полезно, когда провайдер режет обычный DNS/DoT/DoH к популярным резолверам"
