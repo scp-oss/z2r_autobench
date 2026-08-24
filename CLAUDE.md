@@ -361,20 +361,64 @@ project names here — same public-repo constraint as README.md.
   ordinary local `connect()`, so it hits the same `OUTPUT` chain).
   Confirmed working end-to-end on NETH-4 with an unmodified Telegram
   client over the existing VLESS tunnel.
-- Installed via z0r menu item 24 (manage)/25 (uninstall), same
-  on-demand-clone pattern as Zenith's 22/23 — but note its shipped
+- Installed via z0r menu item 20 (manage)/30 (uninstall) (renumbered
+  2026-08-24, see "z0r main menu renumbering" below), same on-demand-clone
+  pattern as Zenith's 19/29 — but note its shipped
   `relay/tg-transparent-relay.service` hardcodes `/opt/Zenith-TG`
   (how it was first deployed by hand); `manage_tg_relay()` in `z0r`
   `sed`-rewrites that path to the real `$TGRELAY_DIR` before installing
   the unit, don't `cp` it as-is like `manage_panel` does.
+
+## z0r main menu renumbering (2026-08-24)
+
+- Items `1-9` (profile IDs) and `111`/`999`/`0` are **never** renumbered —
+  `1-9` are real profile numbers used throughout the whole system
+  (`circular_locked:key=N` in the live config, `PROFILE_NUMBERS` in
+  Zenith, `set_strategy_cli.sh` args), not just menu positions. Everything
+  else was pure menu navigation, numbered historically in the order
+  features got added (not grouped by section) — user asked for a clean
+  sequential renumbering, grouped by section, after `28`/`30`/`31`
+  landed on top of an already-messy sequence. Old → new mapping (every
+  in-script "пункт N" reference, comment, and this file's own item
+  references were updated in the same pass — grep `пункт [0-9]` in `z0r`
+  before assuming a number if this note goes stale):
+  ```
+  13 (число проходов)        -> 11
+  21 (ручное переключение)   -> 12
+  27 (тест YouTube Shorts)   -> 13
+  11 (запустить меню z2r)    -> 14
+  30 (проверка DNSCrypt)     -> 15
+  12 (Zapret сервис)         -> 16
+  31 (zenith-promoter)       -> 17
+  28 (DNSCrypt-proxy)        -> 18
+  22 (Zenith)                -> 19
+  24 (Zenith-TG)             -> 20
+  14 (Discord_bot)           -> 21
+  15 (web_panel)             -> 22
+  26 (Автообновление)        -> 23
+  16-20, 23, 25, 29          -> 24-31 (Удаление, same relative order)
+  ```
+  New section `=== Модули ===` (18-23: DNSCrypt-proxy/Zenith/Zenith-TG/
+  Discord_bot/web_panel/Автообновление) split out of the old flat
+  `=== Управление ===`, which now holds only the three items used most
+  often for a quick check/toggle (DNSCrypt leak check, Zapret service
+  restart, zenith-promoter quick toggle) — user's own ordering choice,
+  not mine.
+- Nested submenu numbering (Zenith's own `1-5` inside item 19, autonomy
+  menu's own `1-5` inside 19→4) is a **separate namespace**, untouched by
+  this renumbering — a comment saying "пункт 3" inside `zenith_menu`/
+  `zenith_autonomy_menu` code means that submenu's own item 3, not a
+  top-level item.
 
 ## autotune-daemon vs Zenith — two independent auto-tuners, not layers (since 2026-08-23)
 
 - `autotune-daemon` (this repo, `autotune_daemon.sh`) and Zenith
   (`zenith-autorun`/`zenith-promoter`, separate repo, see below) are **two
   fully independent systems**, not parts of one another, despite both
-  living under z0r menu item 22 (Zenith) as of this note — user asked to
-  move autotune-daemon's control entry (menu item 13 → item 22 → 5) into
+  living under z0r menu item 19 (Zenith, renumbered 2026-08-24 — was 22,
+  see "z0r main menu renumbering" below) as of this note — user asked to
+  move autotune-daemon's control entry (originally menu item 13 → item
+  22 → 5, now item 19 → 5 after the same renumbering) into
   the Zenith submenu purely for UX convenience ("one place for all
   auto-tuning"), explicitly NOT as a functional merge. Nothing about
   their behavior changed; they still don't know about each other.
@@ -400,8 +444,9 @@ project names here — same public-repo constraint as README.md.
   `--lua-desync=` parameters), not part of this repo. Talks to production
   only via `set_strategy_cli.sh set/get/max` — never touches
   `/opt/zapret2` directly. MySQL-backed (`db/schema.sql`), docker-compose
-  based, no systemd. Installed via z0r menu item 22 (manage)/23
-  (uninstall), same on-demand-clone pattern as item 14's Discord bot.
+  based, no systemd. Installed via z0r menu item 19 (manage)/29
+  (uninstall) (renumbered 2026-08-24, was 22/23 — see "z0r main menu
+  renumbering" below), same on-demand-clone pattern as item 21's Discord bot.
 - Scaffold-only as of this writing — mutation/UCB/crossover logic not yet
   ported into it.
 - Production panel host (NETH-4) has its own `Zenith/` checkout on `main`,
