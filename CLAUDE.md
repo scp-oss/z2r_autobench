@@ -403,6 +403,26 @@ project names here — same public-repo constraint as README.md.
   fresh install — merged into one visit (`tgrelay_enable()` called
   directly after a successful install), the `[y/N]` before applying
   REDIRECT stays since it's a live network change.
+- **New open issue, found 2026-08-24 after the fixes above — service runs
+  and REDIRECT is applied, but the connector itself is OS-dependent and
+  not yet root-caused:** through the relay (over the existing VLESS
+  tunnel, miha/MTS), Telegram connects fine on macOS and iOS but **fails
+  on Android and Windows**. Meanwhile, connecting the same Telegram app
+  directly via a real MTProxy (no relay, no VLESS) works on **every** OS
+  tested — narrowing this specifically to `transparent_relay.py`'s own
+  no-secret connector logic (see "What actually works" above — it decodes
+  the client's initial packet using raw-key, no-secret semantics instead
+  of real MTProxy's secret-derived key), not to network-level blocking or
+  the REDIRECT/iptables setup, which is common to all OSes and evidently
+  fine. Most likely explanation not yet confirmed: Android/Windows
+  Telegram clients construct or obfuscate/pad their initial connection
+  packet differently from the macOS/iOS clients, and the connector's
+  packet parsing doesn't handle that variant — but this needs actual
+  packet captures/comparison across clients to confirm, not guessed at
+  further here. Next step when picked back up: capture the raw initial
+  bytes each client sends (e.g. via the relay's own logging or a local
+  packet dump) for a working (iOS) vs failing (Android) client hitting
+  the same connector, diff them.
 
 ## z0r main menu renumbering (2026-08-24)
 
