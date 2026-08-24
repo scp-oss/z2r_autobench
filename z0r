@@ -2481,10 +2481,7 @@ tgrelay_install_files() {
     return 1
   fi
 
-  if ! id tgrelay >/dev/null 2>&1; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay
-  fi
-  chown -R tgrelay:tgrelay "$TGRELAY_DIR"
+  ensure_tgrelay_user
 
   echo ""
   echo "Склонирован и готов. Включи сейчас же (пункт ещё раз) — при включении"
@@ -2492,9 +2489,34 @@ tgrelay_install_files() {
   echo "Telegram (см. README репозитория, 'Что требует внимания при эксплуатации')."
 }
 
+# .service требует User=tgrelay/Group=tgrelay -- если юзера нет, systemd
+# падает с "status=217/USER, Failed to determine user credentials: No such
+# process" и уходит в бесконечный auto-restart-цикл (Restart=on-failure),
+# без единого намёка на причину в статусе (только в полном journalctl).
+# Живой случай на MTS 2026-08-24: юзер по какой-то причине не создался/не
+# сохранился при установке -- ~8000+ рестартов, сервис вечно "OFF" в
+# get_tg_relay_status(). Проверяем и чиним БЕЗУСЛОВНО при каждом заходе
+# в manage_tg_relay() (тот же принцип, что ensure_panel_runtime_grants и
+# dnscrypt_wire_resolver -- см. их комментарии), не только при первой
+# установке -- следующий Restart=on-failure подхватит починку сам, без
+# ручного systemctl restart.
+ensure_tgrelay_user() {
+  if ! id tgrelay >/dev/null 2>&1; then
+    if ! useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay; then
+      echo "Не удалось создать системного пользователя tgrelay -- сервис не сможет запуститься (status=217/USER). Разберись руками: useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay" >&2
+      return 1
+    fi
+    echo "Создан системный пользователь tgrelay (отсутствовал -- сервис из-за этого падал в рестарт-цикл)."
+  fi
+  chown -R tgrelay:tgrelay "$TGRELAY_DIR"
+}
+
 manage_tg_relay() {
   local st; st="$(get_tg_relay_status)"
   echo "Zenith-TG (Telegram relay): $st"
+  if [ "$st" != "NONE" ]; then
+    ensure_tgrelay_user
+  fi
   case "$st" in
     NONE)
       read -re -p "Склонировать и подготовить Zenith-TG в $TGRELAY_DIR? [y/N]: " ans
