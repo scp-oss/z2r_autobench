@@ -2484,9 +2484,9 @@ tgrelay_install_files() {
   ensure_tgrelay_user
 
   echo ""
-  echo "Склонирован и готов. Включи сейчас же (пункт ещё раз) — при включении"
-  echo "поднимется сервис И встанет прозрачный iptables REDIRECT на подсети"
-  echo "Telegram (см. README репозитория, 'Что требует внимания при эксплуатации')."
+  echo "Склонирован и готов. При включении (сейчас спросит) поднимется сервис"
+  echo "И встанет прозрачный iptables REDIRECT на подсети Telegram (см. README"
+  echo "репозитория, 'Что требует внимания при эксплуатации')."
 }
 
 # .service требует User=tgrelay/Group=tgrelay -- если юзера нет, systemd
@@ -2511,6 +2511,41 @@ ensure_tgrelay_user() {
   chown -R tgrelay:tgrelay "$TGRELAY_DIR"
 }
 
+# Копирует юнит (если ещё не скопирован) и спрашивает "включить сейчас
+# (сервис + REDIRECT)?" -- вынесено из OFF-ветки manage_tg_relay(), чтобы
+# звать тем же кодом сразу после установки (NONE-ветка), в ОДНОМ заходе
+# в меню, а не заставлять заходить в пункт 20 второй раз подряд ("дважды
+# пикать пункт", живой запрос 2026-08-24). REDIRECT -- сетевое изменение,
+# поэтому вопрос [y/N] остаётся явным, просто больше не требует отдельного
+# захода в меню.
+tgrelay_enable() {
+  if [ ! -f "/etc/systemd/system/${TGRELAY_SERVICE}.service" ]; then
+    if [ ! -f "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" ]; then
+      echo "Не найден $TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
+      return 1
+    fi
+    sed -e "s#/opt/Zenith-TG/relay#${TGRELAY_DIR}/relay#g" \
+        -e "s#/opt/Zenith-TG/\.venv#${TGRELAY_DIR}/.venv#g" \
+        "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" \
+        > "/etc/systemd/system/${TGRELAY_SERVICE}.service"
+    systemctl daemon-reload
+  fi
+  read -re -p "Включить сейчас (сервис + REDIRECT)? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl enable --now "$TGRELAY_SERVICE"
+      sleep 2
+      systemctl status "$TGRELAY_SERVICE" --no-pager
+      if bash "$TGRELAY_DIR/relay/setup_redirect.sh" apply; then
+        echo "REDIRECT применён — трафик к подсетям Telegram (443) теперь идёт через relay."
+      else
+        echo "Не удалось применить REDIRECT — сервис работает, но трафик пока не перенаправлен (доразберись руками: $TGRELAY_DIR/relay/setup_redirect.sh apply)." >&2
+      fi
+      ;;
+    *) echo "Ок, не трогаю." ;;
+  esac
+}
+
 manage_tg_relay() {
   local st; st="$(get_tg_relay_status)"
   echo "Zenith-TG (Telegram relay): $st"
@@ -2521,35 +2556,10 @@ manage_tg_relay() {
     NONE)
       read -re -p "Склонировать и подготовить Zenith-TG в $TGRELAY_DIR? [y/N]: " ans
       case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
-      tgrelay_install_files
+      tgrelay_install_files || return 1
+      tgrelay_enable
       ;;
-    OFF)
-      if [ ! -f "/etc/systemd/system/${TGRELAY_SERVICE}.service" ]; then
-        if [ ! -f "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" ]; then
-          echo "Не найден $TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
-          return 1
-        fi
-        sed -e "s#/opt/Zenith-TG/relay#${TGRELAY_DIR}/relay#g" \
-            -e "s#/opt/Zenith-TG/\.venv#${TGRELAY_DIR}/.venv#g" \
-            "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" \
-            > "/etc/systemd/system/${TGRELAY_SERVICE}.service"
-        systemctl daemon-reload
-      fi
-      read -re -p "Сервис установлен, но не запущен. Включить сейчас (сервис + REDIRECT)? [y/N]: " ans
-      case "$ans" in
-        y|Y)
-          systemctl enable --now "$TGRELAY_SERVICE"
-          sleep 2
-          systemctl status "$TGRELAY_SERVICE" --no-pager
-          if bash "$TGRELAY_DIR/relay/setup_redirect.sh" apply; then
-            echo "REDIRECT применён — трафик к подсетям Telegram (443) теперь идёт через relay."
-          else
-            echo "Не удалось применить REDIRECT — сервис работает, но трафик пока не перенаправлен (доразберись руками: $TGRELAY_DIR/relay/setup_redirect.sh apply)." >&2
-          fi
-          ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
-      ;;
+    OFF) tgrelay_enable ;;
     ON)
       read -re -p "Сервис работает. Остановить, отключить и снять REDIRECT? [y/N]: " ans
       case "$ans" in
