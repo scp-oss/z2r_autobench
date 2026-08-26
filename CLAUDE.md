@@ -612,6 +612,40 @@ project names here — same public-repo constraint as README.md.
   `sandbox/nfqws2_sandbox.conf` (it's a generated artifact, safe to
   remove) before the next `start_sandbox.sh` run so it actually
   regenerates with the fix.
+- **Fourth bug in the same chain, same miha session, found 2026-08-26
+  after the third bug's fix landed:** the sandbox stopped failing on
+  missing blob files but every single genome for every TCP profile
+  (YT_TLS/RKN_TLS/DS_TLS) still failed to apply, logging a generic
+  "не удалось применить в песочнице (start_sandbox.sh вернул ошибку),
+  пропуск" with no detail — `zenith/orchestrator/sandbox_apply.py`'s
+  `apply_raw()` captured the final `start_sandbox.sh` subprocess's
+  stderr/stdout but discarded it, returning only a bool; every caller
+  (`main.py`, `compare_control.py`, `bootstrap.py`) printed the same
+  content-free message. Fixed by stashing the captured output in a
+  module-level `sandbox_apply.LAST_ERROR` and having all three callers
+  include it — this immediately surfaced the real error: `cannot access
+  hostlist file '/opt/zapret2/extra_strats/TCP_YT_list.txt'`. Root
+  cause was the *same* `/opt/zapret2` vs `/opt/zator` split-brain class
+  as everything else in this chain, but this time hardcoded in
+  `zenith/orchestrator/genome.py`'s `PROFILE_FILTERS` (the sandbox's own
+  copy of the real per-profile `--hostlist=`/`--payload=` filter lines,
+  used to actually apply a genome for testing — separate from
+  `auto_promoter.py`'s `_PROFILE_TARGETS_DEFAULTS`, which matches literal
+  text in the live production config for promotion-anchor purposes and
+  is a different, already-documented per-server-calibration concern, not
+  touched here). Fixed the same way as the third bug: added
+  `config.Z2R_BASE`, detected by probing for the actual
+  `extra_strats/TCP_YT_list.txt` file (not directory existence, same
+  stub-directory lesson as `FAKE_DIR`), and pointed the `extra_strats/`-
+  prefixed hostlist paths at it. `lists/netrogat.txt` paths were left
+  hardcoded to `/opt/zapret2` — `lists/` isn't part of what's documented
+  to split, only `z2r_lib`/`extra_strats`/`files`. **Lesson reinforced
+  yet again**: any code that swallows a subprocess's stderr behind a
+  bare bool return turns every future failure in that path into an
+  unsolvable mystery — this is now the second time this session a
+  generic pass/fail signal (the first was `zenith_autorun.sh` never
+  checking `main.py`'s exit code) hid a real, actionable, one-line error
+  message for days.
 
 ## z2r core install — GitHub is not reliable from every provider
 
