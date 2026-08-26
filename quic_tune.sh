@@ -71,7 +71,7 @@ echo ""
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/quic_tune_${RUN_TS}.tsv"
-echo -e "ts\tprofile\tstrategy\tattempt\tbytes\tsuccess\tnote" > "$LOG_FILE"
+echo -e "ts\tprofile\tstrategy\tattempt\tbytes\tms\tsuccess\tnote" > "$LOG_FILE"
 
 autobench_backup_locks "$RUN_TS"
 
@@ -119,18 +119,19 @@ for ((s=1; s<=max_strat; s++)); do
   orch_locked_set "$PROFILE" "$PROTO" "$s"
   sleep "$SETTLE_SECONDS"
 
-  bytes_received="$(python3 "$SCRIPT_DIR/quic_probe.py" "$GV_HOST" "$GV_PATH" \
+  quic_out="$(python3 "$SCRIPT_DIR/quic_probe.py" "$GV_HOST" "$GV_PATH" \
       --range-bytes "$RANGE_BYTES" --timeout "$QUIC_TIMEOUT" 2>>"$LOG_DIR/quic_tune_${RUN_TS}.stderr.log")"
   rc=$?
+  IFS=$'\t' read -r bytes_received ms_elapsed <<< "$quic_out"
   success=0
   if [ "$rc" -eq 0 ] && [ "${bytes_received:-0}" -ge "$RANGE_BYTES" ] 2>/dev/null; then
     success=1
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -Iseconds)" "$PROFILE" "$s" "1" "${bytes_received:-0}" "$success" "-" >> "$LOG_FILE"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -Iseconds)" "$PROFILE" "$s" "1" "${bytes_received:-0}" "${ms_elapsed:-0}" "$success" "-" >> "$LOG_FILE"
 
-  echo "strategy=$s bytes=${bytes_received:-0} success=$success"
+  echo "strategy=$s bytes=${bytes_received:-0} ms=${ms_elapsed:-0} success=$success"
 
   if [ "$success" -eq 1 ]; then
     echo "Рабочая стратегия найдена: $s"

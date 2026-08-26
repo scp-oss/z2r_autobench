@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic auto-update for z2r_autobench ecosystem (z2r_autobench/Zenith/z0r-panel/Zenith-TG)
+
+[Timer]
+# Не сразу после старта -- дать системе/сети подняться
+OnBootSec=5min
+OnUnitActiveSec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

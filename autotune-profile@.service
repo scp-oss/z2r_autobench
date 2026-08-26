@@ -1,0 +1,31 @@
+[Unit]
+Description=z2r autotune daemon for profile %i (health-check + point re-tune, independent of other profiles)
+After=network-online.target zapret2.service
+Wants=network-online.target
+Wants=zapret2.service
+# Демон сам себя защищает от повторного запуска ТОГО ЖЕ профиля (flock на
+# autotune_state/daemon.singleton.lock.profile_%i) -- двойной старт того же
+# инстанса не страшен, но не даём systemd уходить в частый restart-loop,
+# если что-то пошло не так на самом старте.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bash /opt/z2r_autobench/autotune_daemon.sh --profile %i
+Restart=on-failure
+RestartSec=10
+User=root
+# Свой лог-файл на профиль (autotune_state/daemon_profile_%i.log) плюс
+# journal -- `journalctl -u autotune-profile@%i -f`.
+StandardOutput=journal
+StandardError=journal
+
+# Переопределить настройки на КОНКРЕТНЫЙ профиль:
+#   systemctl edit autotune-profile@5
+# и вписать, например, более редкий интервал для дорогого QUIC-профиля:
+#   [Service]
+#   Environment=CHECK_INTERVAL=900
+
+[Install]
+WantedBy=multi-user.target

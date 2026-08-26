@@ -33,16 +33,43 @@ usage() {
 [ $# -ge 1 ] || usage
 action="$1"; shift
 
+# profile/proto раньше проходили в set_strategy()/get_strategy() (в итоге
+# в locked.tsv, ту же TSV, что читает нативный zapret-lib) БЕЗ ЕДИНОЙ
+# проверки -- только strategy была заякорена на цифры. Вызывающий (напр.
+# z0r-panel через sudoers `set_strategy_cli.sh set *`) мог передать
+# что угодно, включая таб/перевод строки, ломающие структуру TSV-файла.
+# Найдено при аудите перед деплоем на Provider B 2026-08-17. profile -- всегда
+# небольшое целое (circular_locked:key=N, N сейчас 1-9, но новые профили
+# добавляются со временем, поэтому просто "цифры", не жёсткий список).
+# proto -- всегда короткое слово из строчных латинских букв (tls/udp/http
+# и т.п., опять же без жёсткого списка на будущее).
+_validate_profile_proto() {
+  local profile="$1" proto="$2"
+  if ! printf '%s' "$profile" | grep -Eq '^[0-9]{1,4}$'; then
+    echo "profile должен быть небольшим целым числом, получено: '$profile'" >&2
+    exit 1
+  fi
+  if ! printf '%s' "$proto" | grep -Eq '^[a-z]{1,16}$'; then
+    echo "proto должен состоять из строчных латинских букв, получено: '$proto'" >&2
+    exit 1
+  fi
+}
+
 case "$action" in
   max)
     [ $# -eq 1 ] || usage
     profile="$1"
+    if ! printf '%s' "$profile" | grep -Eq '^[0-9]{1,4}$'; then
+      echo "profile должен быть небольшим целым числом, получено: '$profile'" >&2
+      exit 1
+    fi
     config_profile_max_strategy "$profile" ""
     exit 0
     ;;
   set)
     [ $# -eq 3 ] || usage
     profile="$1"; proto="$2"; strategy="$3"
+    _validate_profile_proto "$profile" "$proto"
     if ! printf '%s' "$strategy" | grep -Eq '^[0-9]+$'; then
       echo "Стратегия должна быть числом, получено: '$strategy'" >&2
       exit 1
@@ -65,6 +92,7 @@ case "$action" in
   get)
     [ $# -eq 2 ] || usage
     profile="$1"; proto="$2"
+    _validate_profile_proto "$profile" "$proto"
     get_strategy "$profile" "$proto"
     exit 0
     ;;

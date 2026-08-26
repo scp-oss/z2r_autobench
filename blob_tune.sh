@@ -16,7 +16,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="/opt/z2r_autobench/logs"
-FAKE_DIR="/opt/zapret2/files/fake"
+# FAKE_DIR определяется НИЖЕ, из живого конфига (см. комментарий у CFG_BACKUP_DIR) --
+# не хардкодится тут, см. CLAUDE.md "/opt/zapret2 vs /opt/zator".
 CFG="/opt/zapret2/config"
 ZAPRET2_INIT="/opt/zapret2/init.d/sysv/zapret2"
 RESTART_SETTLE_SECONDS="${RESTART_SETTLE_SECONDS:-8}"
@@ -59,13 +60,29 @@ echo -e "ts\tprofile\ttitle\tproto\tstrategy\tattempt\ttls12_ok\ttls13_ok\tsucce
 echo -e "blob\tprofile\tsuccess\tstrategy\tbytes" > "$SUMMARY_FILE"
 
 # --- бэкап конфига целиком (не только locked.tsv — тут меняется сам config) ---
-CFG_BACKUP_DIR="/opt/zapret2/extra_strats/cache/orchestra/config_backups"
+# $ORCH_DIR (см. z2r_autobench_lib.sh, sourced выше) -- НЕ жёстко
+# /opt/zapret2/, см. CLAUDE.md "/opt/zapret2 vs /opt/zator". Раньше было
+# захардкожено -- на штатной раскладке апстрим-установщика (extra_strats
+# под /opt/zator) бэкап тихо писался бы в каталог, который никто не читает.
+CFG_BACKUP_DIR="$ORCH_DIR/config_backups"
 mkdir -p "$CFG_BACKUP_DIR"
 cp -p "$CFG" "$CFG_BACKUP_DIR/config.${RUN_TS}.bak"
 echo "Бэкап config сохранён: $CFG_BACKUP_DIR/config.${RUN_TS}.bak"
 autobench_backup_locks "$RUN_TS"
 
-CURRENT_BLOB_FILE="$(sed -n -E 's#.*--blob=maxru:@/opt/zapret2/files/fake/([^[:space:]]+).*#\1#p' "$CFG" | head -n1)"
+# FAKE_DIR/BLOB_PREFIX -- из живого конфига, не хардкод. CLAUDE.md отмечает,
+# что --blob= в конфиге явно ссылается на /opt/zator/files/... (не
+# /opt/zapret2/files/...) на серверах со штатным разделением -- надёжнее
+# прочитать реальный путь из самого конфига один раз, чем угадывать базу
+# (z2r_lib/extra_strats и files/ не обязаны совпадать по расположению).
+FAKE_DIR="$(sed -n -E 's#.*--blob=maxru:@([^[:space:]]+/fake)/[^[:space:]]+.*#\1#p' "$CFG" | head -n1)"
+if [ -z "$FAKE_DIR" ]; then
+  FAKE_DIR="$Z2R_BASE/files/fake"
+  echo "Не нашёл --blob=maxru:@.../fake/... в $CFG (конфиг сейчас не в режиме maxru?) -- использую дефолт $FAKE_DIR." >&2
+fi
+BLOB_PREFIX="--blob=maxru:@${FAKE_DIR}/"
+
+CURRENT_BLOB_FILE="$(sed -n -E "s#.*${BLOB_PREFIX}([^[:space:]]+).*#\\1#p" "$CFG" | head -n1)"
 echo "Исходный blob: ${CURRENT_BLOB_FILE:-неизвестен}"
 
 sed_ereg="$(config_sed_ereg)"
@@ -74,7 +91,7 @@ sed_ereg="$(config_sed_ereg)"
 # (если сейчас fake_default_tls) и подставляет нужный файл.
 apply_blob() {
   local blob_file="$1"
-  local prefix="--blob=maxru:@/opt/zapret2/files/fake/"
+  local prefix="$BLOB_PREFIX"
 
   if [ ! -f "$FAKE_DIR/$blob_file" ]; then
     echo "Файл $FAKE_DIR/$blob_file не найден, пропуск." >&2
@@ -194,12 +211,27 @@ if [ -n "$BEST_BLOB" ]; then
   echo "Применяю и оставляю его."
   apply_blob "$BEST_BLOB"
   restart_zapret2
-  # финальный дозор стратегиями уже сделан внутри score_blob() для победителя,
-  # но т.к. мы перебирали кандидатов по порядку, а не переоценивали победителя
-  # последним — прогоняем ещё раз для гарантии актуальных locked.tsv.
-  NIGHT_BUDGET_SECONDS="$PER_BLOB_BUDGET"
-  CURRENT_CANDIDATE="$BEST_BLOB(final)"
-  score_blob
+  # В отличие от основного цикла перебора выше (строки 174-178), этот
+  # финальный restart раньше не проверялся вообще -- если он падал на том
+  # же документированном qnum-race (см. restart_zapret2()), скрипт тихо
+  # шёл дальше в score_blob() как ни в чём не бывало, оставляя прод БЕЗ
+  # запущенного nfqws2 и без отката к backup, снятому в начале прогона
+  # (найдено при аудите перед деплоем на Provider B 2026-08-17).
+  if ! zapret2_running; then
+    echo "!!! zapret2 не поднялся после финального применения $BEST_BLOB -- откатываюсь на backup ($CFG_BACKUP_DIR/config.${RUN_TS}.bak)." >&2
+    cp -p "$CFG_BACKUP_DIR/config.${RUN_TS}.bak" "$CFG"
+    restart_zapret2
+    if ! zapret2_running; then
+      echo "!!! zapret2 не поднялся даже после отката на backup -- нужно вмешательство человека." >&2
+    fi
+  else
+    # финальный дозор стратегиями уже сделан внутри score_blob() для победителя,
+    # но т.к. мы перебирали кандидатов по порядку, а не переоценивали победителя
+    # последним — прогоняем ещё раз для гарантии актуальных locked.tsv.
+    NIGHT_BUDGET_SECONDS="$PER_BLOB_BUDGET"
+    CURRENT_CANDIDATE="$BEST_BLOB(final)"
+    score_blob
+  fi
 else
   echo "Ни один кандидат не превзошёл baseline (${CURRENT_BLOB_FILE:-?}, score=$BASELINE_SCORE). Откатываюсь."
   cp -p "$CFG_BACKUP_DIR/config.${RUN_TS}.bak" "$CFG"
@@ -207,6 +239,6 @@ else
 fi
 
 echo "Итоговый blob в конфиге:"
-sed -n -E 's#.*--blob=maxru:@/opt/zapret2/files/fake/([^[:space:]]+).*#\1#p' "$CFG" | head -n1
+sed -n -E "s#.*${BLOB_PREFIX}([^[:space:]]+).*#\\1#p" "$CFG" | head -n1
 echo "Сводка по кандидатам: $SUMMARY_FILE"
 echo "Полный лог попыток: $LOG_FILE"

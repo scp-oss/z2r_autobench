@@ -6,8 +6,32 @@
 # библиотеки (config.sh, orchestra_state.sh, netcheck.sh), как это делает
 # сам z2r.sh.
 
-LIB_DIR="${LIB_DIR:-/opt/zapret2/z2r_lib}"
-ORCH_DIR="${ORCH_DIR:-/opt/zapret2/extra_strats/cache/orchestra}"
+# Живой факт, подтверждённый 2026-08-23 на ДВУХ разных серверах (Server A
+# после восстановления и Server B на абсолютно свежей, только что
+# развёрнутой установке): апстрим-установщик z2r кладёт z2r_lib/
+# extra_strats НЕ в /opt/zapret2, а в /opt/zator — это штатная раскладка
+# инсталлятора (z2r.sh), не повреждение конкретного сервера. Раньше
+# LIB_DIR/ORCH_DIR были жёстко зашиты на /opt/zapret2/..., и КАЖДАЯ
+# свежая установка спотыкалась об "Не найден .../z2r_lib/config.sh —
+# прерываю", пока кто-то не проставит symlink вручную. Теперь
+# автоопределяем базу по тому, где реально лежит z2r_lib — если он есть
+# под /opt/zapret2 (как на серверах, где symlink уже когда-то поставили
+# вручную), используем её, иначе — /opt/zator. Если не нашли ни там, ни
+# там, оставляем дефолт /opt/zapret2, чтобы ниже сработала явная,
+# понятная ошибка "не найден", а не тихий неправильный путь.
+_z2r_detect_base() {
+  if [ -d "/opt/zapret2/z2r_lib" ]; then
+    echo "/opt/zapret2"
+  elif [ -d "/opt/zator/z2r_lib" ]; then
+    echo "/opt/zator"
+  else
+    echo "/opt/zapret2"
+  fi
+}
+Z2R_BASE="${Z2R_BASE:-$(_z2r_detect_base)}"
+
+LIB_DIR="${LIB_DIR:-$Z2R_BASE/z2r_lib}"
+ORCH_DIR="${ORCH_DIR:-$Z2R_BASE/extra_strats/cache/orchestra}"
 
 # --- общий лок на "кто сейчас крутит стратегии" ---
 # Ретюн (свой или демона) переключает locked.tsv десятки раз за один прогон.
@@ -89,6 +113,23 @@ print_progress_done() {
 }
 THROUGHPUT_TIMEOUT="${THROUGHPUT_TIMEOUT:-4}"
 
+# Раньше probe_url() засчитывала успех, если прошёл ХОТЯ БЫ ОДИН из
+# TLS 1.2/1.3 (расчёт был на случаи, когда блокировка бьёт по конкретной
+# версии протокола). Живой случай на Server A, 2026-08-18: DS_TLS
+# strategy=29 — TLS 1.3 отвечал нормально, TLS 1.2 стабильно давал таймаут
+# 2с (видно в собственном тесте z2r), а OR-логика считала профиль здоровым
+# (autotune_daemon.sh 6+ часов подряд видел 0 провалов), пока настоящий
+# десктопный клиент Discord (которому, похоже, нужен именно TLS 1.2-путь)
+# не грузился вообще. PROBE_REQUIRE_BOTH_TLS=1 (по умолчанию) — требовать
+# успеха ОБОИХ версий, чтобы такие наполовину рабочие стратегии больше не
+# проходили тихо ни в health-check (autotune_daemon.sh), ни при ранжировании
+# кандидатов (rank_strategies.sh). Единственный легитимный повод вернуть
+# старую OR-логику — если реальный сервер профиля сам физически не
+# обслуживает TLS 1.2 (не блокировка, а его собственный отказ от старого
+# протокола) — тогда AND будет ложно проваливать профиль целиком; в этом
+# случае поставь PROBE_REQUIRE_BOTH_TLS=0 в окружении конкретного запуска.
+PROBE_REQUIRE_BOTH_TLS="${PROBE_REQUIRE_BOTH_TLS:-1}"
+
 probe_url() {
   local url="$1"
   local ok12=0 ok13=0
@@ -108,6 +149,19 @@ probe_url() {
   TLS13_OK=$ok13
   TLS12_BYTES=$bytes12
   TLS13_BYTES=$bytes13
+
+  if [ "$PROBE_REQUIRE_BOTH_TLS" = "1" ]; then
+    if [ "$ok12" -eq 1 ] && [ "$ok13" -eq 1 ]; then
+      return 0
+    fi
+    if [ "$ok12" -ne "$ok13" ]; then
+      local which="TLS1.3, TLS1.2 провалился"
+      [ "$ok12" -eq 1 ] && which="TLS1.2, TLS1.3 провалился"
+      echo "probe_url: $url — прошёл только $which (строгий режим PROBE_REQUIRE_BOTH_TLS=1 считает это провалом)" >&2
+    fi
+    return 1
+  fi
+
   [ "$ok12" -eq 1 ] || [ "$ok13" -eq 1 ]
 }
 
@@ -125,6 +179,47 @@ probe_http_url() {
       -s -o /dev/null -w '%{size_download}' "$url" 2>/dev/null || echo 0)"
   HTTP_BYTES="$bytes"
   [ "${bytes:-0}" -ge "$MIN_BYTES_THRESHOLD" ] 2>/dev/null
+}
+
+# Лёгкая проверка достижимости — просто что TLS+HTTP реально дошли и
+# вернули осмысленный код ответа (не 000/таймаут), без байтового порога
+# probe_url/probe_http_url. Нужна для доменов вроде youtubei.googleapis.com,
+# у которых нет большой статической страницы, чтобы пройти MIN_BYTES_THRESHOLD,
+# но которые реально нужны клиенту.
+#
+# Живой инцидент 2026-08-23 на Server A: rank_strategies.sh тестировал
+# профиль 1 (YT_TLS) только через https://www.youtube.com/ (голая HTML-
+# обёртка сайта) и выбрал strategy=19 — она честно проходила по этому URL,
+# но youtubei.googleapis.com (InnerTube API, через который реальные клиенты
+# — включая мобильное приложение и ТВ — тянут фид/поиск/данные интерфейса)
+# под той же strategy=19 стабильно давал TCP/TLS-таймаут. Итог: "сайт
+# открывается", а сам YouTube-клиент не грузится, и ни health-check, ни
+# ретюн этого не ловили, потому что оба смотрели только на www.youtube.com.
+probe_reachable() {
+  local url="$1"
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' \
+      --connect-timeout 3 --max-time "${THROUGHPUT_TIMEOUT:-4}" "$url" 2>/dev/null)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# Профили, для которых один URL недостаточно представителен для реального
+# клиента (см. probe_reachable() выше) — дополнительный домен, который
+# ОБЯЗАН быть достижим (не байтовый порог, просто не 000), иначе кандидат
+# считается проваленным, даже если основной test_url профиля прошёл.
+declare -A PROFILE_EXTRA_URL=(
+  [1]="https://youtubei.googleapis.com/"
+)
+
+# Использование: после успешного probe_url/probe_http_url по основному URL
+# профиля — extra_check_ok "$profile" должен тоже пройти, иначе кандидат не
+# засчитывается. Профили без записи в PROFILE_EXTRA_URL всегда проходят
+# (return 0) — не меняет поведение для профилей, которым это не нужно.
+extra_check_ok() {
+  local profile="$1"
+  local url="${PROFILE_EXTRA_URL[$profile]:-}"
+  [ -z "$url" ] && return 0
+  probe_reachable "$url"
 }
 
 # --- обёртка над orch_locked_set/get с учётом профилей 8/9 (fallback -> locked.manual.tsv) ---
@@ -204,6 +299,12 @@ tune_profile() {
         else
           log_row "$log_file" "$profile" "$title" "$proto_list" "$s" "$attempt" "$TLS12_OK" "$TLS13_OK" "0" "fail"
         fi
+      fi
+      # см. PROFILE_EXTRA_URL/extra_check_ok выше — основной $test_url может
+      # пройти, а реально нужный клиенту второстепенный домен под той же
+      # стратегией — нет (живой инцидент 2026-08-23, профиль 1).
+      if [ "$ok_any" -eq 1 ] && ! extra_check_ok "$profile"; then
+        ok_any=0
       fi
       [ "$ok_any" -eq 1 ] && break
     done
@@ -311,6 +412,13 @@ tune_profile_exhaustive() {
       fi
     done
 
+    # см. PROFILE_EXTRA_URL/extra_check_ok выше — основной $test_url может
+    # пройти, а реально нужный клиенту второстепенный домен под той же
+    # стратегией — нет (живой инцидент 2026-08-23, профиль 1).
+    if [ "$any_ok" -eq 1 ] && ! extra_check_ok "$profile"; then
+      any_ok=0
+    fi
+
     if [ "$any_ok" -eq 1 ]; then
       EXHAUSTIVE_RESULTS[$s]="$best_bytes"
       echo "  strategy=$s: OK, лучшая попытка = $best_bytes байт"
@@ -360,13 +468,60 @@ tune_profile_exhaustive() {
 # ведёт на конкретный /videoplayback?... с корректными itag/expire.
 DEFAULT_TEST_VIDEO_ID="${DEFAULT_TEST_VIDEO_ID:-dQw4w9WgXcQ}"
 
+# CDN "прилипает" к паре (video_id, наш IP) -- один и тот же ролик с одного
+# и того же сервера почти всегда возвращает ОДИН И ТОТ ЖЕ эдж (проверено
+# вживую, 6 проходов подряд — один и тот же rr3---sn-...). Живой случай на
+# Server A, 2026-08-18: rank_strategies.sh --profile 2 резолвил один и тот же
+# DEFAULT_TEST_VIDEO_ID, попал на эдж, который был забанен ещё с утра, и
+# все 52 стратегии закономерно провалились разом — не потому что все
+# стратегии сломаны, а потому что тест был заперт на одном мёртвом эдже.
+# Список общий для TLS-пути (профиль 2, через get_gv_test_url) и
+# QUIC-пути (профиль 5, rank_quic.sh) — раньше был продублирован только в
+# rank_quic.sh как QUIC_TEST_VIDEO_IDS.
+GV_TEST_VIDEO_IDS=(dQw4w9WgXcQ 9bZkp7q19f0 kJQP7kiw5Fk jNQXAC9IVRw 60ItHLz5WEA)
+
+# Детерминированный выбор по индексу (1-based) — для прогонов с несколькими
+# проходами, где важно менять видео МЕЖДУ проходами предсказуемо (см.
+# rank_quic.sh, теперь и rank_strategies.sh для профиля 2).
+gv_pick_video_id() {
+  local idx="${1:-1}"
+  echo "${GV_TEST_VIDEO_IDS[$(( (idx - 1) % ${#GV_TEST_VIDEO_IDS[@]} ))]}"
+}
+
+# Живой случай на Server A, 2026-08-18: у yt-dlp тут нет своего внешнего
+# таймаута -- при деградировавшей связности до YouTube (ровно то, что
+# профиль 2 время от времени и ловит) внутренние ретраи yt-dlp могут
+# растянуться на минуты. Раньше это просто задерживало один шаг общего
+# последовательного цикла демона; теперь, когда профиль 2 -- отдельный
+# процесс (autotune-profile@2), незамеченный хэнг здесь означает, что ЭТОТ
+# health-check не завершится вообще, пока не повезёт с сетью. YT_RESOLVE_TIMEOUT
+# ограничивает худший случай явно, вместо неопределённого ожидания.
+YT_RESOLVE_TIMEOUT="${YT_RESOLVE_TIMEOUT:-25}"
+
+# Живой инцидент 2026-08-23: yt-dlp без явного --extractor-args извлекал
+# через клиент ANDROID_VR (виден в самом URL как c=ANDROID_VR) — googlevideo
+# стабильно отдавал 403 именно для НЕГО с этого сервера (датацентровый IP,
+# не резидентский), причём даже полноценный даунлоад самим yt-dlp (с его
+# собственными, корректными заголовками под этот клиент) получал тот же
+# 403 — то есть дело не в недостающих заголовках отдельного curl (это
+# проверено и отдельно отклонено), а именно в клиенте. Проверены вживую:
+# web/mweb не годятся (на сервере нет JS-раннера для решения sig/n-
+# challenge — отдельная, не сетевая проблема), tv — "page needs to be
+# reloaded", android — работает чисто (реальный файл, полная скорость).
+# Из-за этого ВСЯ методика проверки профиля 2 (health-check,
+# rank_strategies.sh, shorts_probe.sh) до этого коммита давала ложный
+# 100%-провал независимо от активной стратегии — проблема была не в DPI,
+# а в том, каким клиентом yt-dlp резолвил URL.
+YT_PLAYER_CLIENT="${YT_PLAYER_CLIENT:-android}"
+
 resolve_googlevideo_url() {
   local video_id="${1:-$DEFAULT_TEST_VIDEO_ID}"
   if ! command -v yt-dlp >/dev/null 2>&1; then
-    echo "" 
+    echo ""
     return 1
   fi
-  yt-dlp -f 'best[height<=480]' --get-url \
+  timeout "$YT_RESOLVE_TIMEOUT" yt-dlp -f 'best[height<=480]' --get-url \
+    --extractor-args "youtube:player_client=${YT_PLAYER_CLIENT}" \
     "https://www.youtube.com/watch?v=${video_id}" 2>/dev/null | tail -n1
 }
 
@@ -374,13 +529,25 @@ resolve_googlevideo_url() {
 # yt-dlp доступен и резолвинг прошёл успешно; иначе — старый (слабый,
 # handshake-only по смыслу, но формально byte-threshold) фолбэк на домен,
 # с явным предупреждением в stderr.
+#
+# $1 (опционально) — конкретный video_id. Без аргумента (обычный
+# health-check в autotune_daemon.sh, один вызов за цикл) — выбирает
+# СЛУЧАЙНОЕ видео из GV_TEST_VIDEO_IDS каждый раз, а не всегда один и тот
+# же DEFAULT_TEST_VIDEO_ID, чтобы не залипать на одном эдже (см. комментарий
+# у GV_TEST_VIDEO_IDS выше). Вызывающие, которым нужна предсказуемая
+# ротация между несколькими проходами (rank_strategies.sh --profile 2),
+# передают явный video_id через gv_pick_video_id().
 get_gv_test_url() {
+  local video_id="${1:-}"
+  if [ -z "$video_id" ]; then
+    video_id="${GV_TEST_VIDEO_IDS[RANDOM % ${#GV_TEST_VIDEO_IDS[@]}]}"
+  fi
   local url
-  url="$(resolve_googlevideo_url)"
+  url="$(resolve_googlevideo_url "$video_id")"
   if [ -n "$url" ]; then
     echo "$url"
     return 0
   fi
-  echo "yt-dlp недоступен или резолвинг не удался — использую слабый фолбэк на домен-корень (тест профиля 2 будет ненадёжен, т.к. корень отдаёт 404 на 1.5КБ)." >&2
+  echo "yt-dlp недоступен или резолвинг не удался (видео $video_id) — использую слабый фолбэк на домен-корень (тест профиля 2 будет ненадёжен, т.к. корень отдаёт 404 на 1.5КБ)." >&2
   echo "https://$(get_yt_cluster_domain)"
 }

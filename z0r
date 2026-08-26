@@ -39,6 +39,11 @@
 #                                — установить+включить autotune-daemon.service
 #                                  (без меню, для git clone && запусти-и-готово)
 #   sudo ./z0r --install-z2r    — поставить сам z2r (ядро DPI-обхода), если его нет
+#   sudo ./z0r --install-z2r-offline
+#                                — то же самое, но из офлайн-архива автора
+#                                  (Google Drive+пароль zator) -- когда GitHub
+#                                  у провайдера недоступен целиком, install_z2r()
+#                                  сам предложит этот путь после двух зеркал
 #   sudo ./z0r --uninstall      — удалить autotune-daemon.service и/или z2r
 #                                  (с подтверждением на каждый найденный компонент)
 #
@@ -64,21 +69,90 @@ fi
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# readlink -f -- ${BASH_SOURCE[0]} не резолвится сам через симлинк (напр.
+# /usr/local/bin/z0r -> $INSTALL_DIR/z0r, см. ensure_z0r_command) -- без
+# этого SCRIPT_DIR при запуске через симлинк указывал бы на /usr/local/bin,
+# ломая и все bash "$SCRIPT_DIR/..." вызовы ниже, и сравнение с
+# INSTALLED_Z0R в самом низу файла (ложное "Первый запуск").
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
 INSTALL_DIR="/opt/z2r_autobench"
 INSTALLED_Z0R="$INSTALL_DIR/z0r"
+Z0R_BIN_LINK="/usr/local/bin/z0r"
 REPO_URL="https://github.com/scp-oss/z2r_autobench.git"
 LOG_DIR="/opt/z2r_autobench/logs"
-LOCKED_TSV="/opt/zapret2/extra_strats/cache/orchestra/locked.tsv"
-LOCKED_MANUAL_TSV="/opt/zapret2/extra_strats/cache/orchestra/locked.manual.tsv"
+# Та же автодетекция базы, что в z2r_autobench_lib.sh::_z2r_detect_base()
+# (z0r не сорсит эту lib — отдельный скрипт, копия логики держит оба места
+# в согласии). Живой баг 2026-08-23 на miha: тут было жёстко зашито
+# /opt/zapret2/..., а на этом сервере (штатная раскладка апстрим-
+# установщика, см. lib) z2r_lib/extra_strats реально лежат под /opt/zator
+# без symlink — locked.tsv по факту писался туда через set_strategy_cli.sh
+# (который сорсит lib и подхватывает правильный путь), а z0r читал вечно
+# пустой /opt/zapret2/... и показывал [#0]/auto для всех профилей, даже
+# для реально залоченных (set_strategy_cli.sh max тем временем показывал
+# верные номера — расхождение и выдало баг).
+if [ -d "/opt/zapret2/z2r_lib" ]; then
+  Z0R_ORCH_BASE="/opt/zapret2"
+elif [ -d "/opt/zator/z2r_lib" ]; then
+  Z0R_ORCH_BASE="/opt/zator"
+else
+  Z0R_ORCH_BASE="/opt/zapret2"
+fi
+LOCKED_TSV="$Z0R_ORCH_BASE/extra_strats/cache/orchestra/locked.tsv"
+LOCKED_MANUAL_TSV="$Z0R_ORCH_BASE/extra_strats/cache/orchestra/locked.manual.tsv"
 PROVIDER_CACHE="$INSTALL_DIR/.provider_cache"
+# Персистентное число проходов funnel-теста (rank_strategies.sh/rank_quic.sh
+# --passes) -- меняется через меню (пункт 11), не только разовым
+# `--passes N` из CLI. --passes из CLI по-прежнему перебивает и это (см.
+# разбор аргументов ниже), файл -- только дефолт для интерактивного меню.
+PASSES_CONF="$INSTALL_DIR/.passes_conf"
 # z2r_test-voice-bot — отдельный репозиторий (не часть z2r_autobench),
 # клонируем по требованию сюда. У него нет своего systemd-юнита — держим
 # свой (z2r-test-voice-bot.service, лежит рядом с autotune-daemon.service).
 VOICE_BOT_DIR="$INSTALL_DIR/z2r_test-voice-bot"
 VOICE_BOT_REPO_URL="https://github.com/scp-oss/z2r_test-voice-bot.git"
 VOICE_BOT_SERVICE="z2r-test-voice-bot"
-PASSES="${PASSES:-3}"
+# Zenith — автоподборщик-генератор стратегий (отдельный репозиторий).
+# Docker нужен только для локальной БД (ZENITH_DB_MODE=docker) — в режиме
+# api (без своей БД, всё через панель по HTTP) Docker вообще не используется.
+ZENITH_DIR="$INSTALL_DIR/Zenith"
+ZENITH_REPO_URL="https://github.com/scp-oss/zenith.git"
+# z0r-panel — веб-панель для Zenith (обзор по нодам/провайдерам, история
+# мутаций, sync-хаб), отдельный репозиторий (была вложенной Zenith/panel/,
+# выделена отдельно). Своя .env/venv/systemd-юнит, к MySQL Zenith ходит
+# как обычный клиент — при первой установке подхватываем MYSQL_*/
+# ZENITH_ENVIRONMENT_* из уже настроенного $ZENITH_DIR/.env, если он есть
+# (см. manage_panel), а не просим вводить те же значения второй раз.
+PANEL_DIR="$INSTALL_DIR/z0r-panel"
+PANEL_REPO_URL="https://github.com/scp-oss/z0r-panel.git"
+PANEL_SERVICE="zenith-panel"
+# Zenith-TG — прозрачный доступ к Telegram (отдельный репозиторий). Не
+# десинк-профиль zapret2 (проверено вживую — не помогает против
+# IP-блэклиста конкретных DC-адресов Telegram), а relay без MTProxy-
+# секрета: iptables REDIRECT молча заворачивает исходящий TCP:443 к
+# подсетям Telegram на локальный relay/transparent_relay.py, который сам
+# умеет достучаться до Telegram (вендоренная relay-машинерия
+# Flowseal/tg-ws-proxy). Клиенту (Telegram Desktop/mobile) ничего
+# настраивать не нужно — см. README репозитория.
+TGRELAY_DIR="$INSTALL_DIR/Zenith-TG"
+TGRELAY_REPO_URL="https://github.com/scp-oss/Zenith-TG.git"
+TGRELAY_SERVICE="tg-transparent-relay"
+# DNSCrypt-proxy -- локальный DoH-резолвер, не самописный компонент этого
+# репозитория, а обычный пакет дистрибутива. Появился из живого случая
+# 2026-08-22 (NETH-4): провайдер начал резать обычный DNS/DoT/DoH к
+# популярным резолверам (кроме Яндекса, который сам подчиняется реестру
+# и на заблокированных доменах отдаёт то же самое, что и блокировка) --
+# youtube.com резолвился в NXDOMAIN даже через 8.8.8.8, но нормально через
+# DoH к cloudflare-dns.com/dns.nextdns.io/dns.sb. Ограничиваем server_names
+# именно этими тремя подтверждёнными вживую, не полагаемся на дефолтный
+# список пакета.
+DNSCRYPT_TOML="/etc/dnscrypt-proxy/dnscrypt-proxy.toml"
+DNSCRYPT_SERVER_NAMES="server_names = ['cloudflare', 'cloudflare-ipv6', 'nextdns', 'sb']"
+DNSCRYPT_DHCPCD_MARKER="# z0r-dnscrypt: локальный DoH-резолвер (dnscrypt-proxy), добавлено z0r"
+# Автообновление всей экосистемы (z2r_autobench/Zenith/z0r-panel/
+# Zenith-TG) -- общий конфиг с z0r-panel (веб тоже читает/пишет ЭТОТ ЖЕ
+# файл, см. autoupdate.sh и README z0r-panel), не свой отдельный.
+AUTOUPDATE_CONF="/etc/z2r_autobench/autoupdate.conf"
+PASSES="${PASSES:-$( [ -f "$PASSES_CONF" ] && cat "$PASSES_CONF" 2>/dev/null || echo 3 )}"
 MODE=""
 SINGLE_PROFILE=""
 SELECTED_PROFILES=""
@@ -104,6 +178,7 @@ while [ $# -gt 0 ]; do
     --apply) APPLY_FLAG="--apply"; shift ;;
     --install-service) MODE="install"; shift ;;
     --install-z2r) MODE="install-z2r"; shift ;;
+    --install-z2r-offline) MODE="install-z2r-offline"; shift ;;
     --uninstall) MODE="uninstall"; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
@@ -134,9 +209,65 @@ declare -A PROFILE_PROTO=(
   [3]="tls"
   [4]="tls"
   [5]="udp"
+  [6]="udp"
   [8]="tls"
   [9]="http"
 )
+
+# Зависимости между профилями: 2 (GV_TLS) и 5 (YT_QUIC_UDP) резолвят тестовый
+# URL через yt-dlp -> youtube.com, а этот запрос идёт через ЖИВУЮ стратегию
+# профиля 1 (YT_TLS). Если у профиля 1 в моменте сломанная стратегия, тесты
+# 2 и 5 валятся со 100%-провалом не из-за собственных стратегий, а из-за
+# резолвинга. Поэтому при прогоне 2 и/или 5 профиль 1 всегда тестируется
+# первым, и его лучшая стратегия применяется СРАЗУ, без вопроса — иначе сам
+# смысл теста 2/5 теряется. 4 и 6 сознательно не рассматриваем (отдельная
+# история, не такая прямая зависимость).
+declare -A PROFILE_DEPENDS_ON=(
+  [2]="1"
+  [5]="1"
+)
+
+# Разворачивает список профилей ($1, через пробел), вставляя перед каждым
+# зависящим профилем его зависимость (один раз, в порядке появления).
+# "2" -> "1 2", "2 5" -> "1 2 5", "1 2 5" -> "1 2 5" (без дублей).
+expand_with_deps() {
+  local raw="$1" pid dep result=" "
+  for pid in $raw; do
+    dep="${PROFILE_DEPENDS_ON[$pid]:-}"
+    if [ -n "$dep" ]; then
+      case "$result" in
+        *" $dep "*) ;;
+        *) result="$result$dep " ;;
+      esac
+    fi
+    case "$result" in
+      *" $pid "*) ;;
+      *) result="$result$pid " ;;
+    esac
+  done
+  echo "$result"
+}
+
+# Из уже развёрнутого списка ($1) находит профили, которые в нём являются
+# чьей-то зависимостью — для них лучшую стратегию нужно применять сразу
+# и без вопроса (см. offer_apply_best/apply_best_auto ниже).
+compute_auto_ids() {
+  local ids="$1" pid dep auto=" "
+  for pid in $ids; do
+    dep="${PROFILE_DEPENDS_ON[$pid]:-}"
+    if [ -n "$dep" ]; then
+      case " $ids " in
+        *" $dep "*)
+          case "$auto" in
+            *" $dep "*) ;;
+            *) auto="$auto$dep " ;;
+          esac
+          ;;
+      esac
+    fi
+  done
+  echo "$auto"
+}
 
 read_last_ordered() {
   # $1 = profile id, печатает содержимое last_ordered_profile_<N>.txt или пусто
@@ -151,7 +282,7 @@ test_profile() {
   case "$pid" in
     1|2|3|4|8|9)
       echo "--- Тестирую $title (профиль $pid), $PASSES проход(ов) ---"
-      bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$PASSES"
+      bash "$SCRIPT_DIR/rank_strategies.sh" --profile "$pid" --passes "$PASSES" --funnel
       local ordered
       ordered="$(read_last_ordered "$pid")"
       echo ""
@@ -159,7 +290,7 @@ test_profile() {
       ;;
     5)
       echo "--- Тестирую $title (профиль 5, QUIC), $PASSES проход(ов) ---"
-      bash "$SCRIPT_DIR/rank_quic.sh" --passes "$PASSES"
+      bash "$SCRIPT_DIR/rank_quic.sh" --passes "$PASSES" --funnel
       local ordered
       ordered="$(read_last_ordered "5")"
       echo ""
@@ -208,6 +339,26 @@ detect_provider() {
   fi
 }
 
+# "PJSC Rostelecom" -> "rostelecom", "MTS PJSC" -> "mts" -- машинный слаг
+# для ZENITH_ENVIRONMENT_PROVIDER (см. manage_zenith) вместо ручного ввода.
+# Список организационно-правовых обозначений неполный (покрывает то, что
+# реально встречается у операторов связи, не претендует на полноту) --
+# неизвестное просто лоуеркейзится и схлопывается в [a-z0-9-], тоже
+# годный (пусть не идеально короткий) слаг.
+slugify_provider() {
+  local raw="$1" slug
+  slug="$(printf '%s' "$raw" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/\b(pjsc|jsc|ojsc|oao|zao|ooo|llc|ltd|inc|corp|пао|ооо|зао|оао)\b//g' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  # Кириллица (напр. "не определён" -- detect_provider() не смог достучаться
+  # ни до одной из двух IP->ISP служб) целиком режется в шаге выше (не
+  # [a-z0-9]) -- без этой подстраховки ZENITH_ENVIRONMENT_PROVIDER
+  # улетал бы пустой строкой, тихо ломая self-report на панели.
+  [ -z "$slug" ] && slug="unknown"
+  printf '%s' "$slug"
+}
+
 get_provider() {
   if [ -s "$PROVIDER_CACHE" ]; then
     cat "$PROVIDER_CACHE"
@@ -230,9 +381,164 @@ get_daemon_status() {
   systemctl is-active --quiet autotune-daemon 2>/dev/null && echo "ON" || echo "OFF"
 }
 
+# Автономный режим Zenith (генерация + автопродвижение БЕЗ человека) --
+# см. zenith_autonomy_menu(). Оба юнита живут В РЕПОЗИТОРИИ Zenith
+# ($ZENITH_DIR/zenith-autorun.service/zenith-promoter.service), z0r их
+# только копирует+включает, той же схемой, что zenith-panel.service из
+# z0r-panel (см. manage_panel).
+get_zenith_autorun_status() {
+  [ -f /etc/systemd/system/zenith-autorun.service ] || { echo "NONE"; return; }
+  systemctl is-active --quiet zenith-autorun 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+get_zenith_promoter_status() {
+  [ -f /etc/systemd/system/zenith-promoter.service ] || { echo "NONE"; return; }
+  systemctl is-active --quiet zenith-promoter 2>/dev/null && echo "ON" || echo "OFF"
+}
+
 get_voice_bot_status() {
   [ -d "$VOICE_BOT_DIR" ] || { echo "NONE"; return; }
   systemctl is-active --quiet "$VOICE_BOT_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+# Читает один ключ из $ZENITH_DIR/.env (последнее вхождение, если задан
+# дважды). Пусто, если файла/ключа нет — вызывающий код сам подставляет
+# дефолт через ${var:-...}.
+zenith_env_get() {
+  local key="$1"
+  [ -f "$ZENITH_DIR/.env" ] || return 0
+  grep -E "^${key}=" "$ZENITH_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+# docker | api — в api-режиме Zenith вообще не трогает Docker/MySQL, своей
+# БД тут нет вообще, всё через панель по HTTP (см. README Zenith "Два
+# режима БД").
+zenith_db_mode() {
+  local mode; mode="$(zenith_env_get ZENITH_DB_MODE)"
+  echo "${mode:-docker}"
+}
+
+# docker | native -- откуда берётся локальная MySQL/MariaDB, только имеет
+# смысл когда zenith_db_mode()=docker (своя БД есть; в api своей БД нет
+# вообще, бэкенд не проверяется). native = уже установлена в систему
+# отдельно (mariadb-server/mysql-server) и настроена вручную (см. README
+# Zenith "Нативная БД вместо Docker") -- z0r в этом случае НЕ трогает
+# Docker: не поднимает docker-compose, статус/старт-стоп смотрят на
+# systemd-юнит mariadb напрямую. См. ask_zenith_db_backend().
+zenith_db_backend() {
+  local backend; backend="$(zenith_env_get ZENITH_DB_BACKEND)"
+  echo "${backend:-docker}"
+}
+
+# HTTP-пинг панели для ZENITH_DB_MODE=api -- своей БД тут нет вообще, "SELECT
+# 1" недоступен, поэтому статус -- тот же authenticated-запрос, что
+# orchestrator/db_api.py делает на каждую реальную операцию.
+zenith_panel_ping() {
+  local url token name provider
+  url="$(zenith_env_get PANEL_URL)"
+  token="$(zenith_env_get PANEL_NODE_TOKEN)"
+  [ -n "$url" ] && [ -n "$token" ] || return 1
+  name="$(zenith_env_get ZENITH_ENVIRONMENT_NAME)"
+  provider="$(zenith_env_get ZENITH_ENVIRONMENT_PROVIDER)"
+  curl -fsS --max-time 5 \
+    -H "Authorization: Bearer $token" \
+    -H "X-Node-Name: $name" -H "X-Node-Provider: $provider" \
+    "${url%/}/api/v1/db/environment" >/dev/null 2>&1
+}
+
+get_zenith_status() {
+  [ -d "$ZENITH_DIR" ] || { echo "NONE"; return; }
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    zenith_panel_ping && echo "ON" || echo "OFF"
+  elif [ "$(zenith_db_backend)" = "native" ]; then
+    systemctl is-active --quiet mariadb 2>/dev/null && echo "ON" || echo "OFF"
+  else
+    ( cd "$ZENITH_DIR" && docker compose ps --status running -q 2>/dev/null | grep -q . ) && echo "ON" || echo "OFF"
+  fi
+}
+
+get_panel_status() {
+  [ -d "$PANEL_DIR" ] || { echo "NONE"; return; }
+  systemctl is-active --quiet "$PANEL_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+get_tg_relay_status() {
+  [ -d "$TGRELAY_DIR" ] || { echo "NONE"; return; }
+  systemctl is-active --quiet "$TGRELAY_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+get_dnscrypt_status() {
+  command -v dnscrypt-proxy >/dev/null 2>&1 || { echo "NONE"; return; }
+  systemctl is-active --quiet dnscrypt-proxy 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+autoupdate_conf_get() {
+  local project="$1"
+  [ -f "$AUTOUPDATE_CONF" ] || { echo "0"; return; }
+  local key; key="AUTOUPDATE_$(echo "$project" | tr '[:lower:]' '[:upper:]')"
+  grep -E "^${key}=" "$AUTOUPDATE_CONF" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+autoupdate_conf_set() {
+  local project="$1" value="$2"
+  mkdir -p "$(dirname "$AUTOUPDATE_CONF")"
+  touch "$AUTOUPDATE_CONF"
+  local key; key="AUTOUPDATE_$(echo "$project" | tr '[:lower:]' '[:upper:]')"
+  if grep -qE "^${key}=" "$AUTOUPDATE_CONF" 2>/dev/null; then
+    sed -i "s/^${key}=.*/${key}=${value}/" "$AUTOUPDATE_CONF"
+  else
+    echo "${key}=${value}" >> "$AUTOUPDATE_CONF"
+  fi
+}
+
+autoupdate_last_update() {
+  local project="$1" f
+  f="$INSTALL_DIR/logs/autoupdate/${project}.last_update"
+  [ -f "$f" ] && cat "$f" || echo "ещё не обновлялось"
+}
+
+get_autoupdate_timer_status() {
+  systemctl is-enabled --quiet z2r-autoupdate.timer 2>/dev/null && echo "ON" || echo "OFF"
+}
+
+install_autoupdate_timer() {
+  if [ ! -f "$INSTALL_DIR/z2r-autoupdate.service" ] || [ ! -f "$INSTALL_DIR/z2r-autoupdate.timer" ]; then
+    echo "$INSTALL_DIR/z2r-autoupdate.service или .timer не найдены -- обнови z2r_autobench (git pull)." >&2
+    return 1
+  fi
+  chmod +x "$INSTALL_DIR/autoupdate.sh"
+  cp -f "$INSTALL_DIR/z2r-autoupdate.service" /etc/systemd/system/z2r-autoupdate.service
+  cp -f "$INSTALL_DIR/z2r-autoupdate.timer" /etc/systemd/system/z2r-autoupdate.timer
+  systemctl daemon-reload
+  systemctl enable --now z2r-autoupdate.timer
+  echo "Таймер автообновления установлен и включён (проверка каждые ~20 минут)."
+}
+
+# Точка прямого SQL-запроса к БД Zenith через docker exec -- ТОЛЬКО для
+# ZENITH_DB_MODE=docker (своя локальная БД). В ZENITH_DB_MODE=api своей
+# БД нет вообще -- вызывающий код обязан сам проверить zenith_db_mode()
+# и не звать эту функцию (см. zenith_show_provider_strategies/
+# zenith_query_profile/zenith_toggle -- ветка "иначе, через панель").
+# stderr НЕ глушим (раньше глушили и это один раз уже маскировало
+# реальную ошибку SQL как "пусто, генератор не запускался" — путаница,
+# на разбор которой ушло время вживую) — единственное исключение:
+# get_zenith_status() сам подавляет вывод отдельно, ему нужен только
+# код возврата, а не текст ошибки на каждой отрисовке меню.
+zenith_mysql_query() {
+  local sql="$1" user pass db
+  user="$(zenith_env_get MYSQL_USER)"; user="${user:-zenith}"
+  pass="$(zenith_env_get MYSQL_PASSWORD)"
+  db="$(zenith_env_get MYSQL_DATABASE)"; db="${db:-z2r_genome}"
+  # Пароль через MYSQL_PWD, не -p"$pass" — иначе mysql на каждый вызов
+  # плюётся "[Warning] Using a password on the command line interface
+  # can be insecure" в stderr, а мы его больше не глушим (см. выше).
+  if [ "$(zenith_db_backend)" = "native" ]; then
+    local client_bin=mariadb
+    command -v mariadb >/dev/null 2>&1 || client_bin=mysql
+    MYSQL_PWD="$pass" "$client_bin" -u"$user" "$db" -e "$sql"
+  else
+    ( cd "$ZENITH_DIR" && docker compose exec -T -e MYSQL_PWD="$pass" mysql mysql -u"$user" "$db" -e "$sql" )
+  fi
 }
 
 # Текущая залоченная стратегия профиля (для "[#N]" в списке профилей).
@@ -243,6 +549,35 @@ get_locked_strategy() {
   [ -f "$file" ] || { echo "0"; return; }
   val="$(awk -v p="$pid" -F'\t' '$1==p {print $3; exit}' "$file" 2>/dev/null)"
   echo "${val:-0}"
+}
+
+# Для показа в списке профилей: если сам профиль явно залочен -- просто
+# "[#N]", как раньше. Если НЕТ (get_locked_strategy=0/auto) -- circular_locked
+# в этом случае реально падает на fallback-профиль (8=FB_TLS/9=FB_HTTP, см.
+# TITLES/PROFILE_PROTO выше -- то же деление, что показывает "(fallback
+# TLS: [N], HTTP: [N])" в шапке НАСТОЯЩЕГО меню z2r, пункт 11) -- если у
+# того fallback-профиля есть залоченный номер, показываем именно его,
+# "[#N] [auto]", а не голый бессмысленный "[#0]". Если и fallback не
+# залочен -- показать нечего, остаётся "[#0]" как было.
+display_strategy_tag() {
+  local pid="$1" cur fb_pid fb proto
+  cur="$(get_locked_strategy "$pid")"
+  if [ "$cur" != "0" ]; then
+    echo "[#$cur]"
+    return
+  fi
+  proto="$(echo "${PROFILE_PROTO[$pid]:-}" | awk '{print $1}')"
+  case "$proto" in
+    tls) fb_pid=8 ;;
+    http) fb_pid=9 ;;
+    *) echo "[#0]"; return ;;
+  esac
+  fb="$(get_locked_strategy "$fb_pid")"
+  if [ "$fb" != "0" ]; then
+    echo "[#$fb] [auto]"
+  else
+    echo "[#0]"
+  fi
 }
 
 # Цвета для тегов в квадратных скобках ([ON]/[OFF]/[NONE]/[dev]/[бета]).
@@ -275,12 +610,14 @@ show_menu() {
   echo "" >&2
   echo "111) Тестировать все профили" >&2
   echo "     (1 2 3 4 5 — полный тест; 6 — из кэша; 7 8 9 — заглушка)" >&2
-  echo "     [#N] = выбранная стратегия, [#0] = auto" >&2
+  echo "     [#N] = явно выбранная стратегия; [#N] [auto] = профиль не залочен," >&2
+  echo "     показан fallback-номер (FB_TLS/FB_HTTP, реально используемый z2r); [#0] = совсем ничего не залочено" >&2
   echo "     $(color_tag dev) = заглушка, пока в разработке" >&2
   echo "     (можно перечислить несколько через запятую/пробел, например: 1,3,4)" >&2
+  echo "     (проходов на попытку: $PASSES — изменить пунктом 11)" >&2
   echo "" >&2
   for pid in 1 2 3 4 5; do
-    printf "  %s) %-18s [#%s]\n" "$pid" "${TITLES[$pid]}" "$(get_locked_strategy "$pid")" >&2
+    printf "  %s) %-18s %s\n" "$pid" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")" >&2
   done
   printf "  6) %-18s %s (требуется Discord_bot)\n" "${TITLES[6]}" "$(color_tag бета)" >&2
   printf "  7) %-18s %s\n" "${TITLES[7]}" "$(color_tag dev)" >&2
@@ -290,27 +627,43 @@ show_menu() {
   echo "=== Подбор стратегии ===" >&2
   echo "" >&2
   echo " 10) Тест домена (найти рабочую стратегию для конкретного/ых домена/ов)" >&2
+  echo " 11) Число проходов funnel-теста (текущее: $PASSES)" >&2
+  echo " 12) Ручное переключение стратегии (выбрать профиль и номер вручную)" >&2
+  echo " 13) Тест YouTube Shorts (сравнить стратегии GV_TLS на паттерне быстрой подгрузки шортсов)" >&2
   echo "" >&2
   echo "=== z2r ===" >&2
   echo "" >&2
-  echo " 11) Запустить меню z2r" >&2
+  echo " 14) Запустить меню z2r" >&2
   echo "" >&2
   echo "=== Управление ===" >&2
   echo "" >&2
-  echo " 12) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
-  echo " 13) autotune-daemon $(color_tag "$(get_daemon_status)") (сервис автотестирования и подстройки)" >&2
-  echo " 14) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
-  echo " 15) web_panel $(color_tag dev) (управление через браузер)" >&2
+  echo " 15) Проверка DNSCrypt на дырявость (реально ли системные запросы идут через него, а не в обход)" >&2
+  echo " 16) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
+  if [ -d "$ZENITH_DIR" ]; then
+    echo " 17) zenith-promoter $(color_tag "$(get_zenith_promoter_status)") (автопродвижение в прод БЕЗ человека -- быстрый доступ, тот же тумблер, что 19 -> 4 -> 2)" >&2
+  fi
+  echo "" >&2
+  echo "=== Модули ===" >&2
+  echo "" >&2
+  echo " 18) DNSCrypt-proxy $(color_tag "$(get_dnscrypt_status)") (локальный DoH-резолвер — на случай блокировки DoT/DoH к обычным резолверам)" >&2
+  echo " 19) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
+  echo " 20) Zenith-TG $(color_tag "$(get_tg_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
+  echo " 21) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
+  echo " 22) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
+  echo " 23) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-TG)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
   echo "" >&2
-  echo " 16) Удалить z2r" >&2
-  echo " 17) Удалить autotune-daemon" >&2
-  echo " 18) Удалить Discord_bot" >&2
-  echo " 19) Удалить web_panel $(color_tag dev)" >&2
-  echo " 20) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
+  echo " 24) Удалить z2r" >&2
+  echo " 25) Удалить autotune-daemon" >&2
+  echo " 26) Удалить Discord_bot" >&2
+  echo " 27) Удалить web_panel" >&2
+  echo " 28) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
+  echo " 29) Удалить Zenith" >&2
+  echo " 30) Удалить Zenith-TG" >&2
+  echo " 31) Удалить DNSCrypt-proxy" >&2
   echo "" >&2
-  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot)" >&2
+  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + web_panel + Zenith + Zenith-TG + DNSCrypt-proxy)" >&2
   echo "" >&2
   echo "  0) Выход" >&2
   echo "" >&2
@@ -318,9 +671,12 @@ show_menu() {
   echo "$choice"
 }
 
-# После теста профиля предлагает применить лучшую (первую в ORDERED_SUCCESS)
-# стратегию — то же самое, что делает retune_profile() в autotune_daemon.sh,
+# После теста профиля применяет лучшую (первую в ORDERED_SUCCESS) стратегию
+# без вопроса — то же самое, что делает retune_profile() в autotune_daemon.sh,
 # но через set_strategy_cli.sh (не сорсим лишний раз всю lib внутри z0r).
+# Раньше тут был read -p "применить? [y/N]" -- убрано по прямому запросу
+# (2026-08-23): раз профиль уже прогнали через test_profile(), применение
+# найденной рабочей стратегии больше не требует отдельного подтверждения.
 offer_apply_best() {
   local pid="$1" ordered best proto
   case "$pid" in 6|7) return 0 ;; esac
@@ -328,31 +684,104 @@ offer_apply_best() {
   best="$(awk '{print $1; exit}' <<< "$ordered")"
   [ -n "$best" ] || return 0
 
-  # Не в интерактиве (например, z0r --profiles ... из cron/автоматизации,
-  # без TTY) — не виснем на read, просто сообщаем находку.
-  if [ ! -t 0 ]; then
-    echo "Профиль $pid (${TITLES[$pid]}): лучшая стратегия $best (не интерактив — не применяю автоматически, см. --apply-механизм демона для авто-режима)."
+  echo "Профиль $pid (${TITLES[$pid]}): применяю стратегию $best автоматически, без вопроса."
+  for proto in ${PROFILE_PROTO[$pid]:-tls}; do
+    bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
+  done
+}
+
+# Без вопроса применяет лучшую стратегию профиля — используется вместо
+# offer_apply_best для профилей, которые в этом прогоне являются
+# зависимостью для другого протестированного профиля (см. PROFILE_DEPENDS_ON):
+# зависящий тест всё равно провалится, если не подставить рабочую стратегию
+# зависимости прямо сейчас, поэтому спрашивать тут нечего.
+apply_best_auto() {
+  local pid="$1" ordered best proto
+  ordered="$(read_last_ordered "$pid")"
+  best="$(awk '{print $1; exit}' <<< "$ordered")"
+  if [ -z "$best" ]; then
+    echo "Профиль $pid (${TITLES[$pid]}): рабочей стратегии не нашлось — зависящие от него профили ниже могут показать ложный провал."
     return 0
   fi
+  echo "Профиль $pid (${TITLES[$pid]}): применяю стратегию $best автоматически, без вопроса — от неё зависит корректность теста следующих профилей."
+  for proto in ${PROFILE_PROTO[$pid]:-tls}; do
+    bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
+  done
+}
 
-  read -re -p "Профиль $pid (${TITLES[$pid]}): применить лучшую стратегию $best? [y/N]: " ans
+# Ручное переключение стратегии профиля на конкретный номер, без прогона
+# rank_strategies.sh/rank_quic.sh — для быстрой точечной проверки (например,
+# сверить номер из чужой статистики или руками попробовать конкретную
+# стратегию). Профиль 7 (GAMES_UDP) исключён — тестер не реализован, у
+# профиля нет согласованного числа стратегий, ставить туда что-то вручную
+# бессмысленно.
+manual_switch_strategy() {
+  echo ""
+  echo "=== Ручное переключение стратегии ==="
+  local pid
+  for pid in 1 2 3 4 5 6 8 9; do
+    printf "  %s) %-18s %s\n" "$pid" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")"
+  done
+  read -re -p "Профиль: " pid
+  case " 1 2 3 4 5 6 8 9 " in
+    *" $pid "*) ;;
+    *) echo "Нет такого профиля (или для него нет ручного переключения)."; return 1 ;;
+  esac
+
+  local cur strat proto ans
+  cur="$(get_locked_strategy "$pid")"
+  echo "Текущая стратегия профиля $pid (${TITLES[$pid]}): $cur"
+  read -re -p "Новый номер стратегии: " strat
+  if ! printf '%s' "$strat" | grep -Eq '^[0-9]+$'; then
+    echo "Стратегия должна быть числом."
+    return 1
+  fi
+
+  read -re -p "Применить strategy=$strat к профилю $pid (${TITLES[$pid]})? [y/N]: " ans
   case "$ans" in
     y|Y)
       for proto in ${PROFILE_PROTO[$pid]:-tls}; do
-        bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$best"
+        bash "$SCRIPT_DIR/set_strategy_cli.sh" set "$pid" "$proto" "$strat"
       done
+      echo "Применено: профиль $pid (${TITLES[$pid]}) -> strategy=$strat (было $cur)."
       ;;
-    *) echo "Пропускаю профиль $pid — стратегия не применена." ;;
+    *) echo "Отменено." ;;
   esac
 }
 
+# Фоновый запуск длинного прогона (111/список профилей) -- вместо попытки
+# фонить bash-функцию текущего процесса (run_all/run_selected пишут прямо
+# в терминал и не рассчитаны на детач сами по себе), перезапускает сам z0r
+# с --all/--profiles уже ОТДЕЛЬНЫМ детачнутым процессом + лог-файлом.
+# offer_apply_best() сама определяет неинтерактивный режим (нет TTY —
+# не виснет на read, просто печатает находку без применения, см. её
+# докстринг) — детачу здесь для этого ничего специально готовить не нужно.
+run_test_background() {
+  mkdir -p "$INSTALL_DIR/logs/testruns"
+  local log="$INSTALL_DIR/logs/testruns/$(date -u +%Y%m%dT%H%M%SZ).log"
+  nohup bash "$INSTALLED_Z0R" "$@" >"$log" 2>&1 </dev/null &
+  local pid=$!
+  disown
+  echo "Запущено в фоне (PID $pid). Лог: $log"
+  echo "Смотреть вживую: tail -f $log"
+  echo "Профили этого прогона не применяются автоматически (кроме тех, что"
+  echo "сами являются зависимостью для другого тестируемого профиля) — не"
+  echo "интерактив, смотри лог и примени вручную (пункт 12) то, что найдётся."
+}
+
 run_all() {
+  local all_ids="1 2 3 4 5 6 7 8 9" auto_ids
+  auto_ids="$(compute_auto_ids "$all_ids")"
+
   echo "=== Полный прогон всех тестируемых профилей ($PASSES проход(ов) на TLS/QUIC) ==="
   echo ""
-  for pid in 1 2 3 4 5 6 7 8 9; do
+  for pid in $all_ids; do
     test_profile "$pid"
     echo ""
-    offer_apply_best "$pid"
+    case " $auto_ids " in
+      *" $pid "*) apply_best_auto "$pid" ;;
+      *) offer_apply_best "$pid" ;;
+    esac
     echo ""
   done
   echo "=== ИТОГ ==="
@@ -374,10 +803,32 @@ run_domain_test() {
   bash "$SCRIPT_DIR/test_custom_domain.sh" --domain "$domain" --passes "$PASSES" $APPLY_FLAG
 }
 
+# shorts_probe.sh — только диагностика (см. докстринг самого скрипта),
+# ничего не устанавливает/не удаляет отдельно (в отличие от Zenith/
+# Zenith-TG/Discord_bot) — это простой скрипт внутри z2r_autobench,
+# приезжает вместе с ним через обычный git pull/автообновление, отдельного
+# жизненного цикла как у сервисов у него нет.
+run_shorts_test() {
+  local strategies="${1:-}" count="${2:-}"
+  echo "--- Тест YouTube Shorts (профиль 2/GV_TLS, паттерн быстрой подгрузки) ---"
+  local args=()
+  [ -n "$strategies" ] && args+=(--strategies "$strategies")
+  [ -n "$count" ] && args+=(--count "$count")
+  bash "$SCRIPT_DIR/shorts_probe.sh" "${args[@]}"
+}
+
 # Выборочный прогон набора профилей: "1,3,4" или "1 3 4"
 run_selected() {
-  local raw="$1" ids pid
+  local raw="$1" ids auto_ids pid
   ids="$(echo "$raw" | tr ',' ' ')"
+  # Если среди запрошенных есть зависящий профиль (2 и/или 5), а его
+  # зависимость (1) сама не запрошена — добавляем её первой в очередь,
+  # иначе тест зависящего профиля будет проверять не то, что применят.
+  ids="$(expand_with_deps "$ids")"
+  auto_ids="$(compute_auto_ids "$ids")"
+  if [ -n "$(echo "$auto_ids" | tr -d ' ')" ]; then
+    echo "Профил(и) [$auto_ids] — зависимость для другого запрошенного профиля, тестируется первым и применяется без вопроса."
+  fi
 
   echo "=== Выборочный прогон профилей: $ids ($PASSES проход(ов) на TLS/QUIC) ==="
   echo ""
@@ -388,7 +839,10 @@ run_selected() {
     fi
     test_profile "$pid"
     echo ""
-    offer_apply_best "$pid"
+    case " $auto_ids " in
+      *" $pid "*) apply_best_auto "$pid" ;;
+      *) offer_apply_best "$pid" ;;
+    esac
     echo ""
   done
 
@@ -473,6 +927,216 @@ ensure_curl() {
   command -v curl >/dev/null 2>&1
 }
 
+# python3 -m venv может молча "создаться" без рабочего pip внутри --
+# ensurepip не всегда идёт частью базового python3 (Debian/Ubuntu держат
+# его в ОТДЕЛЬНОМ пакете, версионном -- python3.13-venv, не только общем
+# python3-venv). Живой случай на Ростелекоме 2026-08-13: venv создался,
+# первый же venv/bin/pip install упал с "ensurepip is not available" --
+# узнаём это ДО того, как что-то реально понадобится ставить, а не
+# посреди установки Zenith.
+ensure_python_venv() {
+  local test_dir ok=0
+  test_dir="$(mktemp -d)"
+  if python3 -m venv "$test_dir/venv" >/dev/null 2>&1 && [ -x "$test_dir/venv/bin/pip" ]; then
+    ok=1
+  fi
+  rm -rf "$test_dir"
+  [ "$ok" = "1" ] && return 0
+
+  echo "python3 -m venv не даёт рабочий pip, ставлю пакет venv..." >&2
+  local pyver; pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
+  apt-get install -y python3-venv >/dev/null 2>&1
+  [ -n "$pyver" ] && apt-get install -y "python${pyver}-venv" >/dev/null 2>&1
+  opkg install python3-venv >/dev/null 2>&1
+
+  test_dir="$(mktemp -d)"
+  python3 -m venv "$test_dir/venv" >/dev/null 2>&1 && [ -x "$test_dir/venv/bin/pip" ]
+  ok=$?
+  rm -rf "$test_dir"
+  return $ok
+}
+
+# Живой случай на Ростелекоме 2026-08-13: локальный DNS для
+# raw.githubusercontent.com вернул ВМЕСТЕ с настоящими IP (185.199.10x.133,
+# Fastly) чужой 1.1.1.1 (адрес резолвера Cloudflare, не хостинга GitHub
+# Pages) -- явная подмена ответа, не просто "домен недоступен". Собственная
+# DoH-проверка авторского установщика z2r тоже не помогла ("Не удалось
+# получить IP через DoH") -- сам dns.google был недоступен с этой же сети,
+# так что ОДНОРАЗОВАЯ проверка внутри install_z2r() ничего не чинит сама
+# по себе, но стоит явно предложить постоянный DoT-резолвер (не только для
+# GitHub-доменов -- если ISP подменяет DNS для одного хоста, подозревать
+# стоит и остальные).
+# DoH-запрос к конкретному провайдеру. Google и Cloudflare оба отдают
+# JSON, но у Cloudflare без заголовка Accept: application/dns-json уходит
+# в DNS-wire-формат вместо JSON -- отсюда разные curl-вызовы, не общий.
+# Яндекс сюда намеренно не включён -- их JSON DoH-эндпоинт не проверен
+# вживую (в отличие от DoT ниже в offer_doh_setup, тот документирован
+# надёжно), гадать не хочется.
+_doh_query_google() {
+  curl -fsS --max-time 5 "https://dns.google/resolve?name=${1}&type=A" 2>/dev/null
+}
+_doh_query_cloudflare() {
+  curl -fsS --max-time 5 -H 'accept: application/dns-json' \
+    "https://cloudflare-dns.com/dns-query?name=${1}&type=A" 2>/dev/null
+}
+
+dns_looks_hijacked() {
+  local domain="$1" local_ips doh_ips extra provider raw
+  local_ips="$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u)"
+  [ -z "$local_ips" ] && return 1
+
+  doh_ips=""
+  for provider in _doh_query_google _doh_query_cloudflare; do
+    raw="$("$provider" "$domain")"
+    [ -z "$raw" ] && continue
+    doh_ips="$(printf '%s' "$raw" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for a in data.get('Answer', []):
+    if a.get('type') == 1:
+        print(a['data'])
+" 2>/dev/null | sort -u)"
+    [ -n "$doh_ips" ] && break
+  done
+  [ -z "$doh_ips" ] && return 1
+
+  # Хоть один локальный IP, которого DoH не подтверждает -- подозрение на подмену
+  extra="$(comm -23 <(printf '%s\n' "$local_ips") <(printf '%s\n' "$doh_ips"))"
+  [ -n "$extra" ]
+}
+
+# Ставит DNS-over-TLS через systemd-resolved (drop-in, не трогает основной
+# resolved.conf напрямую -- откатывается одним rm) -- самый низкий порог
+# входа на Debian/Ubuntu (systemd-resolved обычно уже есть, отдельный демон
+# ставить не нужно). На системах без systemd-resolved просто печатает,
+# что делать руками -- не тащим сюда dnscrypt-proxy/cloudflared ради
+# одной проверки.
+offer_doh_setup() {
+  echo "Похоже, локальный DNS у этого провайдера подменяет ответы (см. вывод выше)." >&2
+  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1; then
+    echo "systemd-resolved не найден -- настрой DoH/DoT-резолвер вручную (например," >&2
+    echo "dnscrypt-proxy) и перезапусти установку." >&2
+    return 1
+  fi
+  read -re -p "Включить DNS-over-TLS через systemd-resolved (Cloudflare/Quad9/Яндекс, шифрованно, ISP не подменит)? [Y/n]: " ans
+  case "$ans" in n|N) return 1 ;; esac
+
+  # Три независимых DoT-провайдера -- если один из них у конкретного ISP
+  # тоже режется (см. CLAUDE.md/README про то, что провайдеры периодически
+  # блокируют отдельные диапазоны), systemd-resolved сам переберёт
+  # остальные. Яндекс -- common.dot.dns.yandex.net (не "безопасный"/
+  # "семейный" вариант, тот дополнительно фильтрует некоторые домены,
+  # нам нужен обычный).
+  mkdir -p /etc/systemd/resolved.conf.d
+  cat > /etc/systemd/resolved.conf.d/z0r-doh.conf <<'EOF'
+[Resolve]
+DNS=1.1.1.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net 77.88.8.8#common.dot.dns.yandex.net
+DNSOverTLS=yes
+EOF
+  systemctl restart systemd-resolved
+  echo "Готово -- /etc/systemd/resolved.conf.d/z0r-doh.conf (откат: rm его и systemctl restart systemd-resolved)."
+  return 0
+}
+
+ensure_expect() {
+  command -v expect >/dev/null 2>&1 && return 0
+  echo "expect не найден, пробую поставить..." >&2
+  apt-get install -y expect >/dev/null 2>&1 || opkg install expect >/dev/null 2>&1
+  command -v expect >/dev/null 2>&1
+}
+
+# Авторский установщик z2r (не наш код) задаёт ~10 интерактивных вопросов
+# подряд -- почти у всех есть разумный дефолт по Enter, кроме выбора
+# firewall (дефолт автора -- nftables, тут по прямому запросу нужен
+# iptables) и выбора LAN/WAN интерфейса (списка без дефолта, номер плывёт
+# от машины к машине из-за docker-мостов/veth). Гоняем тот же `sh z2r`
+# через expect и сами отвечаем по тексту вопроса -- для интерфейса
+# парсим уже напечатанный список (лежит в $expect_out(buffer) на момент
+# совпадения с промптом) и ищем строку с именем интерфейса дефолтного
+# маршрута.
+#
+# Если формулировка вопроса у автора когда-нибудь поменяется -- конкретный
+# expect-шаблон просто не совпадёт и шаг провиснет на 30-секундном таймауте
+# (не отправит случайный неверный ответ), тогда откат -- обычная
+# интерактивная установка (install_z2r/install_z2r_offline).
+#
+# $1 -- путь к скачанному файлу z2r (не обязательно в текущей директории).
+run_z2r_installer_unattended() {
+  local z2r_path="$1" dir base
+  dir="$(dirname "$z2r_path")"; base="$(basename "$z2r_path")"
+
+  if ! ensure_expect; then
+    echo "expect не поставился -- обычная интерактивная установка." >&2
+    ( cd "$dir" && sh "$base" )
+    return $?
+  fi
+
+  local iface
+  iface="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+  [ -z "$iface" ] && iface="$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+
+  ( cd "$dir" && IFACE="$iface" Z2R_BASE="$base" expect -c '
+    encoding system utf-8
+    set timeout 30
+    set iface $env(IFACE)
+    spawn sh $env(Z2R_BASE)
+
+    expect {
+      "или Enter для пропуска" { send "\r"; exp_continue }
+      "web-ssh)? Enter - Да, 1 - нет" { send "\r"; exp_continue }
+      "your choice (default : nftables) :" { send "1\r"; exp_continue }
+      "ipv6 support" { send "\r"; exp_continue }
+      "your choice (default : hostlist) :" { send "\r"; exp_continue }
+      "enable nfqws2 ?" { send "\r"; exp_continue }
+      "edit the options" { send "\r"; exp_continue }
+      -re {your choice \(default : NONE\) : $} {
+        if {$iface ne "" && [regexp -line "^\\s*(\\d+) : $iface\\y" $expect_out(buffer) matched num]} {
+          send "$num\r"
+        } else {
+          send "\r"
+        }
+        exp_continue
+      }
+      -re {your choice \(default : ANY\) : $} {
+        if {$iface ne "" && [regexp -line "^\\s*(\\d+) : $iface\\y" $expect_out(buffer) matched num]} {
+          send "$num\r"
+        } else {
+          send "\r"
+        }
+        exp_continue
+      }
+      "auto download ip/host list" { send "\r"; exp_continue }
+      "~3мб места)? 1 - Да, Enter - нет" { send "\r"; exp_continue }
+      "press enter to continue" { send "\r"; exp_continue }
+      eof
+    }
+    catch wait result
+    exit [lindex $result 3]
+  ' )
+}
+
+# Docker ставится официальным скриптом (get.docker.com), не через
+# пакетный менеджер дистрибутива — разброс версий/названий пакетов между
+# Debian/Ubuntu/CentOS/openSUSE и т.д. слишком велик, чтобы угадывать
+# командой из apt/opkg/apk, как для остальных зависимостей. z0r уже
+# работает от root (проверено выше), поэтому sudo в команде не нужен.
+ensure_docker() {
+  command -v docker >/dev/null 2>&1 && return 0
+  echo "docker не найден." >&2
+  read -re -p "Поставить Docker (curl -fsSL https://get.docker.com | sh)? [y/N]: " ans
+  case "$ans" in y|Y) ;; *) return 1 ;; esac
+
+  if ! ensure_curl; then
+    echo "curl не найден и не удалось поставить — установи Docker вручную." >&2
+    return 1
+  fi
+  curl -fsSL https://get.docker.com | sh
+  command -v docker >/dev/null 2>&1
+}
+
 install_z2r() {
   if z2r_installed; then
     read -re -p "z2r уже установлен (/opt/zapret2 есть). Переустановить/обновить поверх? [y/N]: " ans
@@ -489,35 +1153,153 @@ install_z2r() {
   read -re -p "Продолжить установку z2r? [y/N]: " ans
   case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
 
+  if dns_looks_hijacked raw.githubusercontent.com; then
+    offer_doh_setup
+  fi
+
   echo "Пробую основное зеркало (GitHub)..."
-  if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" && sh z2r ); then
+  if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" ) && run_z2r_installer_unattended /tmp/z2r; then
     echo "z2r установлен (основное зеркало)."
     return 0
   fi
 
   echo "Основное зеркало недоступно, пробую резервное (git.px.rkn.quest)..."
-  if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && sh /opt/z2r; then
+  if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && run_z2r_installer_unattended /opt/z2r; then
     echo "z2r установлен (резервное зеркало)."
     return 0
   fi
 
-  echo "Не удалось установить z2r ни с одного зеркала." >&2
-  return 1
+  echo "Не удалось установить z2r ни с одного зеркала (GitHub у некоторых провайдеров" >&2
+  echo "режется/деградирует целиком, живой случай -- см. CLAUDE.md/README)." >&2
+  echo "У автора есть офлайн-архив на этот случай (Google Drive, ссылку он периодически" >&2
+  echo "обновляет и публикует сам -- не зашита сюда заранее, вставь текущую)." >&2
+  read -re -p "Есть ссылка/ID офлайн-архива под рукой? [y/N]: " ans
+  case "$ans" in
+    y|Y) install_z2r_offline ;;
+    *) return 1 ;;
+  esac
+}
+
+# Последняя ссылка, о которой мы знаем (подтверждена рабочей 2026-08-13,
+# см. CLAUDE.md) -- просто удобный дефолт по Enter, НЕ гарантия
+# актуальности: автор прямо предупреждает, что она периодически меняется
+# и не синхронна с git-версией. install_z2r_offline() сама предложит
+# ввести свежую, если эта не сработает -- держать её в актуальном
+# состоянии тут не пытаемся.
+Z2R_OFFLINE_ARCHIVE_LAST_KNOWN="10c5DZ1wMIjBIRGUzs-FcK2vP7l5g83xy"
+
+# Офлайн-путь для случаев, когда GitHub (raw.githubusercontent.com/
+# api.github.com) у провайдера деградирует целиком -- живой случай 2026-08-13,
+# оба зеркала install_z2r() недоступны, но сам гугл-драйв не блокируется.
+# Архив -- RAR5 под паролем "zator" (публично документированный автором
+# константа, не секрет), внутри zator-offline-<версия>.tar.gz, а внутри
+# него -- обычный набор файлов + z2r-скрипт для локального запуска.
+_z2r_offline_extract_id() {
+  local fileid; fileid="$(printf '%s' "$1" | sed -n 's#.*/d/\([A-Za-z0-9_-]\+\).*#\1#p')"
+  [ -z "$fileid" ] && fileid="$1"
+  printf '%s' "$fileid"
+}
+
+install_z2r_offline() {
+  read -re -p "Ссылка на Google Drive (вида .../file/d/<ID>/view) или голый ID [Enter -- последняя известная]: " src
+  local fileid
+  if [ -z "$src" ]; then
+    fileid="$Z2R_OFFLINE_ARCHIVE_LAST_KNOWN"
+    echo "Использую последнюю известную ссылку -- она может быть устаревшей (автор" >&2
+    echo "меняет её время от времени), если не скачается -- спрошу свежую." >&2
+  else
+    fileid="$(_z2r_offline_extract_id "$src")"
+  fi
+  if [ -z "$fileid" ]; then
+    echo "Пустой ID -- отмена." >&2
+    return 1
+  fi
+
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    echo "pip не найден, пробую поставить..." >&2
+    apt-get install -y python3-pip >/dev/null 2>&1 || opkg install python3-pip >/dev/null 2>&1
+  fi
+  if ! python3 -c "import gdown" >/dev/null 2>&1; then
+    echo "Ставлю gdown (единственный надёжный способ пройти предупреждение" >&2
+    echo "Google Drive о вирус-скане для больших файлов)..." >&2
+    python3 -m pip install --break-system-packages -q gdown 2>/dev/null \
+      || python3 -m pip install -q gdown
+  fi
+
+  local workdir; workdir="$(mktemp -d /tmp/z2r_offline.XXXXXX)"
+  echo "Качаю архив..."
+  if ! python3 -m gdown "https://drive.google.com/uc?id=${fileid}" -O "$workdir/archive"; then
+    echo "Не удалось скачать по этому ID/ссылке." >&2
+    read -re -p "Есть другая/свежая ссылка? (Enter -- отмена): " src2
+    if [ -z "$src2" ]; then
+      return 1
+    fi
+    fileid="$(_z2r_offline_extract_id "$src2")"
+    if ! python3 -m gdown "https://drive.google.com/uc?id=${fileid}" -O "$workdir/archive"; then
+      echo "И эта не сработала -- отмена." >&2
+      return 1
+    fi
+  fi
+
+  local kind; kind="$(file -b "$workdir/archive")"
+  echo "Тип файла: $kind"
+  case "$kind" in
+    *RAR*)
+      command -v unar >/dev/null 2>&1 || apt-get install -y unar >/dev/null 2>&1
+      if command -v unar >/dev/null 2>&1; then
+        unar -q -p zator -o "$workdir" "$workdir/archive"
+      elif command -v unrar >/dev/null 2>&1; then
+        ( cd "$workdir" && unrar x -p'zator' archive )
+      else
+        echo "Нет unar/unrar и не удалось поставить -- распакуй руками:" >&2
+        echo "  файл: $workdir/archive, пароль: zator" >&2
+        return 1
+      fi
+      ;;
+    *Zip*)
+      command -v unzip >/dev/null 2>&1 || apt-get install -y unzip >/dev/null 2>&1
+      unzip -q -P zator "$workdir/archive" -d "$workdir"
+      ;;
+    *)
+      echo "Не архив (RAR/ZIP) -- похоже на страницу-предупреждение Google Drive," >&2
+      echo "не HTML-эт содержимое. Файл: $workdir/archive" >&2
+      return 1
+      ;;
+  esac
+
+  local inner_tgz; inner_tgz="$(find "$workdir" -maxdepth 2 -iname 'zator-offline-*.tar.gz' | head -1)"
+  if [ -z "$inner_tgz" ]; then
+    echo "Не нашёл zator-offline-*.tar.gz внутри распакованного архива ($workdir)." >&2
+    return 1
+  fi
+  tar -xzf "$inner_tgz" -C "$workdir"
+  local inner_dir; inner_dir="$(dirname "$inner_tgz")"
+  local z2r_dir; z2r_dir="$(find "$workdir" -maxdepth 2 -iname 'zator-offline-*' -type d | head -1)"
+  if [ -z "$z2r_dir" ] || [ ! -f "$z2r_dir/z2r" ]; then
+    echo "Не нашёл распакованный zator-offline-*/z2r." >&2
+    return 1
+  fi
+
+  echo "Запускаю установщик из офлайн-архива ($z2r_dir)..."
+  run_z2r_installer_unattended "$z2r_dir/z2r"
+  local rc=$?
+  echo "Оставил распакованное в $workdir (можно удалить после проверки: rm -rf $workdir)."
+  return $rc
 }
 
 # Запускает собственное меню z2r (не наш z0r). По умолчанию тем же способом,
 # каким это обычно делают вручную — свежий curl+sh с GitHub (заодно
 # подтягивает обновления компонентов z2r перед показом меню, сам z2r.sh
 # на это рассчитан и безобиден для уже актуальных файлов — "Без изменений").
-# Если GitHub недоступен — тот же резервный источник, что и в install_z2r(),
-# но тоже качаем и запускаем из /tmp (не трогаем /opt).
+# Если GitHub недоступен — тот же резервный источник и та же команда,
+# что и в install_z2r() (curl -o /opt/z2r ... && sh /opt/z2r).
 launch_z2r() {
   if ensure_curl; then
     if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" && sh z2r ); then
       return 0
     fi
     echo "GitHub недоступен, пробую резервный источник (git.px.rkn.quest)..." >&2
-    if ( cd /tmp && curl -fo z2r "$Z2R_INSTALL_URL_FALLBACK" && sh z2r ); then
+    if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && sh /opt/z2r; then
       return 0
     fi
     echo "Не удалось получить z2r ни с одного источника." >&2
@@ -555,9 +1337,10 @@ manage_zapret() {
   esac
 }
 
-# Пункт 13: если демон не установлен — предлагает поставить+включить; если
-# установлен, но остановлен — предлагает включить; если работает —
-# предлагает остановить (без удаления юнита, см. uninstall_daemon для этого).
+# Вызывается из Zenith-подменю (пункт 19 -> 5, см. zenith_menu) -- если
+# демон не установлен — предлагает поставить+включить; если установлен,
+# но остановлен — предлагает включить; если работает — предлагает
+# остановить (без удаления юнита, см. uninstall_daemon для этого).
 manage_daemon() {
   local st; st="$(get_daemon_status)"
   echo "autotune-daemon: $st"
@@ -578,7 +1361,7 @@ manage_daemon() {
       case "$ans" in
         y|Y)
           systemctl disable --now autotune-daemon 2>/dev/null || true
-          echo "autotune-daemon остановлен и отключён (юнит остался — включить снова тем же пунктом 13)."
+          echo "autotune-daemon остановлен и отключён (юнит остался — включить снова: пункт 19 -> 5)."
           ;;
         *) echo "Ок, не трогаю." ;;
       esac
@@ -590,6 +1373,44 @@ manage_daemon() {
 # z2r_test-voice-bot — отдельный репозиторий, без своего systemd-юнита
 # (запускается как "venv/bin/python3 bot.py" через run.sh) — юнит для него
 # держим у себя (z2r-test-voice-bot.service).
+# Клонирует z2r_test-voice-bot + ставит venv, БЕЗ вопроса -- вызывается и
+# из manage_voice_bot() (после её "клонировать? y/n"), и напрямую из
+# первого запуска (см. first_run_install_modules). Токен Discord и т.п.
+# нельзя автозаполнить -- дальше всё равно нужен ручной шаг с .env, тут
+# только сам клон+зависимости.
+voice_bot_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$VOICE_BOT_REPO_URL" "$VOICE_BOT_DIR"; then
+    echo "Не удалось склонировать $VOICE_BOT_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 не найден, пробую поставить..." >&2
+    apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+  fi
+  if ! ( cd "$VOICE_BOT_DIR" && python3 -m venv venv \
+         && venv/bin/pip install -q -r requirements.txt \
+         && venv/bin/pip install -q "discord.py[voice]" ); then
+    echo "Не удалось поставить зависимости бота — доразберись руками в $VOICE_BOT_DIR." >&2
+    return 1
+  fi
+  [ -f "$VOICE_BOT_DIR/.env" ] || cp "$VOICE_BOT_DIR/.env.example" "$VOICE_BOT_DIR/.env"
+
+  echo ""
+  echo "Склонирован и готов к настройке. Перед включением (пункт 21 ещё раз):"
+  echo "  1. Заполни реальными значениями: $VOICE_BOT_DIR/.env"
+  echo "     (DISCORD_TOKEN, GUILD_ID, TEST_VOICE_CHANNEL_ID, OWNER_USER_ID)"
+  echo "     Список стратегий бот строит сам динамически (set_strategy_cli.sh"
+  echo "     max) — отдельного файла со списком заводить не нужно."
+  echo "  2. Нужен уже поставленный Zenith (пункт 19) — бот тестирует через"
+  echo "     его песочницу, юзера zenith-voice-bot без него не будет."
+}
+
 manage_voice_bot() {
   local st; st="$(get_voice_bot_status)"
   echo "Discord_bot: $st"
@@ -597,38 +1418,14 @@ manage_voice_bot() {
     NONE)
       read -re -p "Склонировать и подготовить z2r_test-voice-bot в $VOICE_BOT_DIR? [y/N]: " ans
       case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
-
-      if ! command -v git >/dev/null 2>&1; then
-        echo "git не найден, пробую поставить..." >&2
-        apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
-        apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
-      fi
-      if ! git clone "$VOICE_BOT_REPO_URL" "$VOICE_BOT_DIR"; then
-        echo "Не удалось склонировать $VOICE_BOT_REPO_URL — GitHub недоступен?" >&2
-        return 1
-      fi
-
-      if ! command -v python3 >/dev/null 2>&1; then
-        echo "python3 не найден, пробую поставить..." >&2
-        apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
-      fi
-      if ! ( cd "$VOICE_BOT_DIR" && python3 -m venv venv \
-             && venv/bin/pip install -q -r requirements.txt \
-             && venv/bin/pip install -q "discord.py[voice]" ); then
-        echo "Не удалось поставить зависимости бота — доразберись руками в $VOICE_BOT_DIR." >&2
-        return 1
-      fi
-      [ -f "$VOICE_BOT_DIR/.env" ] || cp "$VOICE_BOT_DIR/.env.example" "$VOICE_BOT_DIR/.env"
-
-      echo ""
-      echo "Склонирован и готов к настройке. Перед включением (пункт 14 ещё раз):"
-      echo "  1. Заполни реальными значениями: $VOICE_BOT_DIR/.env"
-      echo "     (DISCORD_TOKEN, GUILD_ID, TEST_VOICE_CHANNEL_ID, OWNER_USER_ID)"
-      echo "  2. Создай $VOICE_BOT_DIR/config/strategies.yaml — в самом репозитории"
-      echo "     сейчас нет даже config/strategies.example.yaml (хотя README его"
-      echo "     упоминает), так что писать придётся с нуля по формату из README."
+      voice_bot_install_files
       ;;
     OFF)
+      if ! id zenith-voice-bot >/dev/null 2>&1; then
+        echo "Юзера zenith-voice-bot нет — сначала поставь/настрой Zenith (пункт 19," >&2
+        echo "manage_zenith -> setup_sandbox.sh создаёт этого юзера)." >&2
+        return 1
+      fi
       if [ ! -f "/etc/systemd/system/${VOICE_BOT_SERVICE}.service" ]; then
         if [ ! -f "$SCRIPT_DIR/${VOICE_BOT_SERVICE}.service" ]; then
           echo "Не найден $SCRIPT_DIR/${VOICE_BOT_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
@@ -636,6 +1433,19 @@ manage_voice_bot() {
         fi
         cp -f "$SCRIPT_DIR/${VOICE_BOT_SERVICE}.service" "/etc/systemd/system/${VOICE_BOT_SERVICE}.service"
         systemctl daemon-reload
+      fi
+      # Узкий sudoers на рестарт песочницы + перезапись её конфига --
+      # юнит бота работает от zenith-voice-bot (см. .service), оба
+      # скрипта требуют root (конфиг обычно root-owned, пересоздаётся
+      # Zenith'овским main.py через sudo для TCP-профилей).
+      local sudoers_file="/etc/sudoers.d/zenith-voice-bot"
+      local sudoers_line1="zenith-voice-bot ALL=(root) NOPASSWD: $ZENITH_DIR/sandbox/start_sandbox.sh"
+      local sudoers_line2="zenith-voice-bot ALL=(root) NOPASSWD: $ZENITH_DIR/sandbox/write_conf.sh"
+      if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line1" "$sudoers_file" 2>/dev/null \
+         || ! grep -qxF "$sudoers_line2" "$sudoers_file" 2>/dev/null; then
+        { echo "$sudoers_line1"; echo "$sudoers_line2"; } > "$sudoers_file"
+        chmod 440 "$sudoers_file"
+        echo "Добавлен/обновлён $sudoers_file."
       fi
       read -re -p "Сервис установлен, но не запущен. Включить сейчас? [y/N]: " ans
       case "$ans" in
@@ -650,6 +1460,699 @@ manage_voice_bot() {
         *) echo "Ок, не трогаю." ;;
       esac
       ;;
+  esac
+}
+
+# Одна строка-конфиг вместо блока -- base64(JSON), как VLESS/Outline/
+# WireGuard-ключи: адрес+порт+токен зашиты внутрь одной непрозрачной
+# строки, копипастится единственным куском, меньше риска частичной
+# вставки/битых пробелов, чем даже у блока KEY=value ниже (по прямому
+# запросу, спасибо за наводку). Формат {"m":"panel", ...поля...}, см.
+# z0r-panel/main.py::make_connect_string -- единственная сторона, что
+# печатает строку (раньше был ещё режим "db" от
+# Zenith/db/create_remote_db_user.sh -- убран вместе со скриптом, сырой
+# MySQL наружу больше не выдаётся никому, оба режима синка и api ходят
+# через панель одним и тем же "panel"-форматом). "0" на stdout -- не
+# удалось распознать (не наш base64/JSON) -- вызывающий код откатывается
+# на apply_env_paste_block, затем на read -p по одному полю.
+decode_connect_string() {
+  local envfile="$1" str="$2"
+  local out
+  out="$(python3 - "$str" <<'PYEOF' 2>/dev/null
+import base64, json, sys
+
+s = sys.argv[1].strip()
+try:
+    data = base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+    obj = json.loads(data)
+except Exception:
+    sys.exit(1)
+
+FIELD_MAP = {
+    "panel": {
+        "url": "PANEL_URL", "token": "PANEL_NODE_TOKEN",
+        "name": "ZENITH_ENVIRONMENT_NAME", "provider": "ZENITH_ENVIRONMENT_PROVIDER",
+    },
+}
+fields = FIELD_MAP.get(obj.get("m"))
+if not fields:
+    sys.exit(1)
+for jkey, envkey in fields.items():
+    if obj.get(jkey) not in (None, ""):
+        print(f"{envkey}={obj[jkey]}")
+PYEOF
+)"
+  if [ -z "$out" ]; then
+    echo "0"
+    return
+  fi
+  local applied=0 line key val
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    key="${line%%=*}"; val="${line#*=}"
+    sed -i "s@^#\?[[:space:]]*${key}=.*@${key}=${val}@" "$envfile"
+    applied=$((applied + 1))
+    echo "  принято (из строки-конфига): $key" >&2
+  done <<< "$out"
+  echo "$applied"
+}
+
+# Читает вставленный целиком блок KEY=value (по строке на переменную,
+# пустая строка или Ctrl+D завершает) и применяет распознанные ключи в
+# указанный .env -- create_remote_db_user.sh и панель (/nodes -> "Создать
+# токен") печатают именно такой блок для копипаста одним куском, вместо
+# набора значений по одному полю (по мотивам того, как Remnawave выдаёт
+# готовый docker-compose.yml с уже подставленными значениями, а не просит
+# вписывать host/port/token в интерактивные вопросы по одному -- меньше
+# ручного транскрибирования, меньше опечаток вроде вставленных как есть
+# угловых скобок-плейсхолдеров). Печатает число применённых строк на
+# stdout (остальной вывод -- в stderr) -- 0 значит ничего не вставили,
+# вызывающий код должен откатиться на прежние индивидуальные read -p.
+apply_env_paste_block() {
+  local envfile="$1"; shift
+  local allowed=" $* "
+  local line key val applied=0
+  echo "Вставь блок вида KEY=value (по строке на переменную) -- из вывода" >&2
+  echo "create_remote_db_user.sh или кнопки \"Создать токен\" в панели." >&2
+  echo "Пустая строка или Ctrl+D — закончить, ничего не вставлять — ввести поля по одному:" >&2
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [ -z "$line" ] && break
+    key="${line%%=*}"
+    val="${line#*=}"
+    # trim -- create_remote_db_user.sh/панель печатают флеш-лефт, но
+    # мало ли откуда реально скопируют (отступы, случайные пробелы)
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+    case "$allowed" in
+      *" $key "*)
+        sed -i "s@^#\?[[:space:]]*${key}=.*@${key}=${val}@" "$envfile"
+        applied=$((applied + 1))
+        echo "  принято: $key" >&2
+        ;;
+      *) [ -n "$key" ] && echo "  пропущено (незнакомый ключ): $key" >&2 ;;
+    esac
+  done
+  echo "$applied"
+}
+
+# Спрашивает докер-контейнер или уже-нативную БД при ZENITH_DB_MODE=docker
+# -- пишет ZENITH_DB_BACKEND в .env, читается zenith_db_backend() выше.
+# native подразумевает, что схема+миграции (db/schema.sql, db/migrations/)
+# уже применены заранее вручную -- z0r их сам не накатывает.
+ask_zenith_db_backend() {
+  local envfile="$1" ans
+  echo ""
+  read -re -p "Локальная БД: поднять в Docker, или уже стоит нативно в системе (mariadb-server/mysql-server)? [D/n]: " ans
+  case "$ans" in
+    n|N)
+      if grep -q '^ZENITH_DB_BACKEND=' "$envfile" 2>/dev/null; then
+        sed -i 's/^ZENITH_DB_BACKEND=.*/ZENITH_DB_BACKEND=native/' "$envfile"
+      else
+        echo "ZENITH_DB_BACKEND=native" >> "$envfile"
+      fi
+      echo "Нативная БД: z0r не трогает Docker, статус/старт-стоп идут через systemctl (mariadb.service)."
+      echo "Проверь, что схема применена: cat $ZENITH_DIR/db/schema.sql | mariadb -u<user> -p <db>"
+      ;;
+    *)
+      if grep -q '^ZENITH_DB_BACKEND=' "$envfile" 2>/dev/null; then
+        sed -i 's/^ZENITH_DB_BACKEND=.*/ZENITH_DB_BACKEND=docker/' "$envfile"
+      else
+        echo "ZENITH_DB_BACKEND=docker" >> "$envfile"
+      fi
+      ;;
+  esac
+}
+
+# Пункт 22 — если Zenith ещё не склонирован, сначала предлагает это
+# сделать и спрашивает про БД (своя в Docker или уже существующая), а
+# дальше — независимо от того, только что склонировали или он уже стоял —
+# открывает его собственное подменю (zenith_menu).
+# Клонирует Zenith + готовит venv, БЕЗ единого интерактивного вопроса --
+# вызывается и из manage_zenith() (после её собственного "клонировать? y/n"),
+# и напрямую из первого запуска z0r (см. first_run_install_modules), где
+# согласие уже дано выбором модуля в чек-листе. Настройка (БД/синк с
+# панелью) -- отдельно, см. zenith_configure_wizard() ниже.
+zenith_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
+    echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+  cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
+
+  # Имя/провайдер ноды -- автоматически, не руками (по прямому запросу:
+  # готовимся к деплою на МТС, там должно пройти без ручной доводки).
+  # Имя -- hostname этой машины (уникальность внутри флота обеспечивает
+  # panel self_report_node -- при конфликте вернёт понятную 409, поправить
+  # руками останется только в этом редком случае). Провайдер -- тот же
+  # детектор ISP, что уже используется в шапке меню (get_provider),
+  # слагифицирован в машинный вид. Применяется ко ВСЕМ веткам ниже,
+  # включая полностью локальную (иначе там осталось бы "prod-domru" из
+  # .env.example нетронутым).
+  local auto_name auto_provider
+  auto_name="$(hostname)"
+  auto_provider="$(slugify_provider "$(get_provider)")"
+  sed -i "s/^ZENITH_ENVIRONMENT_NAME=.*/ZENITH_ENVIRONMENT_NAME=$auto_name/" "$ZENITH_DIR/.env"
+  sed -i "s/^ZENITH_ENVIRONMENT_PROVIDER=.*/ZENITH_ENVIRONMENT_PROVIDER=$auto_provider/" "$ZENITH_DIR/.env"
+  echo "Имя ноды: $auto_name, провайдер: $auto_provider (определено автоматически)."
+
+  echo ""
+  echo "Готовлю Python-окружение оркестратора..."
+  if ensure_python_venv; then
+    if ( cd "$ZENITH_DIR/orchestrator" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
+      echo "venv готов: $ZENITH_DIR/orchestrator/venv"
+      echo "После установки песочницы (см. README Zenith \"VOICE_UDP\"/\"Как тестируются"
+      echo "новые геномы\") можно сразу:"
+      echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 bootstrap.py --profile <PROFILE>"
+    else
+      echo "venv создался, но pip install упал -- проверь requirements.txt/сеть вручную." >&2
+    fi
+  else
+    echo "Не удалось поставить рабочий python3-venv -- подготовь venv руками:" >&2
+    echo "  cd $ZENITH_DIR/orchestrator && python3 -m venv venv && venv/bin/pip install -r requirements.txt" >&2
+  fi
+}
+
+# Мастер настройки (режим БД, синк с панелью) -- требует РЕАЛЬНОГО решения
+# человека (нет безопасного дефолта для "синкаться с какой панелью"),
+# поэтому не сворачивается в чек-лист первого запуска -- вызывается сразу
+# после zenith_install_files(), что из manage_zenith(), что из первого
+# запуска, чтобы настройка не потерялась где-то "на потом".
+zenith_configure_wizard() {
+    # Два вопроса вместо трёх пунктов меню -- см. README Zenith "Два
+    # режима БД". Раньше был выбор 1/2/3 сразу (локальная/hub-and-
+    # spoke/центральная-напрямую) -- центральная-напрямую (сырой MySQL
+    # наружу) убрана целиком, режим "без своей БД" (api) теперь ходит
+    # через панель по HTTP+токену, тем же способом, что и синк.
+    echo ""
+    read -re -p "Синхронизироваться с центральной панелью? [Y/n]: " syncans
+    case "$syncans" in
+      n|N) sync_with_panel=0 ;;
+      *) sync_with_panel=1 ;;
+    esac
+
+    if [ "$sync_with_panel" = "0" ]; then
+      sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=docker/' "$ZENITH_DIR/.env"
+      ask_zenith_db_backend "$ZENITH_DIR/.env"
+      echo "При желании поменяй пароли: $ZENITH_DIR/.env"
+      echo "Изолированная нода -- своя локальная БД, без панели."
+    else
+      echo ""
+      read -re -p "Строка-конфиг с /nodes панели (одна строка, если она есть; иначе Enter): " connstr
+      applied=0
+      [ -n "$connstr" ] && applied="$(decode_connect_string "$ZENITH_DIR/.env" "$connstr")"
+      [ "$applied" = "0" ] && applied="$(apply_env_paste_block "$ZENITH_DIR/.env" PANEL_URL PANEL_NODE_TOKEN)"
+      if [ "$applied" = "0" ]; then
+        read -re -p "  PANEL_URL (напр. https://panel.example.com:2087): " purl
+        read -rse -p "  Токен ноды (создать заранее в панели: /nodes -> \"Создать токен\"): " ptoken; echo ""
+        [ -n "$purl" ] && sed -i "s@^#\?[[:space:]]*PANEL_URL=.*@PANEL_URL=$purl@" "$ZENITH_DIR/.env"
+        [ -n "$ptoken" ] && sed -i "s@^#\?[[:space:]]*PANEL_NODE_TOKEN=.*@PANEL_NODE_TOKEN=$ptoken@" "$ZENITH_DIR/.env"
+      fi
+
+      echo ""
+      read -re -p "Держать локальную БД как буфер (переживает недоступность панели)? [Y/n]: " bufans
+      case "$bufans" in
+        n|N)
+          sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=api/' "$ZENITH_DIR/.env"
+          echo "Настроено: без своей БД, всё через панель по HTTP -- Docker/MySQL тут не нужны вообще."
+          ;;
+        *)
+          sed -i 's/^ZENITH_DB_MODE=.*/ZENITH_DB_MODE=docker/' "$ZENITH_DIR/.env"
+          ask_zenith_db_backend "$ZENITH_DIR/.env"
+          echo "При желании поменяй пароли: $ZENITH_DIR/.env"
+          echo "Настроено: локальная БД как буфер + синк с панелью."
+          ;;
+      esac
+      echo "Подключено."
+    fi
+}
+
+# Пункт 22 — если Zenith ещё не склонирован, сначала предлагает это
+# сделать и спрашивает про БД (своя в Docker или уже существующая), а
+# дальше — независимо от того, только что склонировали или он уже стоял —
+# открывает его собственное подменю (zenith_menu).
+manage_zenith() {
+  local st; st="$(get_zenith_status)"
+  echo "Zenith: $st"
+
+  if [ "$st" = "NONE" ]; then
+    read -re -p "Склонировать Zenith в $ZENITH_DIR? [y/N]: " ans
+    case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+    zenith_install_files || return 1
+    zenith_configure_wizard
+  fi
+
+  zenith_menu
+}
+
+# Собственное подменю Zenith. Сейчас в репозитории только каркас (БД, без
+# самой логики генератора — см. его README) — пункты 2/3 читают то, что
+# УЖЕ накопилось в genome_scores/experiments, и пока честно покажут пусто,
+# пока генератор не перенесён и не начал их наполнять.
+zenith_menu() {
+  while true; do
+    local st mode backend_suffix; st="$(get_zenith_status)"; mode="$(zenith_db_mode)"
+    backend_suffix=""
+    [ "$mode" = "docker" ] && [ "$(zenith_db_backend)" = "native" ] && backend_suffix="/native"
+    echo ""
+    echo "=== Zenith $(color_tag "$st") (БД: $mode$backend_suffix) ==="
+    echo "  1) Запуск/Стоп"
+    echo "  2) Стратегии для текущего провайдера"
+    echo "  3) Стратегии по профилям"
+    echo "  4) Автономный режим (генерация + автопродвижение БЕЗ человека)"
+    echo "  5) autotune-daemon $(color_tag "$(get_daemon_status)") -- НЕ часть Zenith, отдельный"
+    echo "     независимый механизм z2r_autobench (rank_strategies.sh-подбор внутри"
+    echo "     профиля, без БД/геномов) -- собран тут просто для удобства, одно место"
+    echo "     для всего авто-тюнинга. Пункты 4 и 5 пишут в один и тот же боевой"
+    echo "     конфиг и рестартуют zapret2 НЕЗАВИСИМО друг от друга -- держать оба"
+    echo "     включёнными разом не проверялось, см. CLAUDE.md."
+    echo "  0) Назад в главное меню"
+    echo ""
+    read -re -p "Zenith > " zchoice
+    case "$zchoice" in
+      1) zenith_toggle ;;
+      2) zenith_show_provider_strategies ;;
+      3) zenith_profiles_submenu ;;
+      4) zenith_autonomy_menu ;;
+      5) manage_daemon ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
+# Автообновление -- по одному флагу на проект в $AUTOUPDATE_CONF, общий
+# файл с z0r-panel (там своя веб-страница настроек читает/пишет то же
+# самое -- см. README z0r-panel), не своя отдельная копия состояния.
+# "Обновление" = git pull --ff-only от main (не от текущей рабочей
+# ветки -- продакшен подтягивает то, что реально смержено) +
+# специфичный для проекта рестарт, вся логика -- в autoupdate.sh.
+#
+# Меню сокращено до одного общего переключателя -- сам определяет, какие
+# модули реально установлены (по наличию каталога), и включает/выключает
+# их все разом. Zenith намеренно исключён из общего переключателя -- его
+# "обновление" это полная пересборка docker-контейнера, а не лёгкий git
+# pull + рестарт, как у остальных, поэтому оставлен отдельным пунктом.
+autoupdate_included_projects() {
+  local projects=(z2r_autobench)
+  [ -d "$PANEL_DIR" ] && projects+=(panel)
+  [ -d "$TGRELAY_DIR" ] && projects+=(tgrelay)
+  printf '%s\n' "${projects[@]}"
+}
+
+autoupdate_project_label() {
+  case "$1" in
+    z2r_autobench) echo "z2r_autobench (сам инструмент + autotune-daemon)" ;;
+    panel) echo "z0r-panel (pip install + systemctl restart zenith-panel)" ;;
+    tgrelay) echo "Zenith-TG (pip install + systemctl restart tg-transparent-relay)" ;;
+    zenith)
+      if [ "$(zenith_db_backend)" = "native" ]; then
+        echo "Zenith (git pull, БД нативная -- Docker не трогаю)"
+      else
+        echo "Zenith (docker compose up -d --build)"
+      fi
+      ;;
+  esac
+}
+
+autoupdate_master_status() {
+  local p
+  while IFS= read -r p; do
+    [ "$(autoupdate_conf_get "$p")" = "1" ] || { echo "0"; return; }
+  done < <(autoupdate_included_projects)
+  echo "1"
+}
+
+autoupdate_set_master() {
+  local value="$1" p
+  while IFS= read -r p; do
+    autoupdate_conf_set "$p" "$value"
+  done < <(autoupdate_included_projects)
+}
+
+autoupdate_offer_timer() {
+  [ "$(get_autoupdate_timer_status)" = "ON" ] && return 0
+  read -re -p "Таймер автообновления ещё не запущен -- установить и включить сейчас? [Y/n]: " ans
+  case "$ans" in n|N) ;; *) install_autoupdate_timer ;; esac
+}
+
+autoupdate_menu() {
+  while true; do
+    echo ""
+    echo "=== Автообновление (таймер: $(color_tag "$(get_autoupdate_timer_status)"), проверка ~раз в 20 мин) ==="
+    echo ""
+    local master; master="$(autoupdate_master_status)"
+    printf "  1) [%s] Автообновление установленных модулей\n" "$([ "$master" = "1" ] && echo "ВКЛ" || echo "выкл")"
+    local p
+    while IFS= read -r p; do
+      printf "     - %s -- последнее обновление: %s\n" "$(autoupdate_project_label "$p")" "$(autoupdate_last_update "$p")"
+    done < <(autoupdate_included_projects)
+    if [ -d "$ZENITH_DIR" ]; then
+      local zenith_enabled; zenith_enabled="$(autoupdate_conf_get zenith)"
+      printf "  2) [%s] %s\n" "$([ "$zenith_enabled" = "1" ] && echo "ВКЛ" || echo "выкл")" "$(autoupdate_project_label zenith)"
+      printf "     последнее обновление: %s\n" "$(autoupdate_last_update zenith)"
+    fi
+    echo ""
+    echo "  r) Прогнать обновление прямо сейчас (для всех включённых)"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "Автообновление > " achoice
+    case "$achoice" in
+      1)
+        local new; new=$([ "$master" = "1" ] && echo "0" || echo "1")
+        autoupdate_set_master "$new"
+        echo "Автообновление установленных модулей: $([ "$new" = "1" ] && echo "включено" || echo "выключено")."
+        [ "$new" = "1" ] && autoupdate_offer_timer
+        ;;
+      2)
+        if [ -d "$ZENITH_DIR" ]; then
+          local current new
+          current="$(autoupdate_conf_get zenith)"
+          new=$([ "$current" = "1" ] && echo "0" || echo "1")
+          autoupdate_conf_set zenith "$new"
+          echo "Zenith: $([ "$new" = "1" ] && echo "включено" || echo "выключено")."
+          [ "$new" = "1" ] && autoupdate_offer_timer
+        else
+          echo "Неизвестный выбор."
+        fi
+        ;;
+      r|R)
+        echo "Запускаю $INSTALL_DIR/autoupdate.sh вручную..."
+        bash "$INSTALL_DIR/autoupdate.sh"
+        echo "Готово, подробности: $INSTALL_DIR/logs/autoupdate/"
+        ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
+# Копирует .service из $ZENITH_DIR (репозиторий Zenith сам их содержит,
+# та же схема, что zenith-panel.service в z0r-panel) в systemd и
+# перечитывает юниты, только если файл новый/изменился -- идемпотентно,
+# как ensure_panel_runtime_grants.
+install_zenith_service() {
+  local unit_name="$1"
+  local unit_src="$ZENITH_DIR/${unit_name}.service"
+  local unit_dst="/etc/systemd/system/${unit_name}.service"
+  if [ ! -f "$unit_src" ]; then
+    echo "$unit_src не найден -- обнови Zenith (git pull в $ZENITH_DIR)." >&2
+    return 1
+  fi
+  if [ ! -f "$unit_dst" ] || ! cmp -s "$unit_src" "$unit_dst"; then
+    cp -f "$unit_src" "$unit_dst"
+    systemctl daemon-reload
+    echo "Установлен/обновлён $unit_dst."
+  fi
+  return 0
+}
+
+# zenith-autorun.service (периодическая генерация кандидатов) +
+# zenith-promoter.service (автопродвижение в /opt/zapret2/config БЕЗ
+# человека, см. Zenith/README.md "Автономный режим") -- оба
+# НЕЗАВИСИМЫ от z0r-panel, читай п.4 докстрин выше. Панель, если
+# установлена, просто дублирует start/stop/log поверх ЭТИХ ЖЕ юнитов.
+# Читает ZENITH_PROFILES из .env для отображения в меню -- пусто = все 4
+# (YT_TLS/RKN_TLS/DS_TLS/VOICE_UDP), см. zenith_autorun.sh/auto_promoter.py,
+# которые читают ЭТУ ЖЕ переменную напрямую.
+zenith_profiles_display() {
+  local val; val="$(zenith_env_get ZENITH_PROFILES)"
+  echo "${val:-все (YT_TLS,RKN_TLS,DS_TLS,VOICE_UDP)}"
+}
+
+# Вынесено из zenith_autonomy_menu(), чтобы дёргать тем же кодом и из
+# главного меню (пункт 17, для быстрого доступа без 19 -> 4 -> 2) -- сама
+# логика ТОЛЬКО тут, обе точки входа зовут эту функцию, а не дублируют.
+zenith_promoter_toggle() {
+  local pr_st; pr_st="$(get_zenith_promoter_status)"
+  install_zenith_service zenith-promoter || return 1
+  if [ "$pr_st" = "ON" ]; then
+    systemctl disable --now zenith-promoter
+    echo "zenith-promoter остановлен и отключён."
+  else
+    echo "!!! zenith-promoter пишет /opt/zapret2/config и рестартует zapret2"
+    echo "БЕЗ подтверждения человека на каждом срабатывании. Перед первым"
+    echo "включением на этом сервере рекомендуется проверить руками:"
+    echo "  cd $ZENITH_DIR/orchestrator && sudo venv/bin/python3 auto_promoter.py --profile <PROFILE>"
+    read -re -p "Включить zenith-promoter сейчас? [y/N]: " ans
+    case "$ans" in
+      y|Y)
+        systemctl enable --now zenith-promoter
+        sleep 1
+        systemctl status zenith-promoter --no-pager
+        ;;
+      *) echo "Отмена." ;;
+    esac
+  fi
+}
+
+zenith_autonomy_menu() {
+  while true; do
+    local ar_st pr_st
+    ar_st="$(get_zenith_autorun_status)"
+    pr_st="$(get_zenith_promoter_status)"
+    echo ""
+    echo "=== Автономный режим Zenith ==="
+    echo "  1) zenith-autorun (генерация кандидатов) $(color_tag "$ar_st")"
+    echo "  2) zenith-promoter (автопродвижение в прод) $(color_tag "$pr_st")"
+    echo "  3) Лог zenith-autorun (journalctl -f, Ctrl+C для выхода)"
+    echo "  4) Лог zenith-promoter (journalctl -f, Ctrl+C для выхода)"
+    echo "  5) Профили: $(zenith_profiles_display)"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "Автономный режим > " achoice
+    case "$achoice" in
+      1)
+        install_zenith_service zenith-autorun || continue
+        if [ "$ar_st" = "ON" ]; then
+          systemctl disable --now zenith-autorun
+          echo "zenith-autorun остановлен и отключён."
+        else
+          systemctl enable --now zenith-autorun
+          sleep 1
+          systemctl status zenith-autorun --no-pager
+        fi
+        ;;
+      2) zenith_promoter_toggle ;;
+      3) journalctl -u zenith-autorun -f ;;
+      4) journalctl -u zenith-promoter -f ;;
+      5)
+        [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 19)." >&2; continue; }
+        echo ""
+        echo "Текущий выбор: $(zenith_profiles_display)"
+        echo "Доступные профили: YT_TLS RKN_TLS DS_TLS VOICE_UDP"
+        read -re -p "Профили через запятую/пробел (Enter — все 4): " psel
+        if [ -z "$psel" ]; then
+          if grep -q '^ZENITH_PROFILES=' "$ZENITH_DIR/.env" 2>/dev/null; then
+            sed -i 's/^ZENITH_PROFILES=.*/ZENITH_PROFILES=/' "$ZENITH_DIR/.env"
+          else
+            echo "ZENITH_PROFILES=" >> "$ZENITH_DIR/.env"
+          fi
+          echo "Автономный режим будет работать со всеми 4 профилями."
+        else
+          local norm tok valid=1 out=""
+          norm="$(echo "$psel" | tr ',' ' ')"
+          for tok in $norm; do
+            case "$tok" in
+              YT_TLS|RKN_TLS|DS_TLS|VOICE_UDP) out="${out:+$out,}$tok" ;;
+              "") ;;
+              *) echo "Неизвестный профиль: $tok (доступны: YT_TLS RKN_TLS DS_TLS VOICE_UDP)" >&2; valid=0 ;;
+            esac
+          done
+          if [ "$valid" = "1" ] && [ -n "$out" ]; then
+            if grep -q '^ZENITH_PROFILES=' "$ZENITH_DIR/.env" 2>/dev/null; then
+              sed -i "s/^ZENITH_PROFILES=.*/ZENITH_PROFILES=$out/" "$ZENITH_DIR/.env"
+            else
+              echo "ZENITH_PROFILES=$out" >> "$ZENITH_DIR/.env"
+            fi
+            echo "Сохранено: $out"
+            echo "Применится при следующем запуске zenith-autorun/zenith-promoter -- если уже включены (см. [ON] выше), перезапусти их (пункты 1/2 дважды: выкл/вкл), иначе сработает только со следующего рестарта сервиса."
+          else
+            echo "Не сохранено — есть неизвестные профили."
+          fi
+        fi
+        ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
+zenith_toggle() {
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    echo "БД — панель, своей тут нет — Zenith ею не управляет, только проверяю связь:"
+    if zenith_panel_ping; then
+      echo "  связь есть."
+    else
+      echo "  связи нет — проверь PANEL_URL/PANEL_NODE_TOKEN в $ZENITH_DIR/.env."
+    fi
+    return 0
+  fi
+  if [ "$(zenith_db_backend)" = "native" ]; then
+    if [ "$(get_zenith_status)" = "ON" ]; then
+      systemctl stop mariadb
+      echo "mariadb остановлена."
+    else
+      systemctl start mariadb
+      echo "mariadb запущена."
+    fi
+    return 0
+  fi
+  if ! ensure_docker; then return 1; fi
+  if [ "$(get_zenith_status)" = "ON" ]; then
+    ( cd "$ZENITH_DIR" && docker compose down )
+  else
+    ( cd "$ZENITH_DIR" && docker compose up -d )
+  fi
+}
+
+zenith_show_provider_strategies() {
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    echo "БД — панель, своей тут нет: этот обзор недоступен из CLI в режиме api."
+    echo "Смотри на панели: $(zenith_env_get PANEL_URL)/"
+    return 0
+  fi
+  echo "Текущий провайдер: $(get_provider)"
+  echo ""
+  # Общий срез по всем профилям сразу — колонка profile отличает пулы
+  # (см. schema.sql: геном не шарится между профилями). Для одного
+  # конкретного профиля — пункт 3, zenith_query_profile().
+  # id обрезан до 12 символов для читаемости — полный есть в БД (это
+  # sha256, не что-то, что нужно вводить руками).
+  local out
+  out="$(zenith_mysql_query "
+    SELECT g.profile, SUBSTRING(g.id,1,12) AS id, g.family, g.fooling, g.ttl_mode,
+           gs.pulls, gs.successes,
+           ROUND(gs.total_reward / NULLIF(gs.pulls,0), 3) AS avg_score,
+           en.name AS environment
+    FROM genome_scores gs
+    JOIN genomes g ON g.id = gs.genome_id
+    JOIN environments en ON en.id = gs.environment_id
+    ORDER BY g.profile, avg_score DESC
+    LIMIT 40;")"
+  if [ -n "$out" ]; then
+    echo "$out"
+  else
+    echo "(пусто — генератор ещё не запускался или ничего не нашёл, см. README Zenith)"
+  fi
+}
+
+zenith_query_profile() {
+  local profile="$1"
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    echo "БД — панель, своей тут нет: этот обзор недоступен из CLI в режиме api."
+    echo "Смотри на панели: $(zenith_env_get PANEL_URL)/knowledge (или /genome/<id>)"
+    return 0
+  fi
+  echo "Профиль: $profile"
+  echo ""
+  # genomes.profile — отдельный пул генома на профиль (не шарится между
+  # профилями даже при совпадении rendered_args), поэтому фильтр прямой,
+  # без обхода через experiments/domain_pool.profile_hint.
+  # SUM()/ROUND(SUM.../SUM...), не голые gs.pulls/gs.successes — genome_scores
+  # ключуется (genome_id, environment_id), так что при нескольких окружениях
+  # (будущие ВМ ростелеком/МТС) на один genome_id могут быть НЕСКОЛЬКО строк;
+  # без агрегации это падало с ONLY_FULL_GROUP_BY (проверено вживую).
+  local out
+  out="$(zenith_mysql_query "
+    SELECT SUBSTRING(g.id,1,12) AS id, g.family, g.fooling, g.ttl_mode,
+           SUM(gs.pulls) AS pulls, SUM(gs.successes) AS successes,
+           ROUND(SUM(gs.total_reward) / NULLIF(SUM(gs.pulls),0), 3) AS avg_score
+    FROM genome_scores gs
+    JOIN genomes g ON g.id = gs.genome_id AND g.profile = '$profile'
+    GROUP BY g.id, g.family, g.fooling, g.ttl_mode
+    ORDER BY avg_score DESC
+    LIMIT 20;")"
+  if [ -n "$out" ]; then
+    echo "$out"
+  else
+    echo "(пусто — генератор ещё не запускался или ничего не нашёл, см. README Zenith)"
+  fi
+}
+
+zenith_profiles_submenu() {
+  while true; do
+    echo ""
+    echo "=== Стратегии по профилям ==="
+    echo "  1) YT_TLS"
+    echo "  2) GV_TLS"
+    echo "  3) RKN_TLS"
+    echo "  4) DS_TLS"
+    echo "  5) YT_QUIC_UDP $(color_tag бета) — этот провайдер не блокирует QUIC, проверить пока нельзя"
+    echo "  6) VOICE_UDP  — реальный Discord voice-тест (orchestrator/voice_tester.py), заменяет ручной Discord-бот (пункт 21)"
+    echo "  7) GAMES_UDP  $(color_tag dev) добавим позже"
+    echo "  8) FB_TLS     $(color_tag dev) добавим позже"
+    echo "  9) FB_HTTP    $(color_tag dev) добавим позже"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "Профиль > " pchoice
+    case "$pchoice" in
+      1) zenith_query_profile "YT_TLS" ;;
+      2) zenith_query_profile "GV_TLS" ;;
+      3) zenith_query_profile "RKN_TLS" ;;
+      4) zenith_query_profile "DS_TLS" ;;
+      5) echo "YT_QUIC_UDP — бета, доработаем позже (этот провайдер QUIC не блокирует, нечего проверять)." ;;
+      6) zenith_query_profile "VOICE_UDP" ;;
+      7|8|9) echo "Добавим позже." ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
+# Живой инцидент 2026-08-13: uninstall_z2r() сносил /opt/zapret2, пока
+# песочный nfqws2 Зенита (sandbox/start_sandbox.sh -- ОТДЕЛЬНЫЙ процесс от
+# основного zapret2.service, свой systemd тут не используется) всё ещё
+# работал и держал открытыми хостлисты из-под удалённого /opt/zapret2 --
+# результат: бесконечный залив терминала "file_mod_signature: No such
+# file or directory" на каждую попытку перечитать конфиг. teardown_sandbox.sh
+# сам останавливает nfqws2 первым делом (см. его докстринг) -- вызываем
+# ПЕРЕД любым rm -rf, что тут, что в uninstall_z2r(). pkill -- отдельная
+# страховка на случай, если sandbox уже не в том состоянии, которое
+# teardown_sandbox.sh ожидает (osiротевший процесс без queue_num и т.п.).
+stop_zenith_sandbox_if_running() {
+  if [ -x "$ZENITH_DIR/sandbox/teardown_sandbox.sh" ]; then
+    ( cd "$ZENITH_DIR/sandbox" && ./teardown_sandbox.sh ) || true
+  fi
+  pkill -9 -x nfqws2 2>/dev/null || true
+}
+
+uninstall_zenith() {
+  if [ ! -d "$ZENITH_DIR" ]; then
+    echo "Zenith ($ZENITH_DIR) не найден — нечего удалять."
+    return 0
+  fi
+  if [ "$(zenith_db_mode)" = "api" ]; then
+    read -re -p "Найден $ZENITH_DIR (БД — панель, тут нечего останавливать) — удалить папку? [y/N]: " ans
+  elif [ "$(zenith_db_backend)" = "native" ]; then
+    read -re -p "Найден $ZENITH_DIR — удалить папку? (БД нативная, mariadb НЕ трогаю) [y/N]: " ans
+  else
+    read -re -p "Найден $ZENITH_DIR — остановить контейнеры и удалить (вместе с БД в volume)? [y/N]: " ans
+  fi
+  case "$ans" in
+    y|Y)
+      stop_zenith_sandbox_if_running
+      # Автономный режим (см. zenith_autonomy_menu) — отдельные systemd-юниты,
+      # не завязаны на docker compose, останавливаем/удаляем явно, иначе
+      # zenith-promoter.service продолжит дёргать уже удалённый ZENITH_DIR.
+      for unit in zenith-autorun zenith-promoter; do
+        if [ -f "/etc/systemd/system/${unit}.service" ]; then
+          systemctl disable --now "$unit" 2>/dev/null || true
+          rm -f "/etc/systemd/system/${unit}.service"
+        fi
+      done
+      systemctl daemon-reload 2>/dev/null || true
+      if [ "$(zenith_db_mode)" != "api" ] && [ "$(zenith_db_backend)" != "native" ]; then
+        ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
+      fi
+      rm -rf "$ZENITH_DIR"
+      echo "Zenith удалён."
+      ;;
+    *) echo "Отмена, Zenith не тронут." ;;
   esac
 }
 
@@ -684,6 +2187,11 @@ uninstall_z2r() {
     systemctl disable --now zapret2 2>/dev/null || true
     rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service
     systemctl daemon-reload
+    # Песочный nfqws2 Zenith'а -- отдельный процесс от zapret2.service выше,
+    # держит открытыми файлы из /opt/zapret2 -- останавливаем ДО rm -rf,
+    # иначе он бесконечно заливает терминал ошибками чтения удалённых
+    # хостлистов (живой инцидент 2026-08-13, см. stop_zenith_sandbox_if_running).
+    [ -d "$ZENITH_DIR" ] && stop_zenith_sandbox_if_running
     rm -rf /opt/zapret2
     echo "z2r удалён."
   else
@@ -709,8 +2217,743 @@ uninstall_voice_bot() {
   esac
 }
 
-web_panel_stub() {
-  echo "web_panel: в разработке, пока нечего запускать/удалять." >&2
+# run_logs/ + sudoers для zenith-panel -- вынесено из ветки первого клона
+# (case NONE) manage_panel и вызывается ЕЩЁ И безусловно в начале
+# manage_panel при каждом заходе в пункт 22, а не только при первой
+# установке -- иначе апдейт z0r-скрипта, принёсший новое правило sudoers
+# (или починку старого), никогда не долетает до уже установленной панели:
+# ON/OFF-ветки только дёргают systemd, старый файл в /etc/sudoers.d/ так
+# и остаётся лежать нетронутым. Живой инцидент 2026-08-15: правило чинили
+# дважды (сначала write-доступ к run_logs, потом баг в самом sudoers-glob),
+# и оба раза пункт 22 -> "ON/OFF" ничего не обновлял, пока это не стало
+# отдельной идемпотентной функцией, вызываемой всегда.
+ensure_panel_runtime_grants() {
+  [ -d "$PANEL_DIR" ] || return 0
+  id zenith-panel >/dev/null 2>&1 || return 0
+
+  # см. z0r-panel/runner.py -- панель работает от zenith-panel, а сам
+  # $PANEL_DIR обычно принадлежит тому, кто клонировал репозиторий
+  # (root/deploy-юзер), не zenith-panel -- без chown os.makedirs() в
+  # runner.py падает PermissionError на первом же запуске.
+  mkdir -p "$PANEL_DIR/run_logs"
+  chown zenith-panel:zenith-panel "$PANEL_DIR/run_logs"
+
+  # Абсолютные пути резолвим тут же -- в sudoers нельзя полагаться на
+  # PATH, а хардкодить /usr/bin вслепую рискованно (не везде одинаково).
+  local systemctl_bin; systemctl_bin="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
+  local journalctl_bin; journalctl_bin="$(command -v journalctl 2>/dev/null || echo /usr/bin/journalctl)"
+  local flock_bin; flock_bin="$(command -v flock 2>/dev/null || echo /usr/bin/flock)"
+
+  # Sudoers — get/max были принципиально read-only с самого начала (см.
+  # README панели "Границы ответственности", то поколение текста). Живой
+  # запрос 2026-08-15 изменил это осознанно: /controls теперь умеет и
+  # set_strategy_cli.sh set, и restart zapret2 -- то же самое ручное
+  # переключение стратегии, что человек делает через z0r пункт 12, просто
+  # кнопкой (README/докстринги панели обновлены тем же коммитом).
+  local sudoers_set_cmd="/usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh set *"
+  # restart -- ОБЯЗАТЕЛЬНЫЙ шаг после set (set_strategy_cli.sh set сам по
+  # себе не горячее применение, см. promote.py "circular_locked держит
+  # max strategy= в памяти процесса без TTL" -- живой инцидент
+  # 2026-08-07). show -- read-only, чтобы панель могла показать
+  # ActiveEnterTimestamp и подтвердить, что restart реально произошёл
+  # только что, а не тихо не сработал.
+  # ДВА отдельных --property=, не один через запятую -- sudoers режет
+  # список команд ПО запятой даже внутри аргумента (живой инцидент
+  # 2026-08-15: "--property=ActiveEnterTimestamp,SubState" сломало разбор
+  # всего файла целиком -- "ожидался полный путь" на "SubState", и как
+  # следствие NOPASSWD не применялся вообще ни для одной команды в файле,
+  # не только для этой).
+  local sudoers_zapret_cmds="$systemctl_bin restart zapret2, $systemctl_bin show zapret2 --property=ActiveEnterTimestamp --property=SubState"
+
+  # Отдельная команда ниже — для кнопки "запустить подбор" на /controls
+  # (см. z0r-panel/runner.py): она стартует Zenith'овский
+  # orchestrator/main.py от root'а (сам main.py этого требует —
+  # песочница, см. Zenith README), но это другая песочница
+  # (zenith-sandbox), не боевой zapret2.config — тем не менее это
+  # ИСПОЛНЕНИЕ произвольного питон-кода того же main.py, не read-only,
+  # так что команда сужена до конкретного venv/main.py с фиксированными
+  # флагами, не общий root-шелл.
+  # ОДИН завершающий "*", не "* *" -- sudoers-glob матчится против всей
+  # командной строки, "* *" требует буквальный пробел + ещё один токен
+  # ПОСЛЕ номера раундов, так что без --domain (самый обычный случай --
+  # поле в форме необязательное) команда не матчится вообще, sudo -n
+  # тихо требует пароль. Один хвостовой "*" матчит и "--rounds 20"
+  # (пусто после), и "--rounds 20 --domain host/path" (* жадный).
+  # ПОЛНЫЙ путь к main.py, не просто "main.py" -- sudoers матчит команду
+  # буквально и понятия не имеет про cwd вызывающего; относительный путь
+  # раньше "работал" только потому, что единственный вызывающий
+  # (z0r-panel/runner.py) всегда СЛУЧАЙНО ставил правильный cwd перед
+  # запуском -- НОПАСВОРД-грант не должен зависеть от этого допущения
+  # (найдено при аудите перед деплоем на МТС 2026-08-17, runner.py
+  # исправлен тем же коммитом).
+  # "flock -n <lock-файл>" ПЕРЕД venv/main.py -- лок держит сам ДОЧЕРНИЙ
+  # процесс (не память процесса панели), так что "один прогон
+  # одновременно" переживает рестарт панели: второй клик после рестарта,
+  # пока старый прогон ещё жив, получает честный отказ от самого flock
+  # (найдено при том же аудите, см. z0r-panel/runner.py::RUN_LOCK_FILE).
+  local sudoers_run_cmd="$flock_bin -n $ZENITH_DIR/orchestrator/.run.lock $ZENITH_DIR/orchestrator/venv/bin/python3 $ZENITH_DIR/orchestrator/main.py --profile * --rounds *"
+
+  # Старт/стоп/статус/лог autotune-daemon.service с /controls (см.
+  # z0r-panel/daemon_ctl.py) -- ровно то же самое, что человек делает
+  # руками через пункт 19 -> 5 этого же z0r-скрипта (autotune-daemon --
+  # независимый от Zenith механизм, живёт в меню Zenith для удобства, см.
+  # CLAUDE.md), просто кнопкой вместо SSH. Команды фиксированы буквально
+  # (никаких "*") -- меньше
+  # привилегий, чем даже у запуска main.py выше, никакого произвольного
+  # выбора юнита или доп. флагов.
+  local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
+
+  # Периодический автозапуск (zenith-autorun.service) и автопродвижение
+  # (zenith-promoter.service) БЕЗ участия человека -- ЖИВУТ КАК
+  # НЕЗАВИСИМЫЕ systemd-юниты (см. Zenith/README.md "Автономный режим"),
+  # НЕ внутри процесса панели -- по прямому запросу "панель это модуль,
+  # её может и не быть, функционал должен быть в CLI и без панели".
+  # Панель, если установлена, только start/stop/status/log поверх ЭТИХ
+  # ЖЕ юнитов (см. z0r-panel/autorun_ctl.py, promoter_ctl.py) -- та же
+  # узкая схема, что уже у autotune-daemon выше, никакого прямого
+  # доступа к promote_apply_cli.sh/main.py из панели для этой части
+  # (тот доступ у панели остаётся ТОЛЬКО для ручных кнопок -- "запустить
+  # подбор" разово и "Ручное переключение стратегии", см. выше).
+  local sudoers_zenith_units_cmds="$systemctl_bin start zenith-autorun, $systemctl_bin stop zenith-autorun, $systemctl_bin is-active zenith-autorun, $journalctl_bin -u zenith-autorun -n 200 --no-pager, $systemctl_bin start zenith-promoter, $systemctl_bin stop zenith-promoter, $systemctl_bin is-active zenith-promoter, $journalctl_bin -u zenith-promoter -n 200 --no-pager"
+
+  # Автообновление -- панель ТОЛЬКО переключает флаги (autoupdate.sh
+  # --set, тот же файл читает/пишет z0r пункт 23) и триггерит разовый
+  # прогон/смотрит статус таймера -- саму УСТАНОВКУ таймера (копирование
+  # .service/.timer в /etc/systemd/system, daemon-reload) панель делать
+  # не должна, это шаг через z0r/SSH, как и первичная установка любого
+  # другого юнита в этом файле выше -- панель "пульт" для уже
+  # существующего, не устанавливает новое (см. daemon_ctl.py докстринг).
+  local sudoers_autoupdate_cmds="/usr/bin/bash $INSTALL_DIR/autoupdate.sh --set *, $systemctl_bin start z2r-autoupdate.service, $systemctl_bin is-enabled z2r-autoupdate.timer, $systemctl_bin is-active z2r-autoupdate.timer, $journalctl_bin -u z2r-autoupdate -n 200 --no-pager"
+
+  local sudoers_file="/etc/sudoers.d/zenith-panel"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds"
+  if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
+    echo "$sudoers_line" > "$sudoers_file"
+    chmod 440 "$sudoers_file"
+    echo "Добавлен/обновлён $sudoers_file."
+  fi
+}
+
+# Клонирует z0r-panel + ставит venv/пользователя, БЕЗ вопроса -- вызывается
+# и из manage_panel() (после её "клонировать? y/n"), и напрямую из первого
+# запуска (см. first_run_install_modules). Пароль/секрет всё равно нужно
+# заполнить руками -- тут только сам клон+зависимости.
+panel_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$PANEL_REPO_URL" "$PANEL_DIR"; then
+    echo "Не удалось склонировать $PANEL_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 не найден, пробую поставить..." >&2
+    apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+  fi
+  if ! ( cd "$PANEL_DIR" && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt ); then
+    echo "Не удалось поставить зависимости панели — доразберись руками в $PANEL_DIR." >&2
+    return 1
+  fi
+
+  if [ ! -f "$PANEL_DIR/.env" ]; then
+    cp "$PANEL_DIR/.env.example" "$PANEL_DIR/.env"
+    # Панель ходит в ТУ ЖЕ БД, что и Zenith на этом сервере — если он
+    # уже настроен, подхватываем его MYSQL_*/ZENITH_ENVIRONMENT_*
+    # вместо повторного ввода тех же значений руками (zenith_env_get
+    # читает именно $ZENITH_DIR/.env).
+    if [ -f "$ZENITH_DIR/.env" ]; then
+      local var val
+      for var in MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD \
+                 ZENITH_ENVIRONMENT_NAME ZENITH_ENVIRONMENT_PROVIDER; do
+        val="$(zenith_env_get "$var")"
+        [ -n "$val" ] && sed -i "s#^${var}=.*#${var}=${val}#" "$PANEL_DIR/.env"
+      done
+      echo "Подхватил MYSQL_*/ZENITH_ENVIRONMENT_* из $ZENITH_DIR/.env."
+    fi
+  fi
+
+  if ! id zenith-panel >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin zenith-panel
+  fi
+  ensure_panel_runtime_grants
+
+  echo ""
+  echo "Склонирован и готов к настройке. Перед включением (пункт 22 ещё раз):"
+  echo "  1. Проверь/заполни: $PANEL_DIR/.env — PANEL_ADMIN_PASSWORD_HASH"
+  echo "     ($PANEL_DIR/gen_password_hash.py) и PANEL_SESSION_SECRET"
+  echo "     (python3 -c 'import secrets; print(secrets.token_hex(32))')."
+  echo "  2. Для доступа снаружи через Cloudflare — см. README панели"
+  echo "     \"Публикация через Cloudflare\" (Origin CA сертификат в"
+  echo "     $PANEL_DIR/tls/, альт-порт)."
+}
+
+manage_panel() {
+  local st; st="$(get_panel_status)"
+  echo "web_panel: $st"
+  ensure_panel_runtime_grants
+  case "$st" in
+    NONE)
+      read -re -p "Склонировать и подготовить z0r-panel в $PANEL_DIR? [y/N]: " ans
+      case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+      panel_install_files
+      ;;
+    OFF)
+      if [ ! -f "/etc/systemd/system/${PANEL_SERVICE}.service" ]; then
+        if [ ! -f "$PANEL_DIR/${PANEL_SERVICE}.service" ]; then
+          echo "Не найден $PANEL_DIR/${PANEL_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
+          return 1
+        fi
+        cp -f "$PANEL_DIR/${PANEL_SERVICE}.service" "/etc/systemd/system/${PANEL_SERVICE}.service"
+        systemctl daemon-reload
+      fi
+      read -re -p "Сервис установлен, но не запущен. Включить сейчас? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl enable --now "$PANEL_SERVICE"; sleep 2; systemctl status "$PANEL_SERVICE" --no-pager ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+    ON)
+      read -re -p "Сервис работает. Остановить и отключить? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl disable --now "$PANEL_SERVICE" 2>/dev/null || true; echo "Остановлен." ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+  esac
+}
+
+uninstall_panel() {
+  if [ ! -d "$PANEL_DIR" ]; then
+    echo "web_panel ($PANEL_DIR) не найден — нечего удалять."
+    return 0
+  fi
+  read -re -p "Найден $PANEL_DIR — остановить сервис и удалить? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl disable --now "$PANEL_SERVICE" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${PANEL_SERVICE}.service"
+      rm -f /etc/sudoers.d/zenith-panel
+      systemctl daemon-reload
+      rm -rf "$PANEL_DIR"
+      echo "web_panel удалён. Юзер zenith-panel не тронут (могут быть его файлы вне $PANEL_DIR) — удали вручную при необходимости: userdel zenith-panel"
+      ;;
+    *) echo "Отмена, web_panel не тронут." ;;
+  esac
+}
+
+# Юнит в репозитории Zenith-TG (relay/tg-transparent-relay.service)
+# захардкожен на /opt/Zenith-TG (так был вручную развёрнут и проверен
+# на первом сервере) — z0r клонирует в $TGRELAY_DIR (=$INSTALL_DIR/
+# Zenith-TG, по общей конвенции этого файла), путь может не совпадать,
+# поэтому подставляем реальный $TGRELAY_DIR при копировании юнита, а не
+# копируем как есть (см. manage_panel — там копия 1:1, т.к. её юнит уже
+# ссылается на $PANEL_DIR по той же конвенции).
+# Клонирует Zenith-TG + ставит venv/пользователя, БЕЗ вопроса -- вызывается
+# и из manage_tg_relay() (после её "клонировать? y/n"), и напрямую из
+# первого запуска (см. first_run_install_modules). Включение (сервис +
+# iptables REDIRECT) сюда намеренно НЕ входит -- сетевое изменение,
+# отдельный осознанный шаг через пункт 20 ещё раз.
+tgrelay_install_files() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git не найден, пробую поставить..." >&2
+    apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
+    apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
+  fi
+  if ! git clone "$TGRELAY_REPO_URL" "$TGRELAY_DIR"; then
+    echo "Не удалось склонировать $TGRELAY_REPO_URL — GitHub недоступен?" >&2
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 не найден, пробую поставить..." >&2
+    apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
+  fi
+  if ! ( cd "$TGRELAY_DIR" && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt ); then
+    echo "Не удалось поставить зависимости relay — доразберись руками в $TGRELAY_DIR." >&2
+    return 1
+  fi
+
+  if ! bash "$TGRELAY_DIR/cidr/fetch_telegram_cidr.sh"; then
+    echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
+    return 1
+  fi
+
+  ensure_tgrelay_user
+
+  echo ""
+  echo "Склонирован и готов. При включении (сейчас спросит) поднимется сервис"
+  echo "И встанет прозрачный iptables REDIRECT на подсети Telegram (см. README"
+  echo "репозитория, 'Что требует внимания при эксплуатации')."
+}
+
+# .service требует User=tgrelay/Group=tgrelay -- если юзера нет, systemd
+# падает с "status=217/USER, Failed to determine user credentials: No such
+# process" и уходит в бесконечный auto-restart-цикл (Restart=on-failure),
+# без единого намёка на причину в статусе (только в полном journalctl).
+# Живой случай на MTS 2026-08-24: юзер по какой-то причине не создался/не
+# сохранился при установке -- ~8000+ рестартов, сервис вечно "OFF" в
+# get_tg_relay_status(). Проверяем и чиним БЕЗУСЛОВНО при каждом заходе
+# в manage_tg_relay() (тот же принцип, что ensure_panel_runtime_grants и
+# dnscrypt_wire_resolver -- см. их комментарии), не только при первой
+# установке -- следующий Restart=on-failure подхватит починку сам, без
+# ручного systemctl restart.
+ensure_tgrelay_user() {
+  if ! id tgrelay >/dev/null 2>&1; then
+    if ! useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay; then
+      echo "Не удалось создать системного пользователя tgrelay -- сервис не сможет запуститься (status=217/USER). Разберись руками: useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay" >&2
+      return 1
+    fi
+    echo "Создан системный пользователь tgrelay (отсутствовал -- сервис из-за этого падал в рестарт-цикл)."
+  fi
+  chown -R tgrelay:tgrelay "$TGRELAY_DIR"
+}
+
+# Копирует юнит (если ещё не скопирован) и спрашивает "включить сейчас
+# (сервис + REDIRECT)?" -- вынесено из OFF-ветки manage_tg_relay(), чтобы
+# звать тем же кодом сразу после установки (NONE-ветка), в ОДНОМ заходе
+# в меню, а не заставлять заходить в пункт 20 второй раз подряд ("дважды
+# пикать пункт", живой запрос 2026-08-24). REDIRECT -- сетевое изменение,
+# поэтому вопрос [y/N] остаётся явным, просто больше не требует отдельного
+# захода в меню.
+tgrelay_enable() {
+  if [ ! -f "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" ]; then
+    echo "Не найден $TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
+    return 1
+  fi
+  # Один общий sed вместо двух точечных (были только на /opt/Zenith-TG/relay
+  # и /opt/Zenith-TG/.venv) -- пропускал ReadWritePaths=/opt/Zenith-TG (без
+  # хвоста /relay или /.venv), с ProtectSystem=strict это указывало на
+  # несуществующий путь и systemd падал с status=226/NAMESPACE (не
+  # мог настроить mount namespace) -- живой случай на MTS 2026-08-24,
+  # сервис даже не доходил до старта python. Регенерируем БЕЗУСЛОВНО при
+  # каждом заходе (сравниваем через cmp, не просто "файла ещё нет") --
+  # тот же принцип, что ensure_tgrelay_user/dnscrypt_wire_resolver: чтобы
+  # починка сама долетела до уже установленного (сломанного) юнита, а не
+  # только до новых установок.
+  local tmp_unit; tmp_unit="$(mktemp)"
+  sed "s#/opt/Zenith-TG#${TGRELAY_DIR}#g" "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" > "$tmp_unit"
+  if [ ! -f "/etc/systemd/system/${TGRELAY_SERVICE}.service" ] || ! cmp -s "$tmp_unit" "/etc/systemd/system/${TGRELAY_SERVICE}.service"; then
+    mv -f "$tmp_unit" "/etc/systemd/system/${TGRELAY_SERVICE}.service"
+    systemctl daemon-reload
+    echo "Юнит установлен/обновлён: /etc/systemd/system/${TGRELAY_SERVICE}.service"
+  else
+    rm -f "$tmp_unit"
+  fi
+  read -re -p "Включить сейчас (сервис + REDIRECT)? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl enable --now "$TGRELAY_SERVICE"
+      sleep 2
+      systemctl status "$TGRELAY_SERVICE" --no-pager
+      if bash "$TGRELAY_DIR/relay/setup_redirect.sh" apply; then
+        echo "REDIRECT применён — трафик к подсетям Telegram (443) теперь идёт через relay."
+      else
+        echo "Не удалось применить REDIRECT — сервис работает, но трафик пока не перенаправлен (доразберись руками: $TGRELAY_DIR/relay/setup_redirect.sh apply)." >&2
+      fi
+      ;;
+    *) echo "Ок, не трогаю." ;;
+  esac
+}
+
+manage_tg_relay() {
+  local st; st="$(get_tg_relay_status)"
+  echo "Zenith-TG (Telegram relay): $st"
+  if [ "$st" != "NONE" ]; then
+    ensure_tgrelay_user
+  fi
+  case "$st" in
+    NONE)
+      read -re -p "Склонировать и подготовить Zenith-TG в $TGRELAY_DIR? [y/N]: " ans
+      case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+      tgrelay_install_files || return 1
+      tgrelay_enable
+      ;;
+    OFF) tgrelay_enable ;;
+    ON)
+      read -re -p "Сервис работает. Остановить, отключить и снять REDIRECT? [y/N]: " ans
+      case "$ans" in
+        y|Y)
+          bash "$TGRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
+          systemctl disable --now "$TGRELAY_SERVICE" 2>/dev/null || true
+          echo "Остановлен, REDIRECT снят."
+          ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+  esac
+}
+
+uninstall_tg_relay() {
+  if [ ! -d "$TGRELAY_DIR" ]; then
+    echo "Zenith-TG ($TGRELAY_DIR) не найден — нечего удалять."
+    return 0
+  fi
+  read -re -p "Найден $TGRELAY_DIR — снять REDIRECT, остановить сервис и удалить? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      bash "$TGRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
+      systemctl disable --now "$TGRELAY_SERVICE" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${TGRELAY_SERVICE}.service"
+      systemctl daemon-reload
+      rm -rf "$TGRELAY_DIR"
+      echo "Zenith-TG удалён. Юзер tgrelay не тронут — удали вручную при необходимости: userdel tgrelay"
+      ;;
+    *) echo "Отмена, Zenith-TG не тронут." ;;
+  esac
+}
+
+# Реальный слушающий адрес пакета Debian -- 127.0.2.1 (не 127.0.0.1, чтобы
+# не конфликтовать с типичным использованием последнего другими
+# резолверами), но не хардкодим -- вдруг другой дистрибутив/версия даст
+# другой дефолт. Фолбэк на 127.0.2.1, если распарсить не удалось.
+dnscrypt_listen_addr() {
+  local line addr
+  line="$(grep -E '^\s*listen_addresses' "$DNSCRYPT_TOML" 2>/dev/null | head -1)"
+  addr="$(echo "$line" | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | head -1)"
+  echo "${addr:-127.0.2.1}"
+}
+
+# Проверка "дырявости" -- реально ли ОБЫЧНЫЕ приложения резолвят через
+# локальный dnscrypt-proxy, а не в обход него (resolv.conf/systemd-
+# resolved всё ещё смотрят на исходный резолвер, IPv6-путь не перекрыт).
+# Если утечка есть, dnscrypt-proxy сам по себе жив и отвечает нормально
+# (см. пункт статуса выше), но реальной защиты не даёт -- именно тот
+# сценарий, ради которого его вообще ставили (см. NONE-ветку
+# manage_dnscrypt: живой случай 2026-08-22, ISP резал DNS напрямую).
+# Не чинит ничего сама -- только показывает, где смотреть; починка --
+# dnscrypt_wire_resolver()/пункт 18 ещё раз, или руками для не-dhcpcd схем.
+dnscrypt_leak_check() {
+  local addr; addr="$(dnscrypt_listen_addr)"
+  echo ""
+  echo "=== Проверка DNSCrypt на дырявость (локальный резолвер: $addr) ==="
+
+  local nm_active=0
+  command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null && nm_active=1
+
+  echo ""
+  echo "--- /etc/resolv.conf ---"
+  if [ -L /etc/resolv.conf ] && readlink -f /etc/resolv.conf 2>/dev/null | grep -qi systemd; then
+    echo "resolv.conf -- симлинк на systemd-resolved stub, реальный апстрим смотри в resolvectl ниже."
+  elif grep -qE "^nameserver[[:space:]]+${addr//./\\.}(\$|[[:space:]])" /etc/resolv.conf 2>/dev/null; then
+    echo "OK: nameserver в resolv.conf указывает на локальный резолвер ($addr)."
+  elif [ "$nm_active" = "1" ] && grep -qE '^nameserver[[:space:]]+127\.0\.0\.1([[:space:]]|$)' /etc/resolv.conf 2>/dev/null; then
+    echo "resolv.conf показывает 127.0.0.1 -- похоже на локальный dnsmasq-стаб NetworkManager"
+    echo "(dns=dnsmasq) -- само по себе это НЕ утечка, реальный апстрим смотри в nmcli ниже."
+  else
+    echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: resolv.conf НЕ указывает на $addr:"
+    grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/    /' || echo "    (nameserver-строк не найдено)"
+  fi
+
+  if command -v resolvectl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    echo ""
+    echo "--- resolvectl status (что реально использует systemd-resolved) ---"
+    local rl
+    rl="$(resolvectl status 2>/dev/null | grep -B2 -A2 -i 'DNS Servers')"
+    echo "$rl"
+    if echo "$rl" | grep -qF "$addr"; then
+      echo "OK: $addr виден среди DNS Servers systemd-resolved."
+    else
+      echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: $addr НЕ виден в DNS Servers systemd-resolved -- запросы могут идти в обход dnscrypt."
+    fi
+  fi
+
+  if [ "$nm_active" = "1" ]; then
+    echo ""
+    echo "--- nmcli (что реально настроено в NetworkManager) ---"
+    local nm_conn nm_dns
+    nm_conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -n "$nm_conn" ]; then
+      nm_dns="$(nmcli -g ipv4.dns connection show "$nm_conn" 2>/dev/null)"
+      echo "Соединение '$nm_conn': ipv4.dns = ${nm_dns:-(пусто)}"
+      if [ -n "$nm_dns" ] && echo "$nm_dns" | grep -qF "$addr"; then
+        echo "OK: $addr виден в ipv4.dns соединения '$nm_conn'."
+      else
+        echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: $addr НЕ виден в ipv4.dns соединения '$nm_conn' -- запросы могут идти в обход dnscrypt."
+      fi
+    fi
+  fi
+
+  echo ""
+  echo "--- Функциональная проверка (домен из живого инцидента 2026-08-22) ---"
+  local test_domain="youtube.com" via_dnscrypt via_system
+  if command -v dig >/dev/null 2>&1; then
+    via_dnscrypt="$(dig "@$addr" "$test_domain" +short +time=5 +tries=1 2>/dev/null | head -1)"
+    via_system="$(dig "$test_domain" +short +time=5 +tries=1 2>/dev/null | head -1)"
+    echo "через dnscrypt ($addr):        ${via_dnscrypt:-(пусто/таймаут)}"
+    echo "через системный резолвер:      ${via_system:-(пусто/таймаут)}"
+    if [ -n "$via_dnscrypt" ] && [ -z "$via_system" ]; then
+      echo "!!! УТЕЧКА: dnscrypt резолвит нормально, а системный резолвер — нет."
+      echo "    Обычные приложения НЕ используют dnscrypt, ISP-резание DNS всё ещё действует на них."
+    elif [ -n "$via_dnscrypt" ] && [ "$via_dnscrypt" = "$via_system" ]; then
+      echo "OK: системный резолвер и dnscrypt отвечают одинаково — похоже, реально проходит через dnscrypt."
+    elif [ -z "$via_dnscrypt" ] && [ -z "$via_system" ]; then
+      echo "Оба резолвера не ответили — проверь dnscrypt-proxy отдельно (статус в пункте 18)."
+    else
+      echo "Разные, но оба непустые — само по себе не обязательно утечка (CDN может отдавать разные"
+      echo "edge-адреса), но при следующей реальной блокировке стоит перепроверить руками."
+    fi
+  else
+    echo "dig не найден -- функциональную проверку пропускаю."
+  fi
+
+  echo ""
+  echo "--- Спец. домены-\"канарейки\" (тот же принцип, что у dnsleaktest.com и"
+  echo "    подобных сервисов -- домен, ответ на который называет резолвер,"
+  echo "    который на самом деле его спросил, а не просто пингует IP) ---"
+  if command -v dig >/dev/null 2>&1; then
+    local canary_default canary_dnscrypt
+    canary_default="$(dig +short TXT o-o.myaddr.l.google.com +time=5 +tries=1 2>/dev/null | tr -d '"')"
+    canary_dnscrypt="$(dig "@$addr" +short TXT o-o.myaddr.l.google.com +time=5 +tries=1 2>/dev/null | tr -d '"')"
+    echo "Google o-o.myaddr.l.google.com, как видит обычное приложение: ${canary_default:-(нет ответа)}"
+    echo "Google o-o.myaddr.l.google.com, явно через dnscrypt ($addr):  ${canary_dnscrypt:-(нет ответа)}"
+    if [ -n "$canary_default" ] && [ "$canary_default" != "$canary_dnscrypt" ]; then
+      echo "!!! ПОДОЗРЕНИЕ НА УТЕЧКУ: обычный путь и явный dnscrypt называют разный резолвер."
+    elif [ -n "$canary_default" ]; then
+      echo "OK: обычный путь и dnscrypt называют один и тот же резолвер."
+    fi
+    echo "Значение выше -- IP САМОГО РЕЗОЛВЕРА (не твой адрес). Сверь его руками (whois <IP>) --"
+    echo "если он попадает в диапазон твоего интернет-провайдера, а не Cloudflare/dnscrypt-серверов,"
+    echo "запросы реально уходят через инфраструктуру провайдера в обход DoH."
+  else
+    echo "dig не найден -- эту проверку пропускаю."
+  fi
+
+  echo ""
+  echo "--- IPv6 ---"
+  if [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+    echo "На интерфейсе есть IPv6-маршрут по умолчанию, а dnscrypt-proxy слушает только на $addr (IPv4)."
+    echo "Если у системы/приложений есть отдельный IPv6 DNS (RA/DHCPv6) — это отдельный путь утечки,"
+    echo "эта проверка его не перекрывает."
+  else
+    echo "IPv6 default route не найден — этот путь утечки тут не актуален."
+  fi
+}
+
+# Прописывает локальный резолвер в системный DNS -- пробует по очереди
+# все реально встреченные схемы (не только dhcpcd, как раньше), потому
+# что "только подсказать адрес и не лезть" на практике означало, что
+# install_dnscrypt() ставил и запускал резолвер, а resolv.conf так и
+# оставался со старым nameserver, пока кто-то не пропишет его руками --
+# живой случай 2026-08-23: ни dhcpcd не было, ни явного вопроса не было
+# задано вовремя, дырявость (пункт 15) поймала это уже постфактум.
+# Метка $DNSCRYPT_DHCPCD_MARKER нужна, чтобы uninstall_dnscrypt() снял
+# ТОЛЬКО то, что добавили сами, не трогая чужие static-записи (тот же
+# принцип и для прямой записи resolv.conf ниже).
+# Каждая ветка сначала ПРОВЕРЯЕТ текущее состояние и молча выходит, если
+# уже настроено правильно -- нужно для того, чтобы эту функцию можно было
+# безопасно звать безусловно при каждом заходе в manage_dnscrypt() (тот же
+# принцип, что ensure_panel_runtime_grants -- обновление логики само
+# доезжает до уже установленного экземпляра, не только до новых установок,
+# см. живой случай ниже), не дёргая nmcli/resolvectl впустую и не гоняя
+# NetworkManager-соединение через reconnect на каждый заход в меню.
+dnscrypt_wire_resolver() {
+  local addr="$1" iface
+
+  # systemd-resolved -- современный Debian/Ubuntu по умолчанию. DNS=
+  # через resolvectl держится поверх того, что присылает DHCP -- не
+  # затирается следующим же обновлением аренды, в отличие от resolv.conf.
+  if command -v resolvectl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+    if [ -n "$iface" ]; then
+      if resolvectl status "$iface" 2>/dev/null | grep -qF "$addr"; then
+        return 0
+      fi
+      if resolvectl dns "$iface" "$addr" >/dev/null 2>&1; then
+        resolvectl domain "$iface" '~.' >/dev/null 2>&1
+        echo "Системный DNS переключён на $addr (через systemd-resolved, интерфейс $iface)."
+        return 0
+      fi
+    fi
+  fi
+
+  # NetworkManager -- через nmcli на активное соединение. На системах с
+  # dns=dnsmasq (NM держит свой локальный кэширующий стаб) resolv.conf
+  # ВСЕГДА показывает 127.0.0.1 (стаб NM), даже когда апстрим настроен
+  # верно -- см. dnscrypt_leak_check(), там это отдельно учтено, чтобы не
+  # путать с реальной утечкой.
+  if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    local conn
+    conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -n "$conn" ]; then
+      if nmcli -g ipv4.dns connection show "$conn" 2>/dev/null | grep -qF "$addr"; then
+        return 0
+      fi
+      if nmcli connection modify "$conn" ipv4.dns "$addr" ipv4.ignore-auto-dns yes >/dev/null 2>&1; then
+        nmcli connection up "$conn" >/dev/null 2>&1
+        echo "Системный DNS переключён на $addr (через NetworkManager, соединение '$conn')."
+        return 0
+      fi
+    fi
+  fi
+
+  # dhcpcd -- как раньше, единственная схема, что была тут изначально.
+  if command -v dhcpcd >/dev/null 2>&1 && pgrep -x dhcpcd >/dev/null 2>&1; then
+    if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
+      return 0
+    fi
+    {
+      echo "$DNSCRYPT_DHCPCD_MARKER"
+      echo "static domain_name_servers=${addr}"
+    } >> /etc/dhcpcd.conf
+    iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+    if [ -n "$iface" ]; then
+      dhcpcd -n "$iface" >/dev/null 2>&1
+      echo "Системный DNS переключён на $addr (через dhcpcd, интерфейс $iface)."
+      return 0
+    fi
+  fi
+
+  # Ничего из известного не подошло -- пишем resolv.conf напрямую с
+  # бэкапом. Не самый надёжный способ (следующий DHCP/NetworkManager может
+  # перезаписать), но лучше молчаливого ничего -- предупреждаем прямым
+  # текстом и советуем перепроверить пунктом 15 после ребута/переподключения.
+  if [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+    if grep -qE "^nameserver[[:space:]]+${addr//./\\.}(\$|[[:space:]])" /etc/resolv.conf 2>/dev/null; then
+      return 0
+    fi
+    cp -f /etc/resolv.conf /etc/resolv.conf.z0r-dnscrypt.bak 2>/dev/null
+    { echo "# $DNSCRYPT_DHCPCD_MARKER (прямая запись resolv.conf, другие механизмы не подошли)"; echo "nameserver $addr"; } > /etc/resolv.conf
+    echo "Системный DNS переключён на $addr (прямая запись /etc/resolv.conf, бэкап: /etc/resolv.conf.z0r-dnscrypt.bak)."
+    echo "!!! DHCP/NetworkManager может перезаписать resolv.conf позже -- перепроверь пунктом 15 после ребута/переподключения сети."
+    return 0
+  fi
+
+  echo "Не нашёл известный механизм (systemd-resolved/NetworkManager/dhcpcd), а resolv.conf недоступен для прямой записи (симлинк?) -- пропиши резолвер ($addr) вручную." >&2
+  return 1
+}
+
+install_dnscrypt() {
+  if ! command -v dnscrypt-proxy >/dev/null 2>&1; then
+    apt-get update >/dev/null 2>&1
+    apt-get install -y dnscrypt-proxy >/dev/null 2>&1 \
+      || opkg install dnscrypt-proxy >/dev/null 2>&1 \
+      || apk add dnscrypt-proxy >/dev/null 2>&1
+  fi
+  if ! command -v dnscrypt-proxy >/dev/null 2>&1; then
+    echo "Не удалось поставить dnscrypt-proxy автоматически -- поставь пакет вручную и повтори." >&2
+    return 1
+  fi
+  if [ -f "$DNSCRYPT_TOML" ]; then
+    sed -i "s/^#\?[[:space:]]*server_names[[:space:]]*=.*/${DNSCRYPT_SERVER_NAMES}/" "$DNSCRYPT_TOML"
+  fi
+  systemctl enable --now dnscrypt-proxy.socket >/dev/null 2>&1
+  systemctl restart dnscrypt-proxy
+  sleep 1
+  echo "dnscrypt-proxy установлен и запущен (server_names: cloudflare, cloudflare-ipv6, nextdns, sb)."
+
+  # Автоматически, не отдельным вопросом -- ставить резолвер и НЕ включать
+  # его в системный DNS означало, что живой трафик продолжал идти через
+  # старый (возможно, режущийся ISP) резолвер, пока кто-то не зайдёт и не
+  # переключит вручную. Живой случай 2026-08-23: спросили бы -- забыли
+  # бы ответить "да", как и было на деле.
+  local addr; addr="$(dnscrypt_listen_addr)"
+  dnscrypt_wire_resolver "$addr"
+}
+
+manage_dnscrypt() {
+  local st; st="$(get_dnscrypt_status)"
+  echo "DNSCrypt-proxy (локальный DoH-резолвер): $st"
+  # Безусловно, на КАЖДЫЙ заход, а не только при первой установке -- та же
+  # причина, что у ensure_panel_runtime_grants (см. её комментарий): апдейт
+  # z0r, принёсший новую/починенную логику wire_resolver(), иначе никогда
+  # не долетает до уже установленного экземпляра. Живой случай 2026-08-24:
+  # dnscrypt-proxy был установлен ДО того, как install_dnscrypt() начал
+  # сам звать dnscrypt_wire_resolver() -- resolv.conf так и остался
+  # непрописанным, пока это не стало отдельной идемпотентной проверкой,
+  # вызываемой всегда (сама функция теперь безопасна для повторных
+  # вызовов -- см. её докстринг).
+  if [ "$st" != "NONE" ]; then
+    dnscrypt_wire_resolver "$(dnscrypt_listen_addr)"
+  fi
+  case "$st" in
+    NONE)
+      echo "Полезно, когда провайдер режет обычный DNS/DoT/DoH к популярным резолверам"
+      echo "(живой случай 2026-08-22: youtube.com отдавал NXDOMAIN даже через 8.8.8.8,"
+      echo "но резолвился нормально через DoH к cloudflare-dns.com/dns.nextdns.io/dns.sb)."
+      read -re -p "Поставить и настроить dnscrypt-proxy? [y/N]: " ans
+      case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
+      install_dnscrypt || return 1
+      local addr; addr="$(dnscrypt_listen_addr)"
+      if command -v dig >/dev/null 2>&1; then
+        echo "Проверка: dig @$addr youtube.com +short"
+        dig "@$addr" youtube.com +short
+      fi
+      echo "Проверь, что системный DNS реально переключился -- пункт 15 (проверка на дырявость)."
+      ;;
+    OFF)
+      read -re -p "Сервис остановлен. Запустить? [y/N]: " ans
+      case "$ans" in
+        y|Y) systemctl enable --now dnscrypt-proxy.socket dnscrypt-proxy >/dev/null 2>&1; echo "Запущен." ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+    ON)
+      read -re -p "Сервис работает. Остановить? [y/N]: " ans
+      case "$ans" in
+        y|Y)
+          systemctl disable --now dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1
+          echo "Остановлен (пакет и переключение системного DNS не тронуты -- пункт удаления снимает полностью)."
+          ;;
+        *) echo "Ок, не трогаю." ;;
+      esac
+      ;;
+  esac
+}
+
+uninstall_dnscrypt() {
+  if ! command -v dnscrypt-proxy >/dev/null 2>&1; then
+    echo "dnscrypt-proxy не установлен -- нечего удалять."
+    return 0
+  fi
+  read -re -p "Остановить, снять переключение DNS (если делали через z0r) и удалить пакет dnscrypt-proxy? [y/N]: " ans
+  case "$ans" in
+    y|Y)
+      systemctl disable --now dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1 || true
+      local iface
+      iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -1)"
+      if grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null; then
+        # awk, не sed -- маркер содержит "#" и скобки, которые ломают
+        # sed-паттерн при использовании как разделителя/regex. Точное
+        # строковое сравнение через -v убирает саму строку-маркер и
+        # ровно одну следующую (нашу static domain_name_servers=...).
+        awk -v marker="$DNSCRYPT_DHCPCD_MARKER" '
+          $0 == marker { skip = 2; next }
+          skip > 0 { skip--; next }
+          { print }
+        ' /etc/dhcpcd.conf > /etc/dhcpcd.conf.z0r-tmp && mv /etc/dhcpcd.conf.z0r-tmp /etc/dhcpcd.conf
+        [ -n "$iface" ] && dhcpcd -n "$iface" >/dev/null 2>&1
+        echo "Запись переключения DNS в dhcpcd.conf снята, интерфейс перечитал конфиг."
+      fi
+      # systemd-resolved/NetworkManager (см. dnscrypt_wire_resolver) не
+      # оставляют текстовую метку так же явно, как dhcpcd.conf -- лучшее,
+      # что можно сделать без риска задеть настройки, поставленные не
+      # нами -- откатить конкретно то, на что сами переключали (DNS=)/
+      # (ipv4.dns), а не трогать интерфейс/соединение целиком.
+      if [ -n "$iface" ] && command -v resolvectl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        resolvectl revert "$iface" >/dev/null 2>&1 && echo "systemd-resolved DNS на $iface возвращён к автоматическому (DHCP)."
+      fi
+      if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        local conn; conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | head -1 | cut -d: -f1)"
+        if [ -n "$conn" ]; then
+          nmcli connection modify "$conn" ipv4.dns "" ipv4.ignore-auto-dns no >/dev/null 2>&1 \
+            && nmcli connection up "$conn" >/dev/null 2>&1 \
+            && echo "NetworkManager DNS на '$conn' возвращён к автоматическому."
+        fi
+      fi
+      if [ -f /etc/resolv.conf.z0r-dnscrypt.bak ]; then
+        mv -f /etc/resolv.conf.z0r-dnscrypt.bak /etc/resolv.conf
+        echo "/etc/resolv.conf восстановлен из бэкапа (прямая запись z0r-dnscrypt снята)."
+      fi
+      apt-get remove -y dnscrypt-proxy >/dev/null 2>&1 \
+        || opkg remove dnscrypt-proxy >/dev/null 2>&1 \
+        || apk del dnscrypt-proxy >/dev/null 2>&1
+      echo "dnscrypt-proxy удалён."
+      ;;
+    *) echo "Отмена, dnscrypt-proxy не тронут." ;;
+  esac
 }
 
 # Удаляет весь z2r_autobench (сам себя) — файл, из которого мы прямо сейчас
@@ -718,6 +2961,26 @@ web_panel_stub() {
 # больше из скрипта не трогаем. z2r, autotune-daemon.service и Discord_bot
 # НЕ трогает — для них отдельные пункты (16/17/18), чтобы не сносить
 # что-то по ошибке заодно.
+# Ставит команду "z0r" в PATH (симлинк на $INSTALLED_Z0R), чтобы можно было
+# звать из любого каталога, как и родной "z2r" (тот себя ставит в
+# /usr/local/bin/z2r сам, см. установщик автора). Идемпотентно — если
+# симлинк уже правильный, молчит; если там что-то постороннее с этим же
+# именем (не наш симлинк) — не трогает и предупреждает.
+ensure_z0r_command() {
+  [ -f "$INSTALLED_Z0R" ] || return 0
+  if [ -L "$Z0R_BIN_LINK" ]; then
+    [ "$(readlink -f "$Z0R_BIN_LINK" 2>/dev/null)" = "$(readlink -f "$INSTALLED_Z0R" 2>/dev/null)" ] && return 0
+    echo "$Z0R_BIN_LINK уже ведёт куда-то ещё — не трогаю." >&2
+    return 0
+  fi
+  if [ -e "$Z0R_BIN_LINK" ]; then
+    echo "$Z0R_BIN_LINK уже существует и это не симлинк — не трогаю." >&2
+    return 0
+  fi
+  ln -s "$INSTALLED_Z0R" "$Z0R_BIN_LINK" 2>/dev/null \
+    && echo "Команда 'z0r' установлена ($Z0R_BIN_LINK -> $INSTALLED_Z0R)."
+}
+
 uninstall_autobench_self() {
   echo "ВНИМАНИЕ: удалит весь $INSTALL_DIR — сам этот инструмент и все его файлы"
   echo "(включая логи тестов и Discord_bot внутри него, если он тут склонирован)."
@@ -725,6 +2988,10 @@ uninstall_autobench_self() {
   read -re -p "Точно удалить z2r_autobench? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
     echo "Удаляю $INSTALL_DIR..."
+    if [ -L "$Z0R_BIN_LINK" ] && [ "$(readlink -f "$Z0R_BIN_LINK" 2>/dev/null)" = "$(readlink -f "$INSTALLED_Z0R" 2>/dev/null)" ]; then
+      rm -f "$Z0R_BIN_LINK"
+      echo "Команда 'z0r' ($Z0R_BIN_LINK) удалена."
+    fi
     rm -rf "$INSTALL_DIR"
     echo "z2r_autobench удалён."
     exit 0
@@ -752,7 +3019,106 @@ uninstall_everything() {
   echo ""
   uninstall_voice_bot
   echo ""
+  uninstall_panel
+  echo ""
+  uninstall_zenith
+  echo ""
+  uninstall_tg_relay
+  echo ""
+  uninstall_dnscrypt
+  echo ""
   uninstall_autobench_self
+}
+
+# Чек-лист доп. модулей на первом запуске -- один экран вместо вопроса
+# y/n по каждому модулю по отдельности. Сам факт выбора номера в списке
+# уже согласие ставить -- дальше без доп. "точно?" на каждый модуль.
+# Настройка, требующая РЕАЛЬНОГО решения человека (у Zenith -- режим БД/
+# синк с панелью, тут нет безопасного дефолта), не сворачивается -- идёт
+# сразу следом через zenith_configure_wizard, а не потом через меню.
+# У панели/бота настройка -- это правка .env токеном/паролем руками, тут
+# автоматизировать нечего, install_files печатает точные инструкции.
+# DNSCrypt/Zenith-TG -- install_files и всё, доп. мастера нет.
+first_run_install_modules() {
+  echo ""
+  echo "Какие дополнительные модули поставить? (номера через запятую/пробел,"
+  echo "Enter — ничего, только базовый z2r_autobench; можно доставить позже"
+  echo "через соответствующий пункт меню)"
+  echo "  1) autotune-daemon -- автотестирование и подстройка стратегий"
+  echo "  2) Zenith           -- автоподборщик-генератор стратегий (БД + автономный режим)"
+  echo "  3) web_panel        -- управление через браузер"
+  echo "  4) Discord_bot      -- тестирование VOICE_UDP"
+  echo "  5) DNSCrypt-proxy   -- локальный DoH-резолвер"
+  echo "  6) Zenith-TG        -- прозрачный доступ к Telegram"
+  read -re -p "Модули: " modsel
+
+  local norm tok
+  local want_daemon=0 want_zenith=0 want_panel=0 want_bot=0 want_dnscrypt=0 want_tgrelay=0
+  norm="$(echo "$modsel" | tr ',' ' ')"
+  for tok in $norm; do
+    case "$tok" in
+      1) want_daemon=1 ;;
+      2) want_zenith=1 ;;
+      3) want_panel=1 ;;
+      4) want_bot=1 ;;
+      5) want_dnscrypt=1 ;;
+      6) want_tgrelay=1 ;;
+      "") ;;
+      *) echo "Пропускаю неизвестный номер: $tok" >&2 ;;
+    esac
+  done
+
+  if [ "$want_daemon" = "1" ]; then
+    echo ""; echo "--- autotune-daemon ---"
+    install_daemon_service 1
+  fi
+  if [ "$want_zenith" = "1" ]; then
+    echo ""; echo "--- Zenith ---"
+    zenith_install_files && zenith_configure_wizard
+  fi
+  if [ "$want_panel" = "1" ]; then
+    echo ""; echo "--- web_panel ---"
+    panel_install_files
+  fi
+  if [ "$want_bot" = "1" ]; then
+    echo ""; echo "--- Discord_bot ---"
+    voice_bot_install_files
+  fi
+  if [ "$want_dnscrypt" = "1" ]; then
+    echo ""; echo "--- DNSCrypt-proxy ---"
+    install_dnscrypt
+    echo "Проверь, что системный DNS реально переключился -- пункт 15 (проверка на дырявость)."
+  fi
+  if [ "$want_tgrelay" = "1" ]; then
+    echo ""; echo "--- Zenith-TG ---"
+    tgrelay_install_files
+  fi
+
+  echo ""
+  echo "=== Установка модулей завершена ==="
+  if ! z2r_installed; then
+    echo "z2r (ядро DPI-обхода) ещё не установлен -- тесты профилей работать не будут, пока не поставишь (пункт 16 в меню)."
+    return 0
+  fi
+
+  echo ""
+  echo "Прогнать тест стратегий сейчас? Enter — пропустить; номер(а) профиля(ей)"
+  echo "через запятую/пробел (1-9); 111 — все готовые сразу."
+  read -re -p "Тест: " testsel
+  [ -n "$testsel" ] || return 0
+
+  local bgans
+  read -re -p "В фоне, не блокируя терминал (лог отдельно)? [y/N]: " bgans
+  case "$bgans" in
+    y|Y)
+      if [ "$testsel" = "111" ]; then run_test_background --all
+      else run_test_background --profiles "$testsel"; fi
+      ;;
+    *)
+      if [ "$testsel" = "111" ]; then run_all
+      else run_selected "$testsel"; fi
+      ;;
+  esac
 }
 
 # --- bootstrap: свежескачанный файл (curl -O .../z0r && sh z0r) вне
@@ -764,7 +3130,7 @@ uninstall_everything() {
 if [ "$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")" != "$INSTALLED_Z0R" ]; then
   echo "=== Первый запуск (не из $INSTALL_DIR) — разворачиваю z2r_autobench ==="
   if ! z2r_installed; then
-    install_z2r || echo "z2r так и не установлен — часть тестов работать не будет, пока не поставишь (пункт 12 в меню)." >&2
+    install_z2r || echo "z2r так и не установлен — часть тестов работать не будет, пока не поставишь (пункт 16 в меню)." >&2
   fi
 
   if [ -d "$INSTALL_DIR/.git" ] && [ -f "$INSTALLED_Z0R" ]; then
@@ -791,29 +3157,23 @@ if [ "$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")" != "$INSTALLED_Z0R" ]; the
     exit 1
   fi
   chmod +x "$INSTALLED_Z0R"
+  ensure_z0r_command
 
-  if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
-    echo ""
-    echo "Сервис автотестирования-автоподстройки (autotune-daemon) ещё не установлен."
-    read -re -p "Установить и включить его сейчас? [y/N]: " ans
-    case "$ans" in
-      y|Y) bash "$INSTALLED_Z0R" --install-service ;;
-      *) echo "Пропускаю — предложу снова при следующем запуске." ;;
-    esac
-  fi
+  first_run_install_modules
 
   exec bash "$INSTALLED_Z0R" "${ORIG_ARGS[@]}"
 fi
 
 # мы точно /opt/z2r_autobench/z0r — обычный (не bootstrap) запуск: тихо
 # подтягиваем обновления, если есть доступ к GitHub, и продолжаем как обычно
+ensure_z0r_command
 if [ -d "$INSTALL_DIR/.git" ]; then
   ( cd "$INSTALL_DIR" && git pull --ff-only origin main >/dev/null 2>&1 ) || true
 fi
 
 if [ -z "$MODE" ] && ! z2r_installed; then
   echo "z2r (ядро DPI-обхода) не найден в /opt/zapret2." >&2
-  echo "Поставь его через пункт 12 в меню или: sudo ./z0r --install-z2r" >&2
+  echo "Поставь его через пункт 16 в меню или: sudo ./z0r --install-z2r" >&2
   echo "" >&2
 fi
 
@@ -851,6 +3211,11 @@ if [ "$MODE" = "install-z2r" ]; then
   exit $?
 fi
 
+if [ "$MODE" = "install-z2r-offline" ]; then
+  install_z2r_offline
+  exit $?
+fi
+
 if [ "$MODE" = "uninstall" ]; then
   uninstall_stack
   exit 0
@@ -861,22 +3226,61 @@ while true; do
   choice="$(show_menu)"
   case "$choice" in
     q|Q|0|"") echo "Выход."; exit 0 ;;
-    111) run_all ;;
+    111)
+      read -re -p "В фоне, не блокируя терминал (лог отдельно)? [y/N]: " bgans
+      case "$bgans" in y|Y) run_test_background --all ;; *) run_all ;; esac
+      ;;
     1|2|3|4|5|6|7|8|9) test_profile "$choice" ;;
     10)
       read -re -p "Домен (например example.com, без https://): " dom
       [ -n "$dom" ] && run_domain_test "$dom"
       ;;
-    11) launch_z2r ;;
-    12) manage_zapret ;;
-    13) manage_daemon ;;
-    14) manage_voice_bot ;;
-    15) web_panel_stub ;;
-    16) uninstall_z2r ;;
-    17) uninstall_daemon ;;
-    18) uninstall_voice_bot ;;
-    19) web_panel_stub ;;
-    20) uninstall_autobench_self ;;
+    11)
+      read -re -p "Число проходов funnel-теста (сейчас $PASSES): " npasses
+      if printf '%s' "$npasses" | grep -Eq '^[1-9][0-9]*$'; then
+        PASSES="$npasses"
+        echo "$PASSES" > "$PASSES_CONF"
+        echo "Сохранено: $PASSES проход(ов) (действует на этот и все следующие запуски z0r)."
+      else
+        [ -n "$npasses" ] && echo "Нужно целое число больше 0 — не сохранено." >&2
+      fi
+      ;;
+    12) manual_switch_strategy ;;
+    13)
+      read -re -p "Стратегии через запятую для сравнения (Enter — только текущая): " strats
+      read -re -p "Сколько шортсов подряд (Enter — по умолчанию, 8): " cnt
+      run_shorts_test "$strats" "$cnt"
+      ;;
+    14) launch_z2r ;;
+    15)
+      if command -v dnscrypt-proxy >/dev/null 2>&1; then
+        dnscrypt_leak_check
+      else
+        echo "DNSCrypt-proxy не установлен (пункт 18)." >&2
+      fi
+      ;;
+    16) manage_zapret ;;
+    17)
+      if [ -d "$ZENITH_DIR" ]; then
+        zenith_promoter_toggle
+      else
+        echo "Zenith ещё не установлен (пункт 19)." >&2
+      fi
+      ;;
+    18) manage_dnscrypt ;;
+    19) manage_zenith ;;
+    20) manage_tg_relay ;;
+    21) manage_voice_bot ;;
+    22) manage_panel ;;
+    23) autoupdate_menu ;;
+    24) uninstall_z2r ;;
+    25) uninstall_daemon ;;
+    26) uninstall_voice_bot ;;
+    27) uninstall_panel ;;
+    28) uninstall_autobench_self ;;
+    29) uninstall_zenith ;;
+    30) uninstall_tg_relay ;;
+    31) uninstall_dnscrypt ;;
     999) uninstall_everything ;;
     *)
       # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
@@ -889,7 +3293,8 @@ while true; do
         [ -n "${TITLES[$tok]:-}" ] || valid=0
       done
       if [ "$valid" = "1" ] && [ "$count" -ge 2 ]; then
-        run_selected "$choice"
+        read -re -p "В фоне, не блокируя терминал (лог отдельно)? [y/N]: " bgans
+        case "$bgans" in y|Y) run_test_background --profiles "$choice" ;; *) run_selected "$choice" ;; esac
       else
         echo "Некорректный выбор."
       fi

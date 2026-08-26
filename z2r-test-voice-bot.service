@@ -5,7 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=zenith-voice-bot
 WorkingDirectory=/opt/z2r_autobench/z2r_test-voice-bot
+# Юзер zenith-voice-bot (НЕ zenith-sandbox -- тот занят curl-проверками
+# Zenith'а для TCP-профилей, отдельный узкий юзер нужен именно боту,
+# см. z2r_test-voice-bot/README.md "Песочница, не прод" про живой
+# инцидент 2026-08-07) -- создаёт Zenith/sandbox/setup_sandbox.sh, узкое
+# правило только на UDP-порты голосового профиля. Если Zenith ещё не
+# ставился — сначала пункт 22, иначе этот юзер не существует и сервис
+# не запустится.
+# Нужен также узкий sudoers на рестарт песочницы:
+#   zenith-voice-bot ALL=(root) NOPASSWD: /opt/z2r_autobench/Zenith/sandbox/start_sandbox.sh
 # repo не поставляет свой systemd-юнит, только run.sh ("venv/bin/python3
 # bot.py") — предполагает venv уже собран (см. manage_voice_bot() в z0r).
 ExecStart=/opt/z2r_autobench/z2r_test-voice-bot/run.sh

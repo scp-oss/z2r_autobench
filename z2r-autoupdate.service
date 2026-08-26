@@ -1,0 +1,9 @@
+[Unit]
+Description=z2r_autobench ecosystem auto-update (one-shot, triggered by z2r-autoupdate.timer)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/z2r_autobench/autoupdate.sh
+User=root
+StandardOutput=journal
+StandardError=journal
