@@ -7,8 +7,10 @@ project names here — same public-repo constraint as README.md.
 
 ## Workflow constraints
 
-- Designated branch: `claude/z2r-autobench-open-issues-hq8gjy`. Never push
-  elsewhere without explicit permission.
+- Designated branch: `main`. Changed 2026-08-26 from a long-running
+  feature branch (`claude/z2r-autobench-open-issues-hq8gjy`) — see
+  "Feature branch merged into main" below for why. Never push elsewhere
+  without explicit permission.
 - `git push` to GitHub now works directly from this sandbox (confirmed
   working as of this note) — no more format-patch/SendUserFile/git-am
   handoff needed. Earlier in this engagement it 403'd (both raw `git push`
@@ -41,6 +43,60 @@ project names here — same public-repo constraint as README.md.
   is the one deliberate exception — it's sourced, never executed directly,
   so it stays `100644`. When adding a new top-level script meant to be run
   directly, `chmod +x` it before `git add`, or the mode won't stick.
+
+## Feature branch merged into main (2026-08-26) — three weeks of fixes never reached any server
+
+- Live incident: this whole engagement's work (Aug 3 onward, 95 commits)
+  sat on an open PR (`claude/z2r-autobench-open-issues-hq8gjy` → `main`,
+  #2) that never got merged. `autoupdate.sh` deliberately tracks `main`
+  only, never the checked-out branch (see its own comment: "продакшена
+  должно идти от того, что реально смержено в main, не от feature-
+  ветку") — so **every server running autoupdate.sh silently never
+  received any of this session's fixes**, the whole time, including the
+  very `_z2r_detect_base()` fix that this file's own "/opt/zapret2 vs
+  /opt/zator" section documents as already resolved. Surfaced two ways
+  in the same sitting: (1) a `z0r-panel` checkout on Server A turned out
+  to be on its own unmerged feature branch (`claude/realtime-db-api`,
+  no open PR, just never fast-forwarded to `main`) — `git pull` silently
+  reported "already up to date" because it was up to date with its own
+  stale branch, not with reality; (2) once that got sorted and
+  `z0r-panel` switched to `main`, the `/controls` page's profile-status
+  table showed "ошибка чтения" for all 9 profiles — `set_strategy_cli.sh`
+  on Server A was still hitting the exact `/opt/zapret2/z2r_lib/config.sh
+  не найден` error that `_z2r_detect_base()` was supposed to have fixed
+  weeks earlier, because that fix was sitting in the unmerged PR the
+  whole time.
+- Fixed by merging the PR into `main` directly (`git merge`, not the
+  GitHub UI — same effect, PR auto-closed as merged once its head commit
+  became reachable from `main`). Verified before merging that it was a
+  clean fast-forward relationship with zero divergent functional work —
+  `main` only had 2 small independent commits the branch lacked (both
+  tiny README/z0r wording tweaks from Aug 4), resolved as trivial
+  conflicts. Confirmed live afterward: `set_strategy_cli.sh get 1 tls`
+  on Server A returned a real strategy number instead of the config.sh
+  error.
+- **Same root-cause class as the Server B chain elsewhere in this file**:
+  a stale assumption (checked-out branch == what's actually deployed)
+  baked into tooling (`autoupdate.sh` correctly assumes `main` is where
+  merged work lives, but nothing enforced that open PRs against `main`
+  ever actually get merged) let three weeks of real fixes sit invisible
+  and undeployed. Lesson: when a "should already be fixed" bug reappears
+  on a live server, check which branch the checkout is actually on and
+  whether the fix in question ever reached `main` specifically — don't
+  assume "the fix exists in git" means "the fix is deployed".
+- `z0r-panel`'s `claude/realtime-db-api` had no open PR at all — its
+  work had been pushed straight to `main` at some point, so merging
+  wasn't needed there, just switching Server A's checkout off the stale
+  branch (`git checkout main && git pull origin main`).
+- Both now-fully-merged branches (`z2r_autobench`'s
+  `claude/z2r-autobench-open-issues-hq8gjy`, `z0r-panel`'s
+  `claude/realtime-db-api`) were left in place on GitHub rather than
+  deleted — `git push origin --delete` 403'd (same class of restriction
+  as the historical `git push` 403 noted above, apparently scoped to ref
+  deletion specifically), and no GitHub API tool available in-session
+  covers branch deletion either. Harmless to leave — fully merged,
+  nothing references them, safe for a human to delete manually via the
+  GitHub web UI whenever convenient.
 
 ## zapret1 vs zapret2 — do not mix syntax
 
