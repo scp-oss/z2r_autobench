@@ -646,6 +646,27 @@ project names here — same public-repo constraint as README.md.
   generic pass/fail signal (the first was `zenith_autorun.sh` never
   checking `main.py`'s exit code) hid a real, actionable, one-line error
   message for days.
+- **Fifth bug in the same chain, found immediately after the fourth's fix
+  deployed:** the `lists/netrogat.txt` "isn't part of what's documented
+  to split" claim above was wrong — asserted from absence of contrary
+  evidence, not from an actual check. The very next run on Server B
+  failed identically on `/opt/zapret2/lists/netrogat.txt` (same "cannot
+  access hostlist file", surfaced instantly thanks to the fourth bug's
+  `LAST_ERROR` fix). Routed `lists/netrogat.txt` through `config.Z2R_BASE`
+  too. **Confirmed resolved 2026-08-26**: after this fix, a direct query
+  against Server B's `experiments` table showed 111 real rows with
+  genuine byte counts (~875-881KB successes, matching a real YouTube
+  page well above the 65536-byte threshold; 0-byte/~3000ms failures on
+  genomes that didn't get through) — the full apply→probe→record pipeline
+  works end-to-end on Server B for the first time since it was deployed.
+  Root-cause chain across all five bugs: one filesystem-layout assumption
+  (`/opt/zapret2` is never split) baked into three separate places
+  (`genome.py`'s hostlist paths, the sandbox conf template's blob paths,
+  `sandbox_apply.py`'s swallowed error) each had to be found and fixed
+  independently before any of it actually worked — a single wrong
+  assumption, made once, then copy-pasted forward, cost five separate
+  rounds of "still broken" before the underlying premise itself was
+  questioned instead of chasing each symptom in isolation.
 
 ## z2r core install — GitHub is not reliable from every provider
 
