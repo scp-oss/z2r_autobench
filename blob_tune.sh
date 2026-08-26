@@ -216,7 +216,7 @@ if [ -n "$BEST_BLOB" ]; then
   # же документированном qnum-race (см. restart_zapret2()), скрипт тихо
   # шёл дальше в score_blob() как ни в чём не бывало, оставляя прод БЕЗ
   # запущенного nfqws2 и без отката к backup, снятому в начале прогона
-  # (найдено при аудите перед деплоем на МТС 2026-08-17).
+  # (найдено при аудите перед деплоем на Provider B 2026-08-17).
   if ! zapret2_running; then
     echo "!!! zapret2 не поднялся после финального применения $BEST_BLOB -- откатываюсь на backup ($CFG_BACKUP_DIR/config.${RUN_TS}.bak)." >&2
     cp -p "$CFG_BACKUP_DIR/config.${RUN_TS}.bak" "$CFG"

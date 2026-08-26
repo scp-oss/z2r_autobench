@@ -115,7 +115,7 @@ for p in $PROTO; do
   PREV_STRATEGY["$p"]="$(get_strategy "$PROFILE" "$p")"
 done
 
-# Живой случай на NETH-4, 2026-08-18: `systemctl restart autotune-daemon`
+# Живой случай на Server A, 2026-08-18: `systemctl restart autotune-daemon`
 # попал прямо в середину прогона этого скрипта (демон вызывает его как
 # блокирующий дочерний процесс) — SIGTERM убил перебор посреди пассивной
 # пробы стратегии 30 из 52, откат "к исходной стратегии" (см. ниже) не

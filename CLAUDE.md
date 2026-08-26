@@ -142,7 +142,7 @@ project names here — same public-repo constraint as README.md.
 
 ## `/opt/zapret2` vs `/opt/zator` — two real directories, not a symlink pair (since 2026-08-23)
 
-- Live incident on NETH-4: after a core-file recovery, `/opt/zapret2` and
+- Live incident on Server A: after a core-file recovery, `/opt/zapret2` and
   `/opt/zator` ended up as two independent real directories instead of the
   (apparent, pre-incident) symlink relationship. The live `config`'s
   `--lua-init=`/`--hostlist=`/`--blob=` arguments explicitly hardcode
@@ -182,9 +182,9 @@ project names here — same public-repo constraint as README.md.
   only symlink what's genuinely referenced from both sides (daemon writes
   vs. what `--lua-init=`/`--hostlist=`/`--blob=` load) — not the whole
   parent directory.
-- **Correction, 2026-08-23 later same day: this is not NETH-4-incident-
-  specific — it's the upstream z2r installer's standard layout.** A
-  second server (fresh MTS deploy, installed minutes earlier, never
+- **Correction, 2026-08-23 later same day: this is not specific to the
+  Server A incident — it's the upstream z2r installer's standard layout.**
+  A second server (fresh Provider B deploy, installed minutes earlier, never
   touched by any recovery) showed the identical split: `z2r_lib` exists
   only under `/opt/zator/z2r_lib`, `/opt/zapret2/z2r_lib` doesn't exist
   at all. `rank_strategies.sh` failed immediately with `Не найден
@@ -203,7 +203,7 @@ project names here — same public-repo constraint as README.md.
   `z2r_autobench_lib.sh` — it's a standalone script with its own
   `LOCKED_TSV`/`LOCKED_MANUAL_TSV`, previously hardcoded to
   `/opt/zapret2/extra_strats/...` independently of the fix above, so it
-  never picked it up. Live symptom on miha (MTS): every profile showed
+  never picked it up. Live symptom on Server B (Provider B): every profile showed
   `[#0]`/auto in the menu (item 111, manual strategy switch) even though
   `set_strategy_cli.sh` (which *does* source the lib) had genuinely locked
   real strategies — the display was silently reading a file that doesn't
@@ -339,7 +339,7 @@ project names here — same public-repo constraint as README.md.
 
 - Separate repo: transparent Telegram access, not a zapret2 desync
   profile — tried that first (`zapret2/TG_MTPROTO.block.conf` still in
-  that repo for reference), confirmed live on NETH-4 that it does
+  that repo for reference), confirmed live on Server A that it does
   *not* help here: the block there is a curated IP blacklist of
   specific well-known Telegram DC addresses (SYN itself never
   completes), not a DPI signature `--lua-desync=` could fool. A
@@ -359,7 +359,7 @@ project names here — same public-repo constraint as README.md.
   MTProxy config in the client app, works for anything routing through
   the box (including VLESS-tunneled clients — Xray's outbound is an
   ordinary local `connect()`, so it hits the same `OUTPUT` chain).
-  Confirmed working end-to-end on NETH-4 with an unmodified Telegram
+  Confirmed working end-to-end on Server A with an unmodified Telegram
   client over the existing VLESS tunnel.
 - Installed via z0r menu item 20 (manage)/30 (uninstall) (renumbered
   2026-08-24, see "z0r main menu renumbering" below), same on-demand-clone
@@ -368,8 +368,8 @@ project names here — same public-repo constraint as README.md.
   (how it was first deployed by hand); `manage_tg_relay()` in `z0r`
   `sed`-rewrites that path to the real `$TGRELAY_DIR` before installing
   the unit, don't `cp` it as-is like `manage_panel` does.
-- **First MTS deploy (2026-08-24) hit two real bugs in that install path,
-  both now fixed and confirmed working end-to-end on `miha`:**
+- **First Provider B deploy (2026-08-24) hit two real bugs in that install path,
+  both now fixed and confirmed working end-to-end on `Server B`:**
   1. `.service` has `User=tgrelay`/`Group=tgrelay`; the system user wasn't
      getting created reliably (or didn't survive an uninstall/reinstall
      cycle via the menu — root cause not fully pinned down, `useradd` run
@@ -406,7 +406,7 @@ project names here — same public-repo constraint as README.md.
 - **New open issue, found 2026-08-24 after the fixes above — service runs
   and REDIRECT is applied, but the connector itself is OS-dependent and
   not yet root-caused:** through the relay (over the existing VLESS
-  tunnel, miha/MTS), Telegram connects fine on macOS and iOS but **fails
+  tunnel, Server B/Provider B), Telegram connects fine on macOS and iOS but **fails
   on Android and Windows**. Meanwhile, connecting the same Telegram app
   directly via a real MTProxy (no relay, no VLESS) works on **every** OS
   tested — narrowing this specifically to `transparent_relay.py`'s own
@@ -504,7 +504,7 @@ project names here — same public-repo constraint as README.md.
   renumbering" below), same on-demand-clone pattern as item 21's Discord bot.
 - Scaffold-only as of this writing — mutation/UCB/crossover logic not yet
   ported into it.
-- Production panel host (NETH-4) has its own `Zenith/` checkout on `main`,
+- Production panel host (Server A) has its own `Zenith/` checkout on `main`,
   independently ahead in places (its own unrelated commits, e.g.
   `create_remote_db_user.sh` work) but *behind* our feature branches —
   migrations beyond `002_node_self_report.sql` (e.g.
@@ -525,7 +525,7 @@ project names here — same public-repo constraint as README.md.
   from `$ZENITH_DIR` (same pattern as `z0r`'s own `zenith_mysql_query()`),
   not a bare `mysql -u... -p...` — that fails with "команда не найдена".
 - **`zenith_autorun.sh` never actually called `sync_client.py` — found
-  2026-08-24 on miha (MTS, hub-and-spoke node).** README documents the
+  2026-08-24 on Server B (Provider B, hub-and-spoke node).** README documents the
   hub-and-spoke design as "после `main.py` шлёт `sync_client.py push`",
   but that line only ever described the manual/cron workflow —
   `zenith_autorun.sh` (the only thing actually running on a schedule,
@@ -544,7 +544,7 @@ project names here — same public-repo constraint as README.md.
   confirm generation itself is actually happening before assuming sync
   is broken again — the two failure modes look identical from the panel
   side alone.
-- **The real reason miha showed 0 genomes was deeper than the missing
+- **The real reason Server B showed 0 genomes was deeper than the missing
   sync call above — found 2026-08-26.** `sandbox/setup_sandbox.sh`
   (one-time: creates `zenith-sandbox`/`zenith-voice-bot` users +
   NFQUEUE iptables rules) had been run, but `sandbox/start_sandbox.sh`
@@ -572,7 +572,7 @@ project names here — same public-repo constraint as README.md.
   days behind cheerful-looking log lines — this is worth grepping for
   in any other `*.sh` loop that calls into a subprocess and always
   prints a "done" message unconditionally afterward.
-- Separately noticed on the same miha run: VOICE_UDP's control-genome
+- Separately noticed on the same Server B run: VOICE_UDP's control-genome
   check was *also* failing instantly (`0 bytes, 0ms`) alongside every
   mutated genome, tripping "ПОДОЗРЕНИЕ НА БАН ПОДТВЕРЖДЕНО" — instant
   zero-byte failures on literally everything including control look
@@ -581,7 +581,7 @@ project names here — same public-repo constraint as README.md.
   Discord UDP block, but this wasn't confirmed live — check Discord_bot
   status (z0r item 14) before trusting a VOICE_UDP "ban" verdict from a
   node where the voice bot's own status hasn't been verified.
-- **Third bug in the same chain, same miha session:** once
+- **Third bug in the same chain, same Server B session:** once
   `setup_sandbox.sh` was finally run (it genuinely never had been —
   confirmed by the improved error text above naming the missing
   `queue_num` explicitly instead of the old silent crash), the sandbox
@@ -595,7 +595,7 @@ project names here — same public-repo constraint as README.md.
   resolved in `start_sandbox.sh` with the same prefer-zapret2-else-
   zator detection as `_z2r_detect_base()` — **first attempt at this
   checked `[ -d ".../files/fake" ]` (directory existence) and still
-  picked the wrong side**, because on miha `/opt/zapret2/files/fake`
+  picked the wrong side**, because on Server B `/opt/zapret2/files/fake`
   exists as an empty/incomplete directory — the exact same "cannot
   access file" error persisted even with the fix deployed. Corrected to
   probe for the specific file the template actually needs
@@ -612,7 +612,7 @@ project names here — same public-repo constraint as README.md.
   `sandbox/nfqws2_sandbox.conf` (it's a generated artifact, safe to
   remove) before the next `start_sandbox.sh` run so it actually
   regenerates with the fix.
-- **Fourth bug in the same chain, same miha session, found 2026-08-26
+- **Fourth bug in the same chain, same Server B session, found 2026-08-26
   after the third bug's fix landed:** the sandbox stopped failing on
   missing blob files but every single genome for every TCP profile
   (YT_TLS/RKN_TLS/DS_TLS) still failed to apply, logging a generic
@@ -649,7 +649,7 @@ project names here — same public-repo constraint as README.md.
 
 ## z2r core install — GitHub is not reliable from every provider
 
-- Live case (Rostelecom, 2026-08-13): `raw.githubusercontent.com`/
+- Live case (Provider C, 2026-08-13): `raw.githubusercontent.com`/
   `api.github.com` were flaky/degraded for hours — sometimes the entry
   script fetched fine but a component file failed, sometimes DNS for the
   domain came back with a spoofed extra IP (`1.1.1.1` mixed into the real
@@ -681,7 +681,16 @@ project names here — same public-repo constraint as README.md.
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
-  server's hostname, individual people's names, or names of
-  unpublished/draft projects discussed in chat — keep those in
+  server's hostname, ISP/provider names, individual people's names, or
+  names of unpublished/draft projects discussed in chat — keep those in
   conversation only. Scrub before any commit touching README/comments if
   such details crept in from chat context.
+- Servers/providers mentioned across incident notes below are
+  anonymized as `Server A`/`Server B`/etc. and `Provider A`/`Provider
+  B`/etc. — a consistent codename per real server/ISP, not per incident,
+  so cross-references between sections still resolve to the same
+  physical box. 2026-08-26: retroactively scrubbed real hostnames/ISP
+  names (that had crept in from chat context over several prior
+  sessions) throughout this file to these codenames — if you're adding a
+  new incident note, use the existing codename for a server/provider
+  already in this document, or the next free letter for a new one.
