@@ -524,6 +524,26 @@ project names here — same public-repo constraint as README.md.
   `docker compose exec -T -e MYSQL_PWD="$MYSQL_PASSWORD" mysql mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -e "..."`
   from `$ZENITH_DIR` (same pattern as `z0r`'s own `zenith_mysql_query()`),
   not a bare `mysql -u... -p...` — that fails with "команда не найдена".
+- **`zenith_autorun.sh` never actually called `sync_client.py` — found
+  2026-08-24 on miha (MTS, hub-and-spoke node).** README documents the
+  hub-and-spoke design as "после `main.py` шлёт `sync_client.py push`",
+  but that line only ever described the manual/cron workflow —
+  `zenith_autorun.sh` (the only thing actually running on a schedule,
+  via `zenith-autorun.service`) never called `sync_client.py` at all.
+  Live symptom: panel showed **0 genomes** for the node for days while
+  `main.py` ran perfectly healthily on schedule and genomes accumulated
+  fine in the node's own local DB — nothing was ever being sent
+  upstream, so the panel had no way to know the node was doing anything.
+  Fixed: `zenith_autorun.sh` now calls `sync_client.py push --profile`
+  right after each `main.py` round, gated on `ZENITH_DB_MODE=docker` +
+  `PANEL_URL` set (hub-and-spoke specifically — an isolated node has
+  nothing to sync, and api mode has no local DB to export from, `db.py`
+  already writes straight to the panel per-call in that mode). If a
+  remote node's genome count still isn't moving on the panel after this
+  fix, check locally first (z0r item 19 → 2/3, or a direct DB query) to
+  confirm generation itself is actually happening before assuming sync
+  is broken again — the two failure modes look identical from the panel
+  side alone.
 
 ## z2r core install — GitHub is not reliable from every provider
 
