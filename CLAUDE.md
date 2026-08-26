@@ -544,6 +544,43 @@ project names here — same public-repo constraint as README.md.
   confirm generation itself is actually happening before assuming sync
   is broken again — the two failure modes look identical from the panel
   side alone.
+- **The real reason miha showed 0 genomes was deeper than the missing
+  sync call above — found 2026-08-26.** `sandbox/setup_sandbox.sh`
+  (one-time: creates `zenith-sandbox`/`zenith-voice-bot` users +
+  NFQUEUE iptables rules) had been run, but `sandbox/start_sandbox.sh`
+  (generates `nfqws2_sandbox.conf` from the template on first use) never
+  had been — `orchestrator/sandbox_apply.py::apply_raw()` raised an
+  unhandled `RuntimeError` on the very first genome (`seed`) of every
+  TCP-profile round (YT_TLS/RKN_TLS/DS_TLS), crashing `main.py`
+  immediately. `zenith_autorun.sh` never checked `main.py`'s exit code
+  and unconditionally logged `"$profile завершён"` regardless — for
+  days, the log looked like normal 20-round completions while zero
+  genomes were ever generated or stored locally for any TCP profile
+  (only VOICE_UDP, which doesn't hit this code path, actually ran).
+  Fixed both ends: `sandbox_apply.py` now calls `start_sandbox.sh`
+  itself when the conf is missing (its own docstring already says it's
+  "cheap and safe to restart often" and it already knows how to
+  bootstrap the conf from the template) instead of raising immediately
+  — only errors out if `start_sandbox.sh` itself fails, which is the
+  real signal that the one-time `setup_sandbox.sh` was never run (that
+  one stays manual, deliberately not auto-triggered — it's a real
+  iptables/user change). `zenith_autorun.sh` now checks `main.py`'s
+  exit code and logs a loud warning with the code instead of pretending
+  the profile finished normally when it crashed. **Lesson for next
+  time:** a periodic automation script that never checks the exit code
+  of the thing it's automating can mask a 100%-failure-rate bug for
+  days behind cheerful-looking log lines — this is worth grepping for
+  in any other `*.sh` loop that calls into a subprocess and always
+  prints a "done" message unconditionally afterward.
+- Separately noticed on the same miha run: VOICE_UDP's control-genome
+  check was *also* failing instantly (`0 bytes, 0ms`) alongside every
+  mutated genome, tripping "ПОДОЗРЕНИЕ НА БАН ПОДТВЕРЖДЕНО" — instant
+  zero-byte failures on literally everything including control look
+  much more like `z2r_test-voice-bot`'s `/probe` endpoint being
+  unreachable on that node (bot not installed/running) than a real
+  Discord UDP block, but this wasn't confirmed live — check Discord_bot
+  status (z0r item 14) before trusting a VOICE_UDP "ban" verdict from a
+  node where the voice bot's own status hasn't been verified.
 
 ## z2r core install — GitHub is not reliable from every provider
 
