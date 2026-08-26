@@ -593,7 +593,17 @@ project names here — same public-repo constraint as README.md.
   just in the *sandbox's own* template this time, not the production
   config. Fixed: template now uses a `__FAKE_DIR__` placeholder,
   resolved in `start_sandbox.sh` with the same prefer-zapret2-else-
-  zator detection as `_z2r_detect_base()`. **Caveat when picking this
+  zator detection as `_z2r_detect_base()` — **first attempt at this
+  checked `[ -d ".../files/fake" ]` (directory existence) and still
+  picked the wrong side**, because on miha `/opt/zapret2/files/fake`
+  exists as an empty/incomplete directory — the exact same "cannot
+  access file" error persisted even with the fix deployed. Corrected to
+  probe for the specific file the template actually needs
+  (`tls_clienthello_max_ru.bin`), not just the directory — a lesson for
+  any future base-detection code in this codebase: prefer probing for
+  the actual file/thing you need over a directory-existence check,
+  since installers can leave stub/partial directories on the wrong
+  side. **Caveat when picking this
   fix up on an already-broken node:** `start_sandbox.sh` only
   regenerates `nfqws2_sandbox.conf` from the template `if [ ! -f
   "$LIVE_CONF" ]` — a stale conf already written to disk from a
