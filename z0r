@@ -1878,10 +1878,71 @@ install_zenith_service() {
 # установлена, просто дублирует start/stop/log поверх ЭТИХ ЖЕ юнитов.
 # Читает ZENITH_PROFILES из .env для отображения в меню -- пусто = все 4
 # (YT_TLS/RKN_TLS/DS_TLS/VOICE_UDP), см. zenith_autorun.sh/auto_promoter.py,
-# которые читают ЭТУ ЖЕ переменную напрямую.
+# которые читают ЭТУ ЖЕ переменную напрямую. GV_TLS (добавлен в Zenith
+# 2026-08-26) НЕ входит в дефолт по той же причине, что и в
+# zenith_autorun.sh -- резолвинг тестового URL через yt-dlp идёт мимо
+# песочницы, зависит от обычной сети хоста до youtube.com. Разрешён как
+# явный выбор здесь (см. валидацию в пункте 5 ниже), но включать стоит
+# только после ручной проверки (main.py --profile GV_TLS) на этом сервере.
 zenith_profiles_display() {
   local val; val="$(zenith_env_get ZENITH_PROFILES)"
   echo "${val:-все (YT_TLS,RKN_TLS,DS_TLS,VOICE_UDP)}"
+}
+
+# Читает Environment=VAR=... из systemd drop-in zenith-autorun (если есть),
+# иначе дефолт из самого zenith_autorun.sh (ZENITH_AUTORUN_ROUNDS=20,
+# ZENITH_AUTORUN_INTERVAL_MINUTES=240, см. её же докстринг).
+_zenith_autorun_dropin="/etc/systemd/system/zenith-autorun.service.d/override.conf"
+zenith_autorun_get_setting() {
+  local var="$1" default="$2" val
+  [ -f "$_zenith_autorun_dropin" ] || { echo "$default"; return; }
+  val="$(grep -E "^Environment=${var}=" "$_zenith_autorun_dropin" 2>/dev/null | tail -1 | cut -d= -f3-)"
+  echo "${val:-$default}"
+}
+
+# Пункт 6 автономного меню -- количество раундов на один заход профиля и
+# интервал между переключением профилей, раньше правились только руками
+# через systemd drop-in (см. закомментированный пример в самом
+# zenith-autorun.service). Пишет ОБА значения разом в один drop-in файл --
+# перезаписывать существующий частично, сохраняя оставленное руками,
+# не пытаемся: раз меню теперь единственный способ это менять, drop-in
+# полностью под его управлением.
+zenith_autorun_config_menu() {
+  local cur_rounds cur_interval new_rounds new_interval
+  cur_rounds="$(zenith_autorun_get_setting ZENITH_AUTORUN_ROUNDS 20)"
+  cur_interval="$(zenith_autorun_get_setting ZENITH_AUTORUN_INTERVAL_MINUTES 240)"
+  echo ""
+  echo "=== Настройки zenith-autorun ==="
+  echo "Текущее: $cur_rounds раундов за заход, $cur_interval минут между профилями."
+  read -re -p "Раундов за заход [Enter -- оставить $cur_rounds]: " new_rounds
+  new_rounds="${new_rounds:-$cur_rounds}"
+  if ! printf '%s' "$new_rounds" | grep -Eq '^[0-9]+$' || [ "$new_rounds" -lt 1 ]; then
+    echo "Должно быть положительное целое число, отмена." >&2
+    return 1
+  fi
+  read -re -p "Интервал между профилями, минут [Enter -- оставить $cur_interval]: " new_interval
+  new_interval="${new_interval:-$cur_interval}"
+  if ! printf '%s' "$new_interval" | grep -Eq '^[0-9]+$' || [ "$new_interval" -lt 1 ]; then
+    echo "Должно быть положительное целое число, отмена." >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$_zenith_autorun_dropin")"
+  {
+    echo "[Service]"
+    echo "Environment=ZENITH_AUTORUN_ROUNDS=$new_rounds"
+    echo "Environment=ZENITH_AUTORUN_INTERVAL_MINUTES=$new_interval"
+  } > "$_zenith_autorun_dropin"
+  systemctl daemon-reload
+  echo "Сохранено: $new_rounds раундов, $new_interval минут между профилями."
+  if [ "$(get_zenith_autorun_status)" = "ON" ]; then
+    read -re -p "zenith-autorun сейчас работает -- перезапустить, чтобы применить сразу? [y/N]: " ans
+    case "$ans" in
+      y|Y) systemctl restart zenith-autorun; echo "Перезапущен." ;;
+      *) echo "Применится при следующем естественном перезапуске сервиса." ;;
+    esac
+  else
+    echo "Применится при следующем включении (пункт 1)."
+  fi
 }
 
 # Вынесено из zenith_autonomy_menu(), чтобы дёргать тем же кодом и из
@@ -1922,6 +1983,7 @@ zenith_autonomy_menu() {
     echo "  3) Лог zenith-autorun (journalctl -f, Ctrl+C для выхода)"
     echo "  4) Лог zenith-promoter (journalctl -f, Ctrl+C для выхода)"
     echo "  5) Профили: $(zenith_profiles_display)"
+    echo "  6) Настройки zenith-autorun (раундов за заход: $(zenith_autorun_get_setting ZENITH_AUTORUN_ROUNDS 20), интервал: $(zenith_autorun_get_setting ZENITH_AUTORUN_INTERVAL_MINUTES 240)м)"
     echo "  0) Назад"
     echo ""
     read -re -p "Автономный режим > " achoice
@@ -1944,23 +2006,26 @@ zenith_autonomy_menu() {
         [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 19)." >&2; continue; }
         echo ""
         echo "Текущий выбор: $(zenith_profiles_display)"
-        echo "Доступные профили: YT_TLS RKN_TLS DS_TLS VOICE_UDP"
-        read -re -p "Профили через запятую/пробел (Enter — все 4): " psel
+        echo "Доступные профили: YT_TLS GV_TLS RKN_TLS DS_TLS VOICE_UDP"
+        echo "(GV_TLS резолвит тестовый URL через yt-dlp мимо песочницы -- проверь"
+        echo "руками на этом сервере перед тем как включать сюда: cd $ZENITH_DIR/orchestrator"
+        echo "&& sudo venv/bin/python3 main.py --profile GV_TLS --rounds 5)"
+        read -re -p "Профили через запятую/пробел (Enter — все 4 стандартных): " psel
         if [ -z "$psel" ]; then
           if grep -q '^ZENITH_PROFILES=' "$ZENITH_DIR/.env" 2>/dev/null; then
             sed -i 's/^ZENITH_PROFILES=.*/ZENITH_PROFILES=/' "$ZENITH_DIR/.env"
           else
             echo "ZENITH_PROFILES=" >> "$ZENITH_DIR/.env"
           fi
-          echo "Автономный режим будет работать со всеми 4 профилями."
+          echo "Автономный режим будет работать со всеми 4 стандартными профилями (без GV_TLS)."
         else
           local norm tok valid=1 out=""
           norm="$(echo "$psel" | tr ',' ' ')"
           for tok in $norm; do
             case "$tok" in
-              YT_TLS|RKN_TLS|DS_TLS|VOICE_UDP) out="${out:+$out,}$tok" ;;
+              YT_TLS|GV_TLS|RKN_TLS|DS_TLS|VOICE_UDP) out="${out:+$out,}$tok" ;;
               "") ;;
-              *) echo "Неизвестный профиль: $tok (доступны: YT_TLS RKN_TLS DS_TLS VOICE_UDP)" >&2; valid=0 ;;
+              *) echo "Неизвестный профиль: $tok (доступны: YT_TLS GV_TLS RKN_TLS DS_TLS VOICE_UDP)" >&2; valid=0 ;;
             esac
           done
           if [ "$valid" = "1" ] && [ -n "$out" ]; then
@@ -1976,6 +2041,7 @@ zenith_autonomy_menu() {
           fi
         fi
         ;;
+      6) zenith_autorun_config_menu ;;
       0|q|Q|"") return 0 ;;
       *) echo "Неизвестный выбор." ;;
     esac

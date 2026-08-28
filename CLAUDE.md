@@ -560,6 +560,17 @@ project names here — same public-repo constraint as README.md.
   renumbering" below), same on-demand-clone pattern as item 21's Discord bot.
 - Scaffold-only as of this writing — mutation/UCB/crossover logic not yet
   ported into it.
+- 2026-08-27: added `GV_TLS` as a real, testable Zenith profile (real
+  filter block sourced from a live prod config + dynamic per-round
+  `yt-dlp` URL resolution, see `orchestrator/gv_resolver.py`) — not just
+  a stub anymore. Deliberately kept OUT of `zenith_autorun.sh`'s default
+  rotation (same yt-dlp-bypasses-the-sandbox dependency risk documented
+  under "Test domains" for z2r's own profile 2/5) — opt-in only, via z0r
+  19 → 4 → 5 (профили) after confirming `main.py --profile GV_TLS
+  --rounds 5` works on that specific server first. Also added z0r 19 → 4
+  → 6, a menu-driven way to set `ZENITH_AUTORUN_ROUNDS`/
+  `ZENITH_AUTORUN_INTERVAL_MINUTES` via a systemd drop-in instead of
+  hand-editing `zenith-autorun.service`.
 - Production panel host (Server A) has its own `Zenith/` checkout on `main`,
   independently ahead in places (its own unrelated commits, e.g.
   `create_remote_db_user.sh` work) but *behind* our feature branches —
