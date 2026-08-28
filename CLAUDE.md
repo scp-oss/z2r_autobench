@@ -417,9 +417,11 @@ project names here — same public-repo constraint as README.md.
   ordinary local `connect()`, so it hits the same `OUTPUT` chain).
   Confirmed working end-to-end on Server A with an unmodified Telegram
   client over the existing VLESS tunnel.
-- Installed via z0r menu item 20 (manage)/30 (uninstall) (renumbered
-  2026-08-24, see "z0r main menu renumbering" below), same on-demand-clone
-  pattern as Zenith's 19/29 — but note its shipped
+- Installed via z0r menu item 21 (manage)/31 (uninstall) (renumbered
+  2026-08-28 when autotune-daemon moved to the main menu, was 20/30 — see
+  "autotune-daemon moved to main menu" below; before that, 2026-08-24, see
+  "z0r main menu renumbering"), same on-demand-clone pattern as Zenith's
+  20/30 — but note its shipped
   `relay/tg-transparent-relay.service` hardcodes `/opt/Zenith-TG`
   (how it was first deployed by hand); `manage_tg_relay()` in `z0r`
   `sed`-rewrites that path to the real `$TGRELAY_DIR` before installing
@@ -480,6 +482,60 @@ project names here — same public-repo constraint as README.md.
   packet dump) for a working (iOS) vs failing (Android) client hitting
   the same connector, diff them.
 
+## autotune-daemon moved to main menu (2026-08-28)
+
+- `manage_daemon()` (autotune-daemon control) had been living as item 5
+  inside the Zenith submenu since 2026-08-23 (see "autotune-daemon vs
+  Zenith" above) purely for UX convenience — but this was architecturally
+  wrong: autotune-daemon works directly on z2r strategies
+  (`rank_strategies.sh`/`rank_quic.sh` + `set_strategy_cli.sh`) and has no
+  dependency on Zenith or its genome DB at all. Moved to the top-level
+  main menu as its own item, next to the other strategy-selection tools
+  (`Тест домена`/`Ручное переключение стратегии`/`Тест YouTube Shorts`),
+  since that's the section it actually belongs to functionally.
+- Removed item 5 from `zenith_menu()`'s own submenu entirely (was purely a
+  navigational shortcut into the same `manage_daemon()` function — no
+  behavior lost, just one fewer way to reach the same place).
+- Inserted as new top-level item 14 (right after item 13, "Тест YouTube
+  Shorts"), which pushed every subsequent top-level item up by exactly
+  one. Old → new mapping (every in-script "пункт N" reference and
+  comment in `z0r` was re-swept and updated in the same pass — grep
+  `пункт [0-9]` in `z0r` before assuming a number if this note goes
+  stale; the same sweep also caught and fixed now-stale "z0r пункт N"
+  cross-references in `z0r-panel` (`.env.example`, `autoupdate_ctl.py`,
+  `main.py`, `README.md`, `templates/nodes.html`,
+  `templates/controls.html`) and in `zenith/README.md` — some of which
+  were already stale from the *previous* (2026-08-24) renumbering and had
+  never been caught until this pass, a reminder that a menu renumbering
+  in `z0r` is not "done" until sibling repos referencing z0r item numbers
+  by hand are swept too, not just `z0r` itself):
+  ```
+  (new) 14  autotune-daemon             (inserted here)
+  14 -> 15  Запустить меню z2r
+  15 -> 16  Проверка DNSCrypt на дырявость
+  16 -> 17  Zapret сервис
+  17 -> 18  zenith-promoter (быстрый доступ)
+  18 -> 19  DNSCrypt-proxy
+  19 -> 20  Zenith
+  20 -> 21  Zenith-TG
+  21 -> 22  Discord_bot
+  22 -> 23  web_panel
+  23 -> 24  Автообновление
+  24 -> 25  Удалить z2r
+  25 -> 26  Удалить autotune-daemon
+  26 -> 27  Удалить Discord_bot
+  27 -> 28  Удалить web_panel
+  28 -> 29  Удалить z2r_autobench
+  29 -> 30  Удалить Zenith
+  30 -> 31  Удалить Zenith-TG
+  31 -> 32  Удалить DNSCrypt-proxy
+  ```
+  Items `1-13` (profile IDs, число проходов, ручное переключение, тест
+  YouTube Shorts) and `111`/`999`/`0` are unchanged, same rule as the
+  2026-08-24 renumbering. Nested submenu numbering (Zenith's own `1-4`,
+  its autonomy submenu's own `1-6`) is untouched — separate namespace,
+  see the note above.
+
 ## z0r main menu renumbering (2026-08-24)
 
 - Items `1-9` (profile IDs) and `111`/`999`/`0` are **never** renumbered —
@@ -515,24 +571,30 @@ project names here — same public-repo constraint as README.md.
   often for a quick check/toggle (DNSCrypt leak check, Zapret service
   restart, zenith-promoter quick toggle) — user's own ordering choice,
   not mine.
-- Nested submenu numbering (Zenith's own `1-5` inside item 19, autonomy
-  menu's own `1-5` inside 19→4) is a **separate namespace**, untouched by
-  this renumbering — a comment saying "пункт 3" inside `zenith_menu`/
-  `zenith_autonomy_menu` code means that submenu's own item 3, not a
-  top-level item.
+- Nested submenu numbering (Zenith's own `1-4` inside its top-level item,
+  autonomy menu's own `1-6` inside that submenu's item 4) is a **separate
+  namespace**, untouched by this or any later top-level renumbering — a
+  comment saying "пункт 3" inside `zenith_menu`/`zenith_autonomy_menu`
+  code means that submenu's own item 3, not a top-level item. (Zenith's
+  own submenu item numbers, `1-4`, have stayed stable since this note was
+  written even though the top-level item pointing at it moved from 19 to
+  20 on 2026-08-28 — see "autotune-daemon moved to main menu" below.)
 
 ## autotune-daemon vs Zenith — two independent auto-tuners, not layers (since 2026-08-23)
 
 - `autotune-daemon` (this repo, `autotune_daemon.sh`) and Zenith
   (`zenith-autorun`/`zenith-promoter`, separate repo, see below) are **two
-  fully independent systems**, not parts of one another, despite both
-  living under z0r menu item 19 (Zenith, renumbered 2026-08-24 — was 22,
-  see "z0r main menu renumbering" below) as of this note — user asked to
-  move autotune-daemon's control entry (originally menu item 13 → item
-  22 → 5, now item 19 → 5 after the same renumbering) into
-  the Zenith submenu purely for UX convenience ("one place for all
-  auto-tuning"), explicitly NOT as a functional merge. Nothing about
-  their behavior changed; they still don't know about each other.
+  fully independent systems**, not parts of one another. From
+  2026-08-23 to 2026-08-28 `manage_daemon()`'s control entry lived
+  nested inside the Zenith submenu (originally menu item 13 → item 22 →
+  5, then item 19 → 5 after the 2026-08-24 renumbering) purely for UX
+  convenience ("one place for all auto-tuning"), explicitly NOT as a
+  functional merge — but this was architecturally confusing precisely
+  because autotune-daemon works on z2r strategies directly and has
+  nothing to do with Zenith. Moved back out to the top-level main menu
+  as its own item 2026-08-28 — see "autotune-daemon moved to main menu"
+  below. Nothing about either system's actual behavior changed in either
+  move; they still don't know about each other.
 - `autotune-daemon` predates Zenith: it's the simpler, DB-less mechanism
   built into z2r_autobench itself — periodically reruns
   `rank_strategies.sh`/`rank_quic.sh` inside a single profile's own
@@ -555,9 +617,10 @@ project names here — same public-repo constraint as README.md.
   `--lua-desync=` parameters), not part of this repo. Talks to production
   only via `set_strategy_cli.sh set/get/max` — never touches
   `/opt/zapret2` directly. MySQL-backed (`db/schema.sql`), docker-compose
-  based, no systemd. Installed via z0r menu item 19 (manage)/29
-  (uninstall) (renumbered 2026-08-24, was 22/23 — see "z0r main menu
-  renumbering" below), same on-demand-clone pattern as item 21's Discord bot.
+  based, no systemd. Installed via z0r menu item 20 (manage)/30
+  (uninstall) (renumbered 2026-08-28 when autotune-daemon moved to the
+  main menu, was 19/29 — see "autotune-daemon moved to main menu" below),
+  same on-demand-clone pattern as item 22's Discord bot.
 - Scaffold-only as of this writing — mutation/UCB/crossover logic not yet
   ported into it.
 - 2026-08-27: added `GV_TLS` as a real, testable Zenith profile (real
