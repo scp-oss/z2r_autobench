@@ -829,6 +829,32 @@ project names here — same public-repo constraint as README.md.
   and, left running, spins forever re-reading now-deleted hostlist files,
   flooding the terminal. Learned the hard way via item 999 on a live box.
 
+## rkn_list_cli.sh — panel-facing view/add for the RKN_TLS production hostlist (since 2026-08-29)
+
+- Added because `z0r-panel`'s new `/rkn` page needed a way to show and
+  extend the actual production hostlist that `nfqws2` uses to route
+  traffic through RKN_TLS — separate from Zenith's own tiny `domain_pool`
+  seed rows (2 entries, only used to pick random test targets during
+  genome tuning runs, never read by `nfqws2` itself). Confusing these two
+  was a live risk: the panel's `/rkn` page originally only showed
+  `domain_pool`, and a user reasonably assumed that WAS the RKN list.
+- Same split `test_custom_domain.sh --add-to-rkn` already used:
+  `$Z2R_BASE/extra_strats/TCP_RKN_list.txt` is the official list
+  (read-only from this script — never appended to, it's maintained by
+  the z2r installer/upstream source), `TCP_Custom.txt` is where manual
+  additions go, same routing effect (both get matched via
+  `detect_governing_profile()`'s hostlist grep — see that function). New
+  script doesn't source `z2r_autobench_lib.sh` (that requires a live
+  `config.sh`/`orchestra_state.sh`/`netcheck.sh` under `z2r_lib/`, far
+  more than this needs) — inlines just the `_z2r_detect_base()` snippet,
+  same idiom `z0r`'s own top-level menu already uses for the same reason
+  (see "/opt/zapret2 vs /opt/zator" above) — keep both inline copies in
+  sync if the detection logic in the real library ever changes.
+- Sudoers grant added to `ensure_panel_runtime_grants()`'s existing
+  literal-command allowlist (`list` takes no args so no trailing `*`;
+  `add *` does, one domain argument) — panel calls it the same way it
+  already calls `set_strategy_cli.sh`, no new privilege class introduced.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
