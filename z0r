@@ -2408,8 +2408,17 @@ ensure_panel_runtime_grants() {
   # тут не нужно, в отличие от sudoers_run_cmd (у main.py своего лока нет).
   local sudoers_funnel_cmd="/usr/bin/bash $INSTALL_DIR/rank_strategies.sh --domain *"
 
+  # Список "экзотических" доменов со СВОЕЙ отдельной стратегией каждый
+  # (см. custom_domain_cli.sh, 2026-08-29) -- list/remove без аргументов-
+  # доменов с звёздочкой отдельно от add: add САМ дописывает НОВЫЙ блок в
+  # /opt/zapret2/config (самая рискованная операция во всей цепочке, см.
+  # докстринг скрипта) -- без --yes только печатает превью и ничего не
+  # меняет, так что sudoers-грант матчит ОБА варианта одной командой
+  # (жадный хвостовой "*" покрывает и "example.com", и "example.com --yes").
+  local sudoers_custom_domain_cmds="/usr/bin/bash $INSTALL_DIR/custom_domain_cli.sh list, /usr/bin/bash $INSTALL_DIR/custom_domain_cli.sh add *, /usr/bin/bash $INSTALL_DIR/custom_domain_cli.sh remove *"
+
   local sudoers_file="/etc/sudoers.d/zenith-panel"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds, $sudoers_funnel_cmd"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds, $sudoers_funnel_cmd, $sudoers_custom_domain_cmds"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"

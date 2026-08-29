@@ -126,6 +126,7 @@ print_progress_done() {
 #      ничего не регистрирует.
 z2r_detect_governing_profile() {
   local d="$1" add_to_rkn="${2:-0}"
+  local custom_registry="$ORCH_DIR/custom_domains.tsv"
   if grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_YT_list.txt" 2>/dev/null; then
     echo "1 tls YT_TLS"
   elif grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_Discord.txt" 2>/dev/null; then
@@ -133,6 +134,16 @@ z2r_detect_governing_profile() {
   elif grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_RKN_list.txt" 2>/dev/null \
     || grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_Custom.txt" 2>/dev/null; then
     echo "3 tls RKN_TLS"
+  elif [ -f "$custom_registry" ] && awk -F'\t' -v d="$d" 'tolower($1)==d {found=1; exit} END{exit !found}' "$custom_registry" 2>/dev/null; then
+    # Экзотический домен со СВОИМ отдельным профилем (см.
+    # custom_domain_cli.sh, 2026-08-29) -- у него уже есть независимая
+    # стратегия, отдельная от RKN_TLS/фолбэка, роутить его дальше по
+    # старой логике (fallback/add_to_rkn) было бы неверно. awk, не grep
+    # -- поле разделено табом, а не "^d\t" буквальным паттерном (grep не
+    # везде переносимо интерпретирует \t в паттерне).
+    local custom_profile
+    custom_profile="$(awk -F'\t' -v d="$d" 'tolower($1)==d {print $2; exit}' "$custom_registry")"
+    echo "$custom_profile tls CUSTOM_${custom_profile}"
   else
     if [ "$add_to_rkn" = "1" ]; then
       local cf="$Z2R_BASE/extra_strats/TCP_Custom.txt"

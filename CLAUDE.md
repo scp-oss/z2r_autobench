@@ -928,6 +928,85 @@ project names here — same public-repo constraint as README.md.
   `sudoers_run_cmd`, matches any combination of `--funnel`/`--passes`/
   `--settle`/`--attempts` that follows).
 
+## custom_domain_cli.sh — exotic domains with their own independent strategy (since 2026-08-29)
+
+- Different problem from the RKN list: under RKN_TLS (or any other
+  profile), EVERY domain shares ONE locked strategy — that's the
+  architecture (one hostlist → one `circular_locked` key). Live request:
+  some domains need a strategy no shared profile's own works for, without
+  affecting any other domain. There's no way to give one domain a truly
+  independent, simultaneously-active strategy in this architecture except
+  giving it its own hostlist + its own `circular_locked` key — i.e. its
+  own small profile block in `/opt/zapret2/config`.
+- **Never invents nfqws2 syntax from scratch.** Nobody working on this
+  repo has ever seen a real, live `/opt/zapret2/config` — every existing
+  tool here only *edits* an already-existing block (bump `strategy=`,
+  read `circular_locked:key=N`) via generic text matching, never
+  generates new directives. Guessing at `--filter-tcp=`/`--lua-desync=`
+  syntax to fabricate a brand-new block risks a malformed config that
+  fails `nfqws2` on its next restart, with no way to catch it here (no
+  exec access to any server). Instead: **clone the real RKN_TLS block
+  verbatim** (`circular_locked:key=3` — per `promote_apply_cli.sh`'s own
+  docstring, RKN_TLS/YT_TLS are "TEMPLATE"-style: their own dispatcher
+  block is tiny, just `--hostlist=`/`--import=z2r_tcp_tls_common`/
+  `circular_locked:key=N`, no `strategy=` lines of its own, those live in
+  the shared template) out of the live config, then patch exactly two
+  things in the copy: the `--hostlist=` path (→ a new one-line,
+  domain-only hostlist file) and `circular_locked:key=3` (→ a freshly
+  allocated number). Whatever the real surrounding syntax is, it's
+  copied, not guessed — and the new profile automatically inherits the
+  full `z2r_tcp_tls_common` strategy catalog with its own independent
+  lock, so `rank_strategies.sh --funnel`/`--domain` work against it with
+  zero further changes needed there.
+- Block boundaries are found by content, not a known header: scan for the
+  ONE line matching `circular_locked:key=N` (word-boundary regex, so
+  `key=3` never matches `key=30`), then walk backward/forward to the
+  nearest `--new` line on each side (same "`--new` separates independent
+  blocks" rule as everywhere else in this file). Refuses loudly if the
+  key match isn't found exactly once — never guesses which block on an
+  ambiguous match.
+- New profile numbers are self-allocated, never hardcoded: max of (every
+  `circular_locked:key=N` actually found in the live config) and (every
+  number already in this tool's own registry), floor `20` — self-
+  protecting against collision with the real 1-9 profiles or anything a
+  human already added by hand in the 20+ range, without needing to know
+  in advance what's really in the file.
+- **`add` requires an explicit `--yes` to actually write** — without it,
+  it's a pure preview (prints the exact new block, or the refusal reason,
+  to stderr; touches nothing). This is the one piece of this whole
+  engagement's tooling that structurally appends a brand-new block rather
+  than editing an existing one — the preview gate exists specifically so
+  a human reviews the generated text against the real donor block before
+  it ever reaches the live file. Backup is still mandatory before the
+  real write regardless (`config.custom_domain_backup.<ts>`, same idiom
+  as `promote_apply_cli.sh`) — restart of `zapret2` afterward is a manual
+  step (printed in the output), never automatic, same principle as
+  `set_strategy_cli.sh set`.
+- Shares its config-write lock file (`config.promote.lock`) with
+  `promote_apply_cli.sh` on purpose — both structurally rewrite
+  `/opt/zapret2/config` (not just flip a `strategy=N` inside an existing
+  block), so a race between the two is worse than a race between two
+  ordinary strategy switches.
+- **If the domain is already governed by an existing profile — refuse
+  with a warning, don't create a second conflicting one.** Checked
+  against `TCP_YT_list.txt`/`TCP_Discord.txt`/`TCP_RKN_list.txt`/
+  `TCP_Custom.txt` directly (not `z2r_detect_governing_profile()`'s
+  fallback-catching version, which would call an unmatched domain
+  "Fallback_TLS" — that's exactly the shared-strategy problem this tool
+  exists to solve, so "not explicitly matched anywhere" is precisely the
+  eligible case, not a rejection).
+- `z2r_detect_governing_profile()` now ALSO checks this tool's own
+  registry (`$ORCH_DIR/custom_domains.tsv`) before falling through to the
+  Fallback_TLS default — so `rank_strategies.sh --domain`/
+  `test_custom_domain.sh` correctly route an already-registered exotic
+  domain to its own profile instead of re-detecting it as unmanaged.
+- `remove` deliberately does NOT delete the block from the live config —
+  same risk class as creating one, except worse (editing `--new`
+  boundaries in a file a running `nfqws2` process may be reading at that
+  exact moment). It only empties the domain's one-line hostlist file —
+  the block stops matching anything and goes inert, harmlessly, without
+  ever touching config structure again.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
