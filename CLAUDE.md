@@ -854,6 +854,18 @@ project names here — same public-repo constraint as README.md.
   literal-command allowlist (`list` takes no args so no trailing `*`;
   `add *` does, one domain argument) — panel calls it the same way it
   already calls `set_strategy_cli.sh`, no new privilege class introduced.
+- `remove <domain>` added 2026-08-29 same day, right after `add` shipped
+  (panel UX pass needed delete for the production list too) — deliberately
+  ONLY touches `TCP_Custom.txt`, refuses with a clear message if the
+  domain is only in the official `TCP_RKN_list.txt` (that file stays
+  read-only from this script no matter what, see above). Live bug caught
+  by testing before this reached a server: `grep -vxi "$d" "$CUSTOM_LIST"
+  > "$CUSTOM_LIST.tmp" && mv ...` — `grep -v` returns exit code 1 when
+  its output is empty (exactly the case where the domain being removed
+  was the ONLY line in the file), so `&&` silently skipped the `mv` and
+  the "removed" domain was still there afterward. Fixed by splitting into
+  `grep ... || true` then an unconditional `mv`. Sudoers extended with
+  `remove *` alongside `add *`.
 
 ## Publishing hygiene
 

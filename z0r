@@ -2393,7 +2393,7 @@ ensure_panel_runtime_grants() {
   # см. rkn_list_cli.sh докстринг. "list" не принимает аргументов вообще,
   # поэтому без хвостового "*" (в отличие от "add *" ниже, где домен --
   # обязательный аргумент).
-  local sudoers_rkn_cmds="/usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh list, /usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh add *"
+  local sudoers_rkn_cmds="/usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh list, /usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh add *, /usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh remove *"
 
   local sudoers_file="/etc/sudoers.d/zenith-panel"
   local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds"
