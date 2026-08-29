@@ -111,6 +111,41 @@ print_progress_done() {
   # налезет на хвост бара.
   echo "" >&2
 }
+
+# Определяет, через какой РЕАЛЬНЫЙ числовой профиль маршрутизируется
+# произвольный домен (по хостлистам) — общая логика для
+# test_custom_domain.sh и rank_strategies.sh --domain (перенесена сюда
+# 2026-08-29, до этого была продублирована только в test_custom_domain.sh;
+# см. CLAUDE.md "/opt/zapret2 vs /opt/zator" про то, чем кончается
+# копипаста одной и той же логики путей по нескольким файлам). Печатает
+# "профиль proto title" через пробел.
+# $1 = домен, УЖЕ нормализованный (без протокола/пути, в нижнем регистре)
+# $2 = 1, чтобы при отсутствии домена во всех списках зарегистрировать
+#      его в TCP_Custom.txt и вернуть профиль 3 (RKN_TLS) вместо
+#      fallback-профиля 8; по умолчанию (0/не указан) — старое поведение,
+#      ничего не регистрирует.
+z2r_detect_governing_profile() {
+  local d="$1" add_to_rkn="${2:-0}"
+  if grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_YT_list.txt" 2>/dev/null; then
+    echo "1 tls YT_TLS"
+  elif grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_Discord.txt" 2>/dev/null; then
+    echo "4 tls DS_TLS"
+  elif grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_RKN_list.txt" 2>/dev/null \
+    || grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_Custom.txt" 2>/dev/null; then
+    echo "3 tls RKN_TLS"
+  else
+    if [ "$add_to_rkn" = "1" ]; then
+      local cf="$Z2R_BASE/extra_strats/TCP_Custom.txt"
+      mkdir -p "$(dirname "$cf")"; touch "$cf"
+      if ! grep -qxi "$d" "$cf" 2>/dev/null; then
+        echo "$d" >> "$cf"
+      fi
+      echo "3 tls RKN_TLS"
+    else
+      echo "8 tls Fallback_TLS"
+    fi
+  fi
+}
 THROUGHPUT_TIMEOUT="${THROUGHPUT_TIMEOUT:-4}"
 
 # Раньше probe_url() засчитывала успех, если прошёл ХОТЯ БЫ ОДИН из

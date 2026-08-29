@@ -2395,8 +2395,21 @@ ensure_panel_runtime_grants() {
   # обязательный аргумент).
   local sudoers_rkn_cmds="/usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh list, /usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh add *, /usr/bin/bash $INSTALL_DIR/rkn_list_cli.sh remove *"
 
+  # "Воронка" на /controls для кастомного домена (см. z0r-panel/
+  # funnel_runner.py, 2026-08-29) — rank_strategies.sh --domain, режим
+  # --funnel напрямую переключает БОЕВУЮ стратегию профиля (в отличие от
+  # sudoers_run_cmd выше, который только запускает Zenith'овский main.py в
+  # изолированной песочнице). Один хвостовой "*" после "--domain" —
+  # тот же приём, что у sudoers_run_cmd (см. её же комментарий) — жадный
+  # glob матчит и "--domain x.com", и "--domain x.com --funnel --passes 3
+  # --settle 3 --attempts 2" разом. rank_strategies.sh сам уже не даёт
+  # запустить второй перебор поверх первого (acquire_tune_lock/
+  # TUNE_LOCK_FILE, см. z2r_autobench_lib.sh) — никакого flock-обёртывания
+  # тут не нужно, в отличие от sudoers_run_cmd (у main.py своего лока нет).
+  local sudoers_funnel_cmd="/usr/bin/bash $INSTALL_DIR/rank_strategies.sh --domain *"
+
   local sudoers_file="/etc/sudoers.d/zenith-panel"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds, $sudoers_funnel_cmd"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"

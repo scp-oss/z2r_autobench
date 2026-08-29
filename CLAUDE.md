@@ -867,6 +867,67 @@ project names here — same public-repo constraint as README.md.
   `grep ... || true` then an unconditional `mv`. Sudoers extended with
   `remove *` alongside `add *`.
 
+## rank_strategies.sh --domain — funnel testing for an arbitrary domain (since 2026-08-29)
+
+- Added because the panel's "Стратегии" page needed a way to run the
+  existing `--funnel` mechanic (round 1 tests all strategies, round 2+
+  tests only survivors — see the file's own header comment) against a
+  single custom domain, not just the profile's hardcoded default URL
+  (`https://www.youtube.com/`, `https://meduza.io`, etc., see the
+  `case "$PROFILE" in` block). `test_custom_domain.sh` already accepted
+  arbitrary `--domain` but never had funnel narrowing (flat exhaustive
+  `for pass in 1..PASSES` testing ALL strategies every pass) — the two
+  tools stayed separate rather than merging `--funnel` into
+  `test_custom_domain.sh`, since that script's real reason to exist is
+  multi-domain intersection testing (find one strategy that works for
+  SEVERAL domains at once), a genuinely different job.
+- `--domain example.com` **overrides `--profile` entirely** — the domain
+  is routed through whichever real numeric profile actually governs it
+  (by hostlist membership), not whatever `--profile` the caller happened
+  to pass. Testing a domain through the "wrong" profile would be a false
+  test — it wouldn't reflect how that domain is actually routed in
+  production. `GV_ROTATE` (profile 2's per-pass googlevideo.com edge
+  rotation) is unreachable in this mode since the detector never returns
+  profile 2 for an arbitrary domain.
+- The domain→profile routing logic (`z2r_detect_governing_profile()`) was
+  **moved into `z2r_autobench_lib.sh`**, shared between this script and
+  `test_custom_domain.sh` (which now just calls it) — it used to be a
+  standalone copy inside `test_custom_domain.sh` only. Consolidating this
+  now, before a second caller could silently drift from the first, is the
+  direct lesson from the `/opt/zapret2`-vs-`/opt/zator` saga elsewhere in
+  this file: that whole five-bug chain in Zenith was caused by the exact
+  same filesystem-detection logic being copy-pasted into multiple files
+  and each copy having to be independently found and fixed. One domain
+  can register itself into `TCP_Custom.txt` as a side effect of this
+  function (`add_to_rkn=1` param) — `rank_strategies.sh --domain` always
+  passes `0` (never mutates hostlists as a side effect of a measurement
+  run); only `test_custom_domain.sh --add-to-rkn` opts into that.
+- Funnel mode now also prints a real-time stdout line per surviving
+  candidate (`strategy=N -> OK (bytes, проход P/PASSES)`) **in addition
+  to** the existing `RAW_FILE` TSV write — added purely for
+  `z0r-panel/funnel_runner.py` to show working candidates as they're
+  found instead of only at the end of a full pass. Non-funnel mode and
+  `RAW_FILE`'s own format are untouched; nothing that captures this
+  script's stdout via `$(...)` exists anywhere in this repo (verified by
+  grep before adding the line — `autotune_daemon.sh` only redirects with
+  `>>`, never captures), so this is a purely additive, non-breaking
+  change for every existing caller.
+- Panel wiring: `z0r-panel/funnel_runner.py` shells out to
+  `rank_strategies.sh --domain X --funnel --passes N [--settle S]
+  [--attempts A]` via `sudo -n bash`. **No extra `flock` wrapper needed**
+  — unlike the panel's other launcher (`runner.py`, which starts Zenith's
+  `orchestrator/main.py` and needed an external `RUN_LOCK_FILE` flock
+  because `main.py` has no locking of its own) `rank_strategies.sh`
+  already calls `acquire_tune_lock` internally (shared `TUNE_LOCK_FILE`
+  with `autotune_daemon.sh`/`rank_quic.sh`/`rank_voice.sh`/
+  `test_custom_domain.sh`) — a second launch while one is already running
+  just gets a clear "кто-то ещё сейчас крутит стратегии" failure from the
+  script itself. Sudoers grant in `z0r::ensure_panel_runtime_grants`:
+  `/usr/bin/bash $INSTALL_DIR/rank_strategies.sh --domain *` — one
+  trailing wildcard after `--domain` (same greedy-glob trick as
+  `sudoers_run_cmd`, matches any combination of `--funnel`/`--passes`/
+  `--settle`/`--attempts` that follows).
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

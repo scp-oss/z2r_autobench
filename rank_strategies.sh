@@ -10,7 +10,18 @@
 # (без --funnel) остаётся как есть — им пользуются, если нужно честно
 # перепроверить вообще все стратегии на каждом проходе.
 #
+# --domain example.com: тестировать конкретный домен вместо
+# захардкоженного URL профиля. Профиль ОПРЕДЕЛЯЕТСЯ ПО ДОМЕНУ (через
+# z2r_detect_governing_profile из z2r_autobench_lib.sh, та же логика, что
+# в test_custom_domain.sh) и переопределяет --profile, если оба заданы —
+# домен маршрутизируется через РЕАЛЬНЫЙ числовой профиль, гадать его
+# заранее руками не нужно (и нельзя протестировать домен через "не тот"
+# профиль — это была бы ложная проверка). GV_ROTATE (профиль 2, живой
+# эдж googlevideo.com на каждый проход) в этом режиме недостижим — детектор
+# никогда не возвращает профиль 2 для произвольного домена.
+#
 # Запуск: sudo ./rank_strategies.sh --profile 1 --passes 3 [--attempts N] [--settle SEC] [--funnel]
+#         sudo ./rank_strategies.sh --domain example.com --funnel --passes 3
 
 set -uo pipefail
 
@@ -22,6 +33,7 @@ ATTEMPTS_PER_STRATEGY="${ATTEMPTS_PER_STRATEGY:-2}"
 PROFILE="1"
 FUNNEL=0
 INCLUDE_CLONE=0
+DOMAIN=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,6 +43,7 @@ while [ $# -gt 0 ]; do
     --settle) SETTLE_SECONDS="$2"; shift 2 ;;
     --funnel) FUNNEL=1; shift ;;
     --include-clone-strategies) INCLUDE_CLONE=1; shift ;;
+    --domain) DOMAIN="$2"; shift 2 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -74,26 +87,44 @@ if ! zapret2_running; then
   exit 1
 fi
 
+# --domain переопределяет --profile целиком: домен маршрутизируется через
+# РЕАЛЬНЫЙ числовой профиль по хостлистам (та же логика, что в
+# test_custom_domain.sh, общая функция z2r_detect_governing_profile в
+# z2r_autobench_lib.sh) — угадывать профиль руками для конкретного домена
+# не нужно и рискованно (протестировать не через тот профиль — ложная
+# проверка, которая ничего не говорит о реальной маршрутизации домена).
+if [ -n "$DOMAIN" ]; then
+  DOMAIN="$(printf '%s' "$DOMAIN" | sed -E 's#^https?://##; s#/.*$##' | tr '[:upper:]' '[:lower:]')"
+  read -r PROFILE PROTO TITLE <<< "$(z2r_detect_governing_profile "$DOMAIN" 0)"
+  URL="https://$DOMAIN/"
+  IS_HTTP=0
+  echo "Домен $DOMAIN -> профиль $PROFILE ($TITLE)"
+fi
+
 # Не начинаем перебор, если кто-то другой (демон или второй ручной запуск)
 # уже крутит стратегии прямо сейчас — иначе оба прогона будут писать в
 # locked.tsv поверх друг друга и оба получат мусорные результаты.
-acquire_tune_lock "rank_strategies.sh --profile $PROFILE" 10 || exit 1
+acquire_tune_lock "rank_strategies.sh --profile $PROFILE${DOMAIN:+ --domain $DOMAIN}" 10 || exit 1
 
-case "$PROFILE" in
-  1) TITLE="YT_TLS/HTTP"; PROTO="tls http"; URL="https://www.youtube.com/"; IS_HTTP=0 ;;
-  2) TITLE="Googlevideo_TLS"; PROTO="tls"; URL="$(get_gv_test_url "$(gv_pick_video_id 1)")"; IS_HTTP=0 ;;
-  3) TITLE="RKN_TLS"; PROTO="tls"; URL="https://meduza.io"; IS_HTTP=0 ;;
-  4) TITLE="Discord_TLS"; PROTO="tls"; URL="https://discord.com/"; IS_HTTP=0 ;;
-  8) TITLE="Fallback_TLS"; PROTO="tls"; URL="https://rutracker.org"; IS_HTTP=0 ;;
-  9) TITLE="Fallback_HTTP"; PROTO="http"; URL="http://rutracker.org"; IS_HTTP=1 ;;
-  *) echo "Неизвестный/неподдерживаемый профиль: $PROFILE (доступны: 1,2,3,4,8,9)" >&2; exit 1 ;;
-esac
+if [ -z "$DOMAIN" ]; then
+  case "$PROFILE" in
+    1) TITLE="YT_TLS/HTTP"; PROTO="tls http"; URL="https://www.youtube.com/"; IS_HTTP=0 ;;
+    2) TITLE="Googlevideo_TLS"; PROTO="tls"; URL="$(get_gv_test_url "$(gv_pick_video_id 1)")"; IS_HTTP=0 ;;
+    3) TITLE="RKN_TLS"; PROTO="tls"; URL="https://meduza.io"; IS_HTTP=0 ;;
+    4) TITLE="Discord_TLS"; PROTO="tls"; URL="https://discord.com/"; IS_HTTP=0 ;;
+    8) TITLE="Fallback_TLS"; PROTO="tls"; URL="https://rutracker.org"; IS_HTTP=0 ;;
+    9) TITLE="Fallback_HTTP"; PROTO="http"; URL="http://rutracker.org"; IS_HTTP=1 ;;
+    *) echo "Неизвестный/неподдерживаемый профиль: $PROFILE (доступны: 1,2,3,4,8,9)" >&2; exit 1 ;;
+  esac
+fi
 
 # Профиль 2 переразрезолвливает эдж (новое видео из GV_TEST_VIDEO_IDS) на
 # КАЖДЫЙ проход -- см. комментарий у GV_TEST_VIDEO_IDS в z2r_autobench_lib.sh.
 # Без этого весь прогон (все 52 стратегии, оба режима) бьёт в один и тот же
 # эдж всю дорогу -- если именно он забанен, "проваливаются все стратегии"
-# ничего не говорит о самих стратегиях (живой случай 2026-08-18).
+# ничего не говорит о самих стратегиях (живой случай 2026-08-18). В режиме
+# --domain недостижимо: z2r_detect_governing_profile никогда не
+# возвращает профиль 2 для произвольного домена.
 GV_ROTATE=0
 [ "$PROFILE" = "2" ] && GV_ROTATE=1
 
@@ -196,6 +227,7 @@ if [ "$FUNNEL" = "1" ]; then
       sleep "$SETTLE_SECONDS"
 
       pass_ok=0
+      pass_bytes=0
       for ((attempt=1; attempt<=ATTEMPTS_PER_STRATEGY; attempt++)); do
         success=0
         bytes=0
@@ -214,9 +246,22 @@ if [ "$FUNNEL" = "1" ]; then
         # под той же стратегией — нет (живой инцидент 2026-08-23).
         [ "$success" = "1" ] && ! extra_check_ok "$PROFILE" && success=0
         printf '%s\t%s\t%s\t%s\t%s\n' "$pass" "$s" "$attempt" "$success" "$bytes" >> "$RAW_FILE"
-        [ "$success" = "1" ] && pass_ok=1
+        if [ "$success" = "1" ]; then
+          pass_ok=1
+          [ "$bytes" -gt "$pass_bytes" ] && pass_bytes=$bytes
+        fi
       done
-      [ "$pass_ok" = "1" ] && next_candidates="$next_candidates$s "
+      # Строка на stdout (не только в RAW_FILE) — специально для панели
+      # (z0r-panel/funnel_runner.py парсит именно это), чтобы показывать
+      # рабочие кандидаты по мере появления, не дожидаясь конца всего
+      # прохода/прогона. Раньше единственным сигналом о ходе воронки была
+      # строка прогресс-бара (в stderr, только "X/Y strategy=N", без
+      # исхода) — сработавший кандидат становился виден только в самом
+      # конце прохода через RAW_FILE.
+      if [ "$pass_ok" = "1" ]; then
+        echo "  strategy=$s -> OK (${pass_bytes} bytes, проход $pass/$PASSES)"
+        next_candidates="$next_candidates$s "
+      fi
       step=$((step + 1))
       print_progress "$step" "$ncand" "проход=$pass strategy=$s"
     done

@@ -82,32 +82,11 @@ probe_domain_url() {
 }
 
 detect_governing_profile() {
-  # $1 = домен, печатает "профиль proto title" через пробел
-  # $Z2R_BASE (см. z2r_autobench_lib.sh, sourced выше) -- НЕ жёстко
-  # /opt/zapret2/, на штатной раскладке апстрим-установщика extra_strats
-  # реально лежат под /opt/zator/ (см. CLAUDE.md "/opt/zapret2 vs
-  # /opt/zator"). Раньше было захардкожено -- на такой раскладке ни один
-  # домен никогда не находился ни в одном списке, тихо и без ошибки.
-  local d="$1"
-  if grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_YT_list.txt" 2>/dev/null; then
-    echo "1 tls YT_TLS"
-  elif grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_Discord.txt" 2>/dev/null; then
-    echo "4 tls DS_TLS"
-  elif grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_RKN_list.txt" 2>/dev/null \
-    || grep -qxi "$d" "$Z2R_BASE/extra_strats/TCP_Custom.txt" 2>/dev/null; then
-    echo "3 tls RKN_TLS"
-  else
-    if [ "$ADD_TO_RKN" = "1" ]; then
-      local cf="$Z2R_BASE/extra_strats/TCP_Custom.txt"
-      mkdir -p "$(dirname "$cf")"; touch "$cf"
-      if ! grep -qxi "$d" "$cf" 2>/dev/null; then
-        echo "$d" >> "$cf"
-      fi
-      echo "3 tls RKN_TLS"
-    else
-      echo "8 tls Fallback_TLS"
-    fi
-  fi
+  # $1 = домен, печатает "профиль proto title" через пробел. Логика сама
+  # теперь живёт в z2r_autobench_lib.sh (z2r_detect_governing_profile) --
+  # общая с rank_strategies.sh --domain, см. её же комментарий там про
+  # то, зачем это вынесено из этого файла 2026-08-29.
+  z2r_detect_governing_profile "$1" "$ADD_TO_RKN"
 }
 
 # --- нормализация доменов + группировка по реальному профилю ---
