@@ -1085,6 +1085,37 @@ project names here — same public-repo constraint as README.md.
   the block stops matching anything and goes inert, harmlessly, without
   ever touching config structure again.
 
+## domain_list_sync.sh — read-only bridge to official curated domain lists (since 2026-08-31)
+
+- Live finding while closing the `auto_promoter.py` youtubei.googleapis.com
+  gap: `domain_pool` for YT_TLS only ever had one row (`www.youtube.com`)
+  — testing/promotion coverage was thin not because of a code limit but
+  because nobody had added more domains. Turned out the server already
+  has real, curated, per-profile domain lists on disk under
+  `$Z2R_BASE/lists/` (`russia-youtube.txt`, `russia-discord.txt` —
+  confirmed live, 19 and N domains respectively; `russia-youtubeQ.txt`
+  exists too but is for the UDP/QUIC YouTube variant, not wired into
+  anything domain_pool-related since that profile isn't curl-testable
+  the same way; `russia-youtube-rtmps.txt` is raw IPs, not domains, not
+  applicable here at all).
+- `domain_list_sync.sh <profile>` just cats the matching file (comments/
+  blanks stripped) to stdout — **read-only, no state, no mutation**. The
+  profile→filename mapping is a hardcoded dict inside the script itself,
+  deliberately NOT inferred from a naming pattern (`russia-<profile>`
+  doesn't generalize — no such file exists for RKN_TLS/GV_TLS/Fallback
+  profiles on the server this was verified against) — add new profiles
+  to the dict only after confirming the actual filename on a real
+  server, same "don't guess, verify" principle as everything else in
+  this file. `--list-profiles` lets a caller (the panel) discover which
+  profiles currently have a mapping without hardcoding that list a
+  second time somewhere else.
+- The panel's `/domains` page calls this to offer a one-click
+  "Синхронизировать" button that's only shown for profiles the script
+  actually knows about — feeds the resulting domains through the exact
+  same `get_or_create_domain()` path as manual/bulk add, so there's no
+  separate "synced from file" state to track or drift from what a human
+  could've typed by hand.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

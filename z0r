@@ -2440,8 +2440,13 @@ ensure_panel_runtime_grants() {
   # (жадный хвостовой "*" покрывает и "example.com", и "example.com --yes").
   local sudoers_custom_domain_cmds="/usr/bin/bash $INSTALL_DIR/custom_domain_cli.sh list, /usr/bin/bash $INSTALL_DIR/custom_domain_cli.sh add *, /usr/bin/bash $INSTALL_DIR/custom_domain_cli.sh remove *"
 
+  # /domains "Синхронизировать с боевым списком" -- read-only, печатает
+  # содержимое официального курированного списка (см. domain_list_sync.sh
+  # докстринг), панель сама решает, что с этим делать (get_or_create_domain).
+  local sudoers_domain_sync_cmd="/usr/bin/bash $INSTALL_DIR/domain_list_sync.sh *"
+
   local sudoers_file="/etc/sudoers.d/zenith-panel"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds, $sudoers_funnel_cmd, $sudoers_custom_domain_cmds"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds, $sudoers_funnel_cmd, $sudoers_custom_domain_cmds, $sudoers_domain_sync_cmd"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"
