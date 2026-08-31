@@ -196,6 +196,60 @@ project names here — same public-repo constraint as README.md.
   the exact incident above) — `rank_voice.sh` doesn't need this (never
   touches `locked.tsv`, sandbox-only).
 
+## All six `autotune-profile@N.service` silently dead for 5 days (found 2026-08-31)
+
+- Live incident on Server A: while chasing a recurring "YouTube 'no
+  network' on WebOS" report (worked on strategy 63 a few days earlier,
+  broke again after some time; same pattern repeated on strategy 61),
+  `systemctl list-units 'autotune*'` showed `autotune-profile@1` through
+  `@6` ALL in `failed` state — only the legacy no-arg `autotune-daemon`
+  (scoped to 8/9, FB_TLS/FB_HTTP, see "per-profile processes" above) was
+  actually running. `journalctl -u autotune-profile@1` showed the cause:
+  right after a reboot on 2026-08-26 20:55, it crashed instantly with
+  `Не найден /opt/zapret2/z2r_lib/config.sh — прерываю` (the exact
+  `_z2r_detect_base()` split-base error documented elsewhere in this
+  file), hit systemd's default restart-rate-limit within seconds
+  ("Start request repeated too quickly"), landed in permanent `failed`,
+  and NEVER recovered or alerted anyone for the next 5 days.
+- Root cause of the crash itself lines up with the "Feature branch merged
+  into main" incident elsewhere in this file, same date (2026-08-26): the
+  reboot most likely landed in the narrow window before that day's PR
+  merge actually reached this box's checkout, so the daemon started once
+  against pre-fix code, crash-looped, and by the time `main` genuinely had
+  the fix, the unit was already stuck in `failed` — a `git pull` alone
+  never restarts a crashed systemd unit.
+- **Impact, the real point of this entry**: for those 5 days, the
+  health-check-every-300s → retune-after-3-fails self-healing loop
+  (see "per-profile processes" above) did not exist AT ALL for YT_TLS,
+  GV_TLS, RKN_TLS, DS_TLS, or profile 6 — only `zenith-promoter` (Zenith,
+  separate repo) was still touching those profiles' strategies, and it
+  has no equivalent behavior: it doesn't reactively detect "the currently
+  live strategy just stopped working," it only tries to push its own next
+  best-scoring genome forward on a fixed schedule and rolls back if THAT
+  specific attempt fails its live check. With the daemon dead, a strategy
+  that degraded over time (ISP-side DPI updates, see "Ban / rate-limit
+  avoidance" above) had nothing to catch it — it just stayed broken until
+  a human noticed and intervened, then degraded again later with the same
+  silence. This is almost certainly the real explanation for the
+  "worked, then broke again after time, repeatedly, on different
+  strategies (63, then 61)" pattern that prompted this investigation —
+  not a bad strategy choice each time, but a dead safety net.
+- Fixed by a plain `systemctl restart autotune-profile@1 ... @6` — all six
+  came back `active running` immediately (no re-crash), confirming
+  `/opt/z2r_autobench`'s checkout genuinely has the `_z2r_detect_base()`
+  fix now, the crash was purely a stale-boot-timing artifact, not a
+  still-open bug.
+- **Open gap, not yet addressed**: nothing monitors these systemd units
+  themselves — a unit silently sitting in `failed` for 5 days produced no
+  alert, no log anyone was watching, nothing on any panel page. The
+  existing `maybe_restart_zapret2()` self-healing in `autotune_daemon.sh`
+  only watches `zapret2.service`, not its own sibling systemd units, and
+  there is no "watchdog for the watchdogs" anywhere in this stack. Worth
+  a `_daemon_do_check_updates`-style menu addition or a simple
+  `systemctl is-failed autotune-profile@*` check surfaced somewhere
+  (z0r menu item 14 status line, or a panel card) next time this area is
+  touched — flagging here rather than building it ad hoc mid-incident.
+
 ## `/opt/zapret2` vs `/opt/zator` — two real directories, not a symlink pair (since 2026-08-23)
 
 - Live incident on Server A: after a core-file recovery, `/opt/zapret2` and
