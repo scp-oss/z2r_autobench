@@ -17,9 +17,9 @@
 # КАК добавляется новый профиль: НЕ пишем nfqws2-синтаксис с нуля (никто
 # в этом репозитории живой /opt/zapret2/config не видел, придумывать
 # формат вручную — верный способ сломать nfqws2 на следующем restart).
-# Вместо этого клонируем УЖЕ РАБОЧИЙ блок-диспетчер профиля RKN_TLS
-# (circular_locked:key=3, см. promote_apply_cli.sh докстринг — у
-# профилей типа RKN_TLS/YT_TLS сам блок-диспетчер маленький, --import=
+# Вместо этого клонируем УЖЕ РАБОЧИЙ блок-диспетчер профиля YT_TLS
+# (circular_locked:key=1, см. promote_apply_cli.sh докстринг — у
+# профилей типа YT_TLS/RKN_TLS сам блок-диспетчер маленький, --import=
 # на общий шаблон, ни одной строки strategy= в нём самом) и патчим В НЁМ
 # только ДВЕ вещи текстовой заменой: путь --hostlist= (на новый,
 # однострочный, только для этого домена) и circular_locked:key=N (на
@@ -27,6 +27,18 @@
 # каталог стратегий из общего шаблона (z2r_tcp_tls_common) с СОБСТВЕННЫМ
 # независимым замком — то же самое, для чего rank_strategies.sh --funnel
 # уже работает с любым числовым профилем через config_profile_max_strategy.
+#
+# ПОЧЕМУ key=1 (YT_TLS), а не key=3 (RKN_TLS, как было изначально до
+# 2026-08-29): на живом сервере проверено, что `circular_locked:key=3`
+# встречается в конфиге ДВАЖДЫ — основной блок RKN_TLS по хостлисту И
+# отдельный блок с тем же ключом, matching по подстроке
+# (`include_substrings=`, делит замок с основным намеренно), плюс ещё
+# профиль 8 с `route_key=3` (ссылается на чужой замок). `_find_block_by_key()`
+# требует РОВНО одно совпадение и откажет на key=3. `key=1` подтверждён
+# единственным и самодостаточным (обычный хостлист-блок, без
+# route_key/include_substrings) — используем его по умолчанию.
+# `--template-profile N` — ручное переопределение, если на каком-то
+# другом сервере key=1 тоже окажется неоднозначным.
 #
 # add БЕЗ --yes — только ПРЕВЬЮ (что было бы записано), ничего не пишет.
 # add --yes — реально дописывает блок в конец конфига (backup
@@ -36,7 +48,7 @@
 #
 # Использование:
 #   custom_domain_cli.sh list
-#   custom_domain_cli.sh add <домен> [--yes]
+#   custom_domain_cli.sh add <домен> [--template-profile N] [--yes]
 #   custom_domain_cli.sh remove <домен>
 #
 # Код возврата: 0 при успехе, 1 при ошибке/отказе.
@@ -59,12 +71,12 @@ source "$SCRIPT_DIR/z2r_autobench_lib.sh"
 # на любой раскладке, поэтому не через $Z2R_BASE.
 CONFIG_FILE="/opt/zapret2/config"
 REGISTRY="$ORCH_DIR/custom_domains.tsv"
-TEMPLATE_PROFILE=3          # RKN_TLS — маленький блок-диспетчер, --import=, без своих strategy=
+TEMPLATE_PROFILE=1          # YT_TLS по умолчанию — подтверждено единственным, самодостаточным блоком (см. докстринг выше); --template-profile N переопределяет
 CUSTOM_PROFILE_BASE=20      # никогда не пересекается с реальными 1-9
 
 usage() {
   echo "Использование: $0 list" >&2
-  echo "            или $0 add <домен> [--yes]" >&2
+  echo "            или $0 add <домен> [--template-profile N] [--yes]" >&2
   echo "            или $0 remove <домен>" >&2
   exit 1
 }
@@ -179,10 +191,12 @@ case "$action" in
     [ $# -ge 1 ] || usage
     do_write=0
     domain=""
-    for arg in "$@"; do
-      case "$arg" in
-        --yes) do_write=1 ;;
-        *) domain="$arg" ;;
+    template_profile="$TEMPLATE_PROFILE"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --yes) do_write=1; shift ;;
+        --template-profile) template_profile="$2"; shift 2 ;;
+        *) domain="$1"; shift ;;
       esac
     done
     domain="$(_normalize_domain "$domain")"
@@ -212,28 +226,38 @@ case "$action" in
       exit 1
     fi
 
-    read -r start_idx end_idx <<< "$(_find_block_by_key "$TEMPLATE_PROFILE")" || exit 1
+    read -r start_idx end_idx <<< "$(_find_block_by_key "$template_profile")" || exit 1
     mapfile -t all_lines < "$CONFIG_FILE"
     block_lines=("${all_lines[@]:$start_idx:$((end_idx - start_idx + 1))}")
 
     new_num="$(_next_free_profile)"
     new_hostlist="$Z2R_BASE/extra_strats/TCP_CustomProfile_${new_num}.txt"
 
-    old_rkn_list="$Z2R_BASE/extra_strats/TCP_RKN_list.txt"
-    old_custom_list="$Z2R_BASE/extra_strats/TCP_Custom.txt"
+    # Путь(и) --hostlist= в блоке-доноре ищем ДИНАМИЧЕСКИ, не хардкодим
+    # конкретные имена файлов -- у разных профилей разные хостлисты
+    # (TCP_YT_list.txt у key=1, TCP_RKN_list.txt+TCP_Custom.txt у key=3
+    # ДВУМЯ отдельными строками, не через запятую -- проверено на живом
+    # конфиге 2026-08-29), а --template-profile может указать любой из
+    # них. Точный префикс "--hostlist=" (не "--hostlist-exclude="/
+    # "--hostlist-domains=" -- те трогать нельзя, разный смысл).
     new_block=()
+    found_hostlist_line=0
     for line in "${block_lines[@]}"; do
-      line="${line//$old_rkn_list/$new_hostlist}"
-      line="${line//$old_custom_list/$new_hostlist}"
-      # Донор мог ссылаться на TCP_RKN_list.txt И TCP_Custom.txt в ОДНОЙ
-      # строке (напр. через запятую) -- после замены обеих на один и тот
-      # же новый путь получится безвредный, но неряшливый дубль, схлопни.
-      line="${line//$new_hostlist,$new_hostlist/$new_hostlist}"
-      line="$(printf '%s' "$line" | sed -E "s/circular_locked:key=${TEMPLATE_PROFILE}([^0-9]|\$)/circular_locked:key=${new_num}\\1/")"
+      case "$line" in
+        --hostlist=*)
+          line="--hostlist=$new_hostlist"
+          found_hostlist_line=1
+          ;;
+      esac
+      line="$(printf '%s' "$line" | sed -E "s/circular_locked:key=${template_profile}([^0-9]|\$)/circular_locked:key=${new_num}\\1/")"
       new_block+=("$line")
     done
+    if [ "$found_hostlist_line" != "1" ]; then
+      echo "В блоке-доноре (key=$template_profile) не нашлось ни одной строки '--hostlist=' -- возможно, этот профиль матчит по --hostlist-domains= (инлайн-домены, как у GV_TLS) или ещё как-то иначе, клонировать его так для отдельного домена нельзя. Попробуй другой --template-profile." >&2
+      exit 1
+    fi
 
-    echo "=== Профиль-донор (RKN_TLS, key=$TEMPLATE_PROFILE), строки $((start_idx+1))-$((end_idx+1)) конфига ===" >&2
+    echo "=== Профиль-донор (key=$template_profile), строки $((start_idx+1))-$((end_idx+1)) конфига ===" >&2
     printf '%s\n' "${block_lines[@]}" >&2
     echo "" >&2
     echo "=== Новый блок для $domain (профиль $new_num) — БУДЕТ ДОПИСАН В КОНЕЦ КОНФИГА ===" >&2

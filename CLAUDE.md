@@ -987,6 +987,38 @@ project names here — same public-repo constraint as README.md.
   `/opt/zapret2/config` (not just flip a `strategy=N` inside an existing
   block), so a race between the two is worse than a race between two
   ordinary strategy switches.
+- **Correction, same day, confirmed against a real live config**: the
+  donor template was originally `key=3` (RKN_TLS) — wrong choice. On a
+  real server, `circular_locked:key=3` appears TWICE: the normal
+  hostlist-matched RKN_TLS block, and a SECOND block matching by
+  substring (`include_substrings=.../TCP_RKN_domains_by_substring.txt`)
+  that deliberately shares the same lock — plus a THIRD block (profile 8,
+  Fallback_TLS) with `route_key=3` pointing at the same lock from yet
+  another matching mechanism. `_find_block_by_key()`'s "exactly one match
+  or refuse" safety check (working as intended) meant `add` always failed
+  on this server. Switched the default donor to `key=1` (YT_TLS),
+  confirmed on that same server to be a single, self-contained hostlist
+  block. `--template-profile N` added as a manual override in case `key=1`
+  is ever ambiguous on some other server too. Also generalized the
+  hostlist-path substitution: it now finds whichever line(s) literally
+  start with `--hostlist=` inside the donor block and rewrites those,
+  instead of hardcoding `TCP_RKN_list.txt`/`TCP_Custom.txt` — necessary
+  since different profiles use different hostlist files (and RKN_TLS's
+  own block turned out to have TWO separate `--hostlist=` lines, not one
+  comma-joined value as first assumed). Refuses if the donor block has no
+  `--hostlist=` line at all (e.g. `key=2`/GV_TLS matches via
+  `--hostlist-domains=googlevideo.com` instead — an inline value, not a
+  file — cloning that wouldn't give the new domain its own file to
+  register into).
+- **Open/unverified risk, flagged for whoever picks this up next**: the
+  real YT_TLS donor block starts with `--qnum 300 --filter-tcp=443
+  --filter-l7=tls` — cloning it verbatim carries `--qnum 300` into the
+  new block too. Nothing in this repo knows whether nfqws2 tolerates two
+  blocks declaring the same `--qnum`, or whether it needs to be unique/
+  omitted on the clone. The preview step will show this plainly (it's
+  right there in the printed block) — a human needs to actually look at
+  it and decide before running `--yes`, not just skim for the
+  hostlist/key substitution and assume the rest is fine.
 - **If the domain is already governed by an existing profile — refuse
   with a warning, don't create a second conflicting one.** Checked
   against `TCP_YT_list.txt`/`TCP_Discord.txt`/`TCP_RKN_list.txt`/
