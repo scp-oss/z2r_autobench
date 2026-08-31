@@ -27,9 +27,21 @@
 # Использование:
 #   domain_list_sync.sh <профиль>       # печатает домены в stdout
 #   domain_list_sync.sh --list-profiles # какие профили вообще поддержаны
+#   domain_list_sync.sh --path <файл-или-путь>  # см. ниже
 #
 # Код возврата: 0 при успехе, 1 если для профиля нет известного файла
 # или файл не найден на диске.
+#
+# --path добавлен 2026-08-31 по прямому запросу (панель: "не до конца
+# понял как добавлять путь до списка") -- ad-hoc альтернатива для
+# профиля без записи в PROFILE_LIST_FILES выше, или просто для другого
+# файла. НЕ произвольное чтение файлов сервером из-под sudo: аргумент
+# может быть голым именем файла (тогда ищется в $Z2R_BASE/lists/) или
+# полным путём, но итоговый РЕАЛЬНЫЙ путь (после realpath, т.е. с учётом
+# ".." и симлинков) обязан лежать внутри $Z2R_BASE/lists/ -- тот же
+# каталог, что и всё остальное в этом скрипте, никаких новых прав не
+# открывает. Всё, что снаружи, отклоняется здесь же, до какого-либо
+# чтения содержимого.
 
 set -uo pipefail
 
@@ -68,6 +80,24 @@ if [ "$1" = "--list-profiles" ]; then
   for p in "${!PROFILE_LIST_FILES[@]}"; do
     echo "$p"
   done
+  exit 0
+fi
+
+if [ "$1" = "--path" ]; then
+  [ $# -ge 2 ] || usage
+  raw="$2"
+  case "$raw" in
+    */*) candidate="$raw" ;;
+    *) candidate="$Z2R_BASE/lists/$raw" ;;
+  esac
+  resolved="$(realpath -e -- "$candidate" 2>/dev/null)" || { echo "Файл не найден: $candidate" >&2; exit 1; }
+  lists_dir="$(realpath -e -- "$Z2R_BASE/lists" 2>/dev/null)"
+  case "$resolved" in
+    "$lists_dir"/*) : ;;
+    *) echo "Отказано: путь должен быть внутри $Z2R_BASE/lists/ (получено: $resolved)" >&2; exit 1 ;;
+  esac
+  [ -f "$resolved" ] || { echo "Не обычный файл: $resolved" >&2; exit 1; }
+  grep -vE '^\s*(#|$)' "$resolved"
   exit 0
 fi
 

@@ -1115,6 +1115,29 @@ project names here — same public-repo constraint as README.md.
   same `get_or_create_domain()` path as manual/bulk add, so there's no
   separate "synced from file" state to track or drift from what a human
   could've typed by hand.
+- `YT_QUIC_UDP` -> `russia-youtubeQ.txt` added to the dict later the same
+  day (see z0r-panel's CLAUDE.md "Live bug hit right after this shipped"
+  — someone tried pasting that file's path straight into the manual
+  add-domain field and got a confusing "Пустой домен").
+- **`--path <файл-или-путь>` added same day, on request** ("не до конца
+  понял как добавлять путь до списка") — an escape hatch for a profile
+  with no entry in `PROFILE_LIST_FILES` (or just a different file), taken
+  from the panel as a free-text field instead of the fixed
+  "Синхронизировать" button. Still can't read anything outside
+  `$Z2R_BASE/lists/`: the argument is either a bare filename (resolved
+  against that directory) or a full path, but the script always
+  `realpath`-resolves it first (collapsing `..` and symlinks) and refuses
+  anything whose resolved path isn't a `$Z2R_BASE/lists/*` prefix, before
+  ever touching file contents. The sudoers grant for this script has
+  always been a single greedy `domain_list_sync.sh *` (see
+  `ensure_panel_runtime_grants`) — this mode doesn't widen that surface,
+  the script's own realpath check is the actual boundary, same as it
+  already was for the `<profile>` lookup (a bad profile name just fails
+  the dict lookup, no filesystem access happens either way). Verified
+  with a synthetic `$Z2R_BASE` sandbox before shipping: bare filename,
+  full in-directory path, `../../etc/...` traversal (refused), an
+  absolute path outside `lists/` (refused), and a missing file (refused,
+  distinct message) — all behaved as intended.
 
 ## Uniform restart/stop for every managed module (since 2026-08-31)
 
