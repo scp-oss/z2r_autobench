@@ -536,6 +536,52 @@ project names here — same public-repo constraint as README.md.
   its autonomy submenu's own `1-6`) is untouched — separate namespace,
   see the note above.
 
+## blob_tune.sh wired into main menu (2026-08-31)
+
+- Live finding: `blob_tune.sh` (TLS ClientHello blob perebor, see its own
+  section elsewhere in this file) was never actually wired into anything
+  — no menu item, no `autotune_daemon.sh` call, no systemd unit. It only
+  existed as a standalone script, mentioned in README.md/CLAUDE.md as
+  documentation. "Built and forgotten" — confirmed by grepping the whole
+  repo for `blob_tune` outside its own file and finding nothing but docs.
+  Added a menu entry (`run_blob_tune()`, prompts for
+  candidates/profiles/budget with Enter-for-defaults, warns up front
+  about the restart-per-candidate cost) so it's actually reachable.
+- Inserted as new top-level item 19, right after 18 (`zenith-promoter`,
+  end of the "Управление" block) per direct request — pushed every
+  item ≥19 up by exactly one, same mechanical process as the
+  2026-08-28 renumbering above (grep `пункт [0-9]` in `z0r` before
+  assuming a number if this note goes stale; the same sweep this time
+  also caught and fixed cross-references in `z0r-panel`
+  (`README.md`, `.env.example`, `main.py`, `autoupdate_ctl.py`,
+  `templates/nodes.html`, `templates/automation.html`), in
+  `zenith/README.md`, and one already-stale reference in
+  `zenith/zenith_autorun.sh` — that one said "z0r 22 -> 4" when the
+  correct pre-this-change value was 20, never caught by the 2026-08-28
+  sweep. Same lesson repeated a third time: a menu renumbering in `z0r`
+  is not "done" until every sibling repo referencing z0r item numbers by
+  hand is swept too, and a stale reference can silently survive more
+  than one prior renumbering pass before anyone greps for it):
+  ```
+  (new) 19  blob_tune.sh                (inserted here)
+  19 -> 20  DNSCrypt-proxy
+  20 -> 21  Zenith
+  21 -> 22  Zenith-TG
+  22 -> 23  Discord_bot
+  23 -> 24  web_panel
+  24 -> 25  Автообновление
+  25 -> 26  Удалить z2r
+  26 -> 27  Удалить autotune-daemon
+  27 -> 28  Удалить Discord_bot
+  28 -> 29  Удалить web_panel
+  29 -> 30  Удалить z2r_autobench
+  30 -> 31  Удалить Zenith
+  31 -> 32  Удалить Zenith-TG
+  32 -> 33  Удалить DNSCrypt-proxy
+  ```
+  Items `1-18` and `111`/`999`/`0` unchanged, same rule as every prior
+  renumbering. Nested submenu numbering untouched.
+
 ## z0r main menu renumbering (2026-08-24)
 
 - Items `1-9` (profile IDs) and `111`/`999`/`0` are **never** renumbered —
