@@ -1341,25 +1341,61 @@ launch_z2r() {
 }
 
 # Единая подменю-развилка для состояния ON — "1) Рестарт  2) Остановить
-# 0) Назад" — вместо разрозненного одиночного [y/N] в каждом manage_X()
-# (живой запрос 2026-08-31: у части модулей раньше был ТОЛЬКО restart
-# (zapret2), у части ТОЛЬКО stop (autotune-daemon/Discord_bot/Zenith-TG/
-# web_panel/DNSCrypt-proxy) — ни у одного не было обоих действий сразу в
-# одном месте). restart_fn/stop_fn — функции без аргументов, каждый
-# manage_X() сам решает, что именно "рестарт" и "стоп" значат для него
-# (напр. Zenith-TG: рестарт НЕ трогает iptables REDIRECT, стоп его снимает).
+# [3) Проверить обновления]  0) Назад" — вместо разрозненного одиночного
+# [y/N] в каждом manage_X() (живой запрос 2026-08-31: у части модулей
+# раньше был ТОЛЬКО restart (zapret2), у части ТОЛЬКО stop (autotune-
+# daemon/Discord_bot/Zenith-TG/web_panel/DNSCrypt-proxy) — ни у одного не
+# было обоих действий сразу в одном месте; следом в тот же день —
+# "проверить обновления" туда же). restart_fn/stop_fn/check_fn —
+# функции без аргументов; check_fn НЕОБЯЗАТЕЛЕН (пусто — пункт 3 вообще
+# не показываем) — для модулей без git-репозитория (zapret2: сторонний
+# инсталлятор автора z2r, не наш git; DNSCrypt-proxy: системный пакет)
+# проверка обновлений этим механизмом невозможна в принципе, не вставляем
+# бессмысленный пункт меню.
 _service_on_menu() {
-  local label="$1" restart_fn="$2" stop_fn="$3"
+  local label="$1" restart_fn="$2" stop_fn="$3" check_fn="${4:-}"
   echo "$label работает. Выбери действие:"
   echo "  1) Рестарт"
   echo "  2) Остановить"
+  [ -n "$check_fn" ] && echo "  3) Проверить обновления"
   echo "  0) Назад (ничего не делать)"
   read -re -p "> " ans
   case "$ans" in
     1) "$restart_fn" ;;
     2) "$stop_fn" ;;
+    3) if [ -n "$check_fn" ]; then "$check_fn"; else echo "Ок, не трогаю."; fi ;;
     *) echo "Ок, не трогаю." ;;
   esac
+}
+
+# Read-only: git fetch + сравнение HEAD с origin/main, НИЧЕГО не
+# применяет (сам pull делает пункт 25 "Автообновление" — тот же git-
+# репозиторий, что и тут, не дублируем логику обновления второй раз,
+# только показываем, есть ли смысл туда заходить). "main", не текущая
+# ветка — тот же принцип, что у autoupdate.sh (см. его докстринг:
+# "продакшена должно идти от того, что реально смержено в main").
+_check_git_updates() {
+  local dir="$1" label="$2"
+  if [ ! -d "$dir/.git" ]; then
+    echo "$label: не git-репозиторий, проверка обновлений этим способом недоступна."
+    return 0
+  fi
+  echo "Проверяю обновления для $label ($dir)..."
+  if ! git -C "$dir" fetch origin main --quiet 2>/dev/null; then
+    echo "Не удалось получить origin/main (сеть или доступ к репозиторию) — проверь вручную." >&2
+    return 1
+  fi
+  local behind
+  behind="$(git -C "$dir" rev-list --count HEAD..origin/main 2>/dev/null)"
+  if [ -z "$behind" ]; then
+    echo "Не удалось сравнить текущий чекаут с origin/main (не на ветке main? отсоединённый HEAD?)." >&2
+    return 1
+  elif [ "$behind" -eq 0 ]; then
+    echo "$label: актуально, HEAD совпадает с origin/main."
+  else
+    echo "$label: отстаёт от origin/main на $behind коммит(ов) — обновить можно через пункт 25 (Автообновление)."
+    git -C "$dir" log --oneline "HEAD..origin/main" 2>/dev/null | head -10
+  fi
 }
 
 # Пункт 12: если z2r не установлен — предлагает поставить (install_z2r,
@@ -1406,7 +1442,7 @@ manage_daemon() {
       esac
       ;;
     ON)
-      _service_on_menu "autotune-daemon" _daemon_do_restart _daemon_do_stop
+      _service_on_menu "autotune-daemon" _daemon_do_restart _daemon_do_stop _daemon_do_check_updates
       ;;
   esac
 }
@@ -1418,6 +1454,12 @@ _daemon_do_restart() {
 _daemon_do_stop() {
   systemctl disable --now autotune-daemon 2>/dev/null || true
   echo "autotune-daemon остановлен и отключён (юнит остался — включить снова: пункт 14)."
+}
+# autotune-daemon живёт в этом же репозитории (z2r_autobench), не в
+# отдельном чекауте -- проверяем $INSTALL_DIR, не отдельный DAEMON_DIR
+# (такой переменной тут и нет).
+_daemon_do_check_updates() {
+  _check_git_updates "$INSTALL_DIR" "z2r_autobench (autotune-daemon)"
 }
 
 # Пункт 14: Discord-бот для тестирования VOICE_UDP (профиль 6).
@@ -1505,7 +1547,7 @@ manage_voice_bot() {
       esac
       ;;
     ON)
-      _service_on_menu "Discord_bot" _voice_bot_do_restart _voice_bot_do_stop
+      _service_on_menu "Discord_bot" _voice_bot_do_restart _voice_bot_do_stop _voice_bot_do_check_updates
       ;;
   esac
 }
@@ -1517,6 +1559,9 @@ _voice_bot_do_restart() {
 _voice_bot_do_stop() {
   systemctl disable --now "$VOICE_BOT_SERVICE" 2>/dev/null || true
   echo "Остановлен."
+}
+_voice_bot_do_check_updates() {
+  _check_git_updates "$VOICE_BOT_DIR" "Discord_bot (z2r_test-voice-bot)"
 }
 
 # Одна строка-конфиг вместо блока -- base64(JSON), как VLESS/Outline/
@@ -2358,6 +2403,7 @@ ensure_panel_runtime_grants() {
   local systemctl_bin; systemctl_bin="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
   local journalctl_bin; journalctl_bin="$(command -v journalctl 2>/dev/null || echo /usr/bin/journalctl)"
   local flock_bin; flock_bin="$(command -v flock 2>/dev/null || echo /usr/bin/flock)"
+  local git_bin; git_bin="$(command -v git 2>/dev/null || echo /usr/bin/git)"
 
   # Sudoers — get/max были принципиально read-only с самого начала (см.
   # README панели "Границы ответственности", то поколение текста). Живой
@@ -2419,6 +2465,17 @@ ensure_panel_runtime_grants() {
   # выбора юнита или доп. флагов.
   local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin restart autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
 
+  # "Проверить обновления" на /controls/automation (см.
+  # z0r-panel/daemon_ctl.py::check_git_updates) -- read-only git fetch +
+  # сравнение с origin/main, НИЧЕГО не применяет (сам pull остаётся за
+  # человеком через этот же z0r-скрипт/автообновление). Литеральные
+  # команды на КАЖДЫЙ из двух репозиториев (z2r_autobench для
+  # autotune-daemon, Zenith для zenith-autorun/zenith-promoter — оба
+  # живут в одном репозитории, поэтому одна и та же тройка команд
+  # обслуживает обе кнопки) — никаких "*", ровно то, что реально вызывает
+  # check_git_updates().
+  local sudoers_git_check_cmds="$git_bin -C $INSTALL_DIR fetch origin main, $git_bin -C $INSTALL_DIR rev-list --count HEAD..origin/main, $git_bin -C $INSTALL_DIR log --oneline HEAD..origin/main, $git_bin -C $ZENITH_DIR fetch origin main, $git_bin -C $ZENITH_DIR rev-list --count HEAD..origin/main, $git_bin -C $ZENITH_DIR log --oneline HEAD..origin/main"
+
   # Периодический автозапуск (zenith-autorun.service) и автопродвижение
   # (zenith-promoter.service) БЕЗ участия человека -- ЖИВУТ КАК
   # НЕЗАВИСИМЫЕ systemd-юниты (см. Zenith/README.md "Автономный режим"),
@@ -2476,7 +2533,7 @@ ensure_panel_runtime_grants() {
   local sudoers_domain_sync_cmd="/usr/bin/bash $INSTALL_DIR/domain_list_sync.sh *"
 
   local sudoers_file="/etc/sudoers.d/zenith-panel"
-  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds, $sudoers_funnel_cmd, $sudoers_custom_domain_cmds, $sudoers_domain_sync_cmd"
+  local sudoers_line="zenith-panel ALL=(root) NOPASSWD: /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh get *, /usr/bin/bash $INSTALL_DIR/set_strategy_cli.sh max *, $sudoers_set_cmd, $sudoers_zapret_cmds, $sudoers_run_cmd, $sudoers_daemon_cmds, $sudoers_zenith_units_cmds, $sudoers_autoupdate_cmds, $sudoers_rkn_cmds, $sudoers_funnel_cmd, $sudoers_custom_domain_cmds, $sudoers_domain_sync_cmd, $sudoers_git_check_cmds"
   if [ ! -f "$sudoers_file" ] || ! grep -qxF "$sudoers_line" "$sudoers_file" 2>/dev/null; then
     echo "$sudoers_line" > "$sudoers_file"
     chmod 440 "$sudoers_file"
@@ -2566,7 +2623,7 @@ manage_panel() {
       esac
       ;;
     ON)
-      _service_on_menu "web_panel" _panel_do_restart _panel_do_stop
+      _service_on_menu "web_panel" _panel_do_restart _panel_do_stop _panel_do_check_updates
       ;;
   esac
 }
@@ -2578,6 +2635,9 @@ _panel_do_restart() {
 _panel_do_stop() {
   systemctl disable --now "$PANEL_SERVICE" 2>/dev/null || true
   echo "Остановлен."
+}
+_panel_do_check_updates() {
+  _check_git_updates "$PANEL_DIR" "web_panel (z0r-panel)"
 }
 
 uninstall_panel() {
@@ -2728,7 +2788,7 @@ manage_tg_relay() {
       ;;
     OFF) tgrelay_enable ;;
     ON)
-      _service_on_menu "Zenith-TG" _tgrelay_do_restart _tgrelay_do_stop
+      _service_on_menu "Zenith-TG" _tgrelay_do_restart _tgrelay_do_stop _tgrelay_do_check_updates
       ;;
   esac
 }
@@ -2743,6 +2803,9 @@ _tgrelay_do_stop() {
   bash "$TGRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
   systemctl disable --now "$TGRELAY_SERVICE" 2>/dev/null || true
   echo "Остановлен, REDIRECT снят."
+}
+_tgrelay_do_check_updates() {
+  _check_git_updates "$TGRELAY_DIR" "Zenith-TG"
 }
 
 uninstall_tg_relay() {

@@ -1153,6 +1153,30 @@ project names here — same public-repo constraint as README.md.
   (CLI-only) — giving them one is a materially bigger scope (new pages,
   new sudoers, new routes each) than "add restart where start/stop
   already exist," deliberately not done in this same pass.
+- **Same-day follow-up: "проверить обновления" added to the same
+  submenu.** `_service_on_menu()` gained an optional 4th arg (`check_fn`)
+  — item `3) Проверить обновления` only appears when the caller passes
+  one, so modules with no git-based update path (`zapret2` — third-party
+  installer, not this repo's git; `DNSCrypt-proxy` — system package) just
+  don't get the option instead of showing something that can't work.
+  Wired into the four that DO live in a git checkout: `autotune-daemon`
+  (→ `$INSTALL_DIR`, this repo itself), `Discord_bot` (→
+  `$VOICE_BOT_DIR`), `web_panel` (→ `$PANEL_DIR`), `Zenith-TG` (→
+  `$TGRELAY_DIR`). `_check_git_updates(dir, label)` is read-only —
+  `git fetch origin main` + `rev-list --count HEAD..origin/main`,
+  reports "actual" or "N commits behind" (with a short log) — it never
+  runs the actual `pull`, that stays item 25's (Автообновление) job
+  specifically so this check can't be confused with an update mechanism
+  of its own.
+
+- The panel has its own equivalent of this check (`daemon_ctl.
+  check_git_updates()`, see z0r-panel's own CLAUDE.md) — this repo's
+  `ensure_panel_runtime_grants` grants it three literal
+  `git -C <dir> <verb> ...` sudoers lines per repo (six total, across
+  `$INSTALL_DIR` and `$ZENITH_DIR`) — no `*` wildcards anywhere,
+  matching exactly what that Python function invokes. `git_bin` resolved
+  the same way as `systemctl_bin`/`journalctl_bin`/`flock_bin` already
+  were (`command -v` with a hardcoded fallback path).
 
 ## Publishing hygiene
 
