@@ -14,6 +14,16 @@
 # russia-discord.txt для YT_TLS/DS_TLS, но нет аналогов для
 # RKN_TLS/GV_TLS/Fallback-профилей — если появятся, добавляй сюда явно).
 #
+# YT_QUIC_UDP -> russia-youtubeQ.txt добавлен по прямому запросу
+# 2026-08-31 — тот же домен-пул, что и остальные, ИМЕННО ЭТИМ файлом
+# (не russia-youtube.txt), т.к. это отдельный курированный список под
+# UDP/QUIC-вариант YouTube, см. CLAUDE.md "Test domains". Не путать с
+# тем, что реальный тестовый эдж для профиля 5 в rank_quic.sh/Zenith
+# резолвится динамически через yt-dlp на каждый раунд — эти domain_pool
+# записи для YT_QUIC_UDP остаются placeholder'ами (см. z0r-panel
+# CLAUDE.md "DOMAIN_LIST_PROFILES narrowed"), синхронизация тут просто
+# даёт готовый список вместо пустого одного placeholder-домена.
+#
 # Использование:
 #   domain_list_sync.sh <профиль>       # печатает домены в stdout
 #   domain_list_sync.sh --list-profiles # какие профили вообще поддержаны
@@ -43,6 +53,7 @@ Z2R_BASE="${Z2R_BASE:-$(_z2r_detect_base)}"
 declare -A PROFILE_LIST_FILES=(
   [YT_TLS]="russia-youtube.txt"
   [DS_TLS]="russia-discord.txt"
+  [YT_QUIC_UDP]="russia-youtubeQ.txt"
 )
 
 usage() {
