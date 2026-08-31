@@ -239,6 +239,28 @@ project names here — same public-repo constraint as README.md.
   `/opt/z2r_autobench`'s checkout genuinely has the `_z2r_detect_base()`
   fix now, the crash was purely a stale-boot-timing artifact, not a
   still-open bug.
+- **Correction, same day, once the actual WebOS incident got resolved**:
+  the "almost certainly the real explanation" claim above was wrong for
+  THIS specific incident, even though the dead-daemon finding itself is
+  real and worth having fixed regardless. Systematically restarted every
+  server-side layer one at a time (`zenith-promoter`, `autotune-profile@1`,
+  `zapret2.service`, even the `amnezia-wireguard` Docker container itself)
+  — none of it changed anything. What actually fixed it was **rebooting
+  the router the WebOS TV sits behind** — a purely client-side/local-
+  network fix, nothing to do with zapret2, strategies, or either
+  autotuner. Confirmed by `docker exec amnezia-wireguard wg show` mid-
+  incident: the TV's WG peer showed a `latest handshake: 4 hours...`
+  while the OTHER peer on the same server handshook 46 seconds ago —
+  i.e. this one peer had been failing to reach the WG server at all for
+  hours, independent of anything server-side (health-check probes FROM
+  the server were passing the whole time). Lesson: a recurring "works,
+  then breaks after time" complaint can have a perfectly plausible
+  server-side explanation ready to hand (we had one, and it was real!)
+  that is still the wrong one for the specific instance in front of you —
+  `wg show`'s handshake age was the one piece of evidence that actually
+  discriminated between "server-side DPI/strategy problem" and "client
+  never reached the server," and it should have been checked earlier,
+  before cycling through four server-side restarts one at a time.
 - **Open gap, not yet addressed**: nothing monitors these systemd units
   themselves — a unit silently sitting in `failed` for 5 days produced no
   alert, no log anyone was watching, nothing on any panel page. The
