@@ -1340,9 +1340,40 @@ launch_z2r() {
   return 1
 }
 
+# Единая подменю-развилка для состояния ON — "1) Рестарт  2) Остановить
+# 0) Назад" — вместо разрозненного одиночного [y/N] в каждом manage_X()
+# (живой запрос 2026-08-31: у части модулей раньше был ТОЛЬКО restart
+# (zapret2), у части ТОЛЬКО stop (autotune-daemon/Discord_bot/Zenith-TG/
+# web_panel/DNSCrypt-proxy) — ни у одного не было обоих действий сразу в
+# одном месте). restart_fn/stop_fn — функции без аргументов, каждый
+# manage_X() сам решает, что именно "рестарт" и "стоп" значат для него
+# (напр. Zenith-TG: рестарт НЕ трогает iptables REDIRECT, стоп его снимает).
+_service_on_menu() {
+  local label="$1" restart_fn="$2" stop_fn="$3"
+  echo "$label работает. Выбери действие:"
+  echo "  1) Рестарт"
+  echo "  2) Остановить"
+  echo "  0) Назад (ничего не делать)"
+  read -re -p "> " ans
+  case "$ans" in
+    1) "$restart_fn" ;;
+    2) "$stop_fn" ;;
+    *) echo "Ок, не трогаю." ;;
+  esac
+}
+
 # Пункт 12: если z2r не установлен — предлагает поставить (install_z2r,
 # со своими подтверждениями); если установлен — показывает статус и
 # предлагает перезапустить (не переустановить — это разные вещи).
+_zapret_do_restart() {
+  systemctl restart zapret2 2>/dev/null || /opt/zapret2/init.d/sysv/zapret2 restart
+  sleep 2
+  echo "zapret2 после перезапуска: $(get_zapret_status)"
+}
+_zapret_do_stop() {
+  systemctl stop zapret2 2>/dev/null || /opt/zapret2/init.d/sysv/zapret2 stop
+  echo "zapret2 остановлен (обход DPI отключён!): $(get_zapret_status)"
+}
 manage_zapret() {
   local st; st="$(get_zapret_status)"
   echo "zapret2: $st"
@@ -1350,15 +1381,7 @@ manage_zapret() {
     install_z2r
     return
   fi
-  read -re -p "Перезапустить zapret2 сейчас? [y/N]: " ans
-  case "$ans" in
-    y|Y)
-      systemctl restart zapret2 2>/dev/null || /opt/zapret2/init.d/sysv/zapret2 restart
-      sleep 2
-      echo "zapret2 после перезапуска: $(get_zapret_status)"
-      ;;
-    *) echo "Ок, не трогаю." ;;
-  esac
+  _service_on_menu "zapret2" _zapret_do_restart _zapret_do_stop
 }
 
 # Вызывается напрямую из главного меню (пункт 14) -- работает со
@@ -1383,16 +1406,18 @@ manage_daemon() {
       esac
       ;;
     ON)
-      read -re -p "Сервис работает. Остановить и отключить? [y/N]: " ans
-      case "$ans" in
-        y|Y)
-          systemctl disable --now autotune-daemon 2>/dev/null || true
-          echo "autotune-daemon остановлен и отключён (юнит остался — включить снова: пункт 14)."
-          ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
+      _service_on_menu "autotune-daemon" _daemon_do_restart _daemon_do_stop
       ;;
   esac
+}
+_daemon_do_restart() {
+  systemctl restart autotune-daemon
+  sleep 1
+  systemctl status autotune-daemon --no-pager
+}
+_daemon_do_stop() {
+  systemctl disable --now autotune-daemon 2>/dev/null || true
+  echo "autotune-daemon остановлен и отключён (юнит остался — включить снова: пункт 14)."
 }
 
 # Пункт 14: Discord-бот для тестирования VOICE_UDP (профиль 6).
@@ -1480,13 +1505,18 @@ manage_voice_bot() {
       esac
       ;;
     ON)
-      read -re -p "Сервис работает. Остановить и отключить? [y/N]: " ans
-      case "$ans" in
-        y|Y) systemctl disable --now "$VOICE_BOT_SERVICE" 2>/dev/null || true; echo "Остановлен." ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
+      _service_on_menu "Discord_bot" _voice_bot_do_restart _voice_bot_do_stop
       ;;
   esac
+}
+_voice_bot_do_restart() {
+  systemctl restart "$VOICE_BOT_SERVICE"
+  sleep 2
+  systemctl status "$VOICE_BOT_SERVICE" --no-pager
+}
+_voice_bot_do_stop() {
+  systemctl disable --now "$VOICE_BOT_SERVICE" 2>/dev/null || true
+  echo "Остановлен."
 }
 
 # Одна строка-конфиг вместо блока -- base64(JSON), как VLESS/Outline/
@@ -2387,7 +2417,7 @@ ensure_panel_runtime_grants() {
   # (никаких "*") -- меньше
   # привилегий, чем даже у запуска main.py выше, никакого произвольного
   # выбора юнита или доп. флагов.
-  local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
+  local sudoers_daemon_cmds="$systemctl_bin start autotune-daemon, $systemctl_bin stop autotune-daemon, $systemctl_bin restart autotune-daemon, $systemctl_bin is-active autotune-daemon, $journalctl_bin -u autotune-daemon -n 200 --no-pager"
 
   # Периодический автозапуск (zenith-autorun.service) и автопродвижение
   # (zenith-promoter.service) БЕЗ участия человека -- ЖИВУТ КАК
@@ -2400,7 +2430,7 @@ ensure_panel_runtime_grants() {
   # доступа к promote_apply_cli.sh/main.py из панели для этой части
   # (тот доступ у панели остаётся ТОЛЬКО для ручных кнопок -- "запустить
   # подбор" разово и "Ручное переключение стратегии", см. выше).
-  local sudoers_zenith_units_cmds="$systemctl_bin start zenith-autorun, $systemctl_bin stop zenith-autorun, $systemctl_bin is-active zenith-autorun, $journalctl_bin -u zenith-autorun -n 200 --no-pager, $systemctl_bin start zenith-promoter, $systemctl_bin stop zenith-promoter, $systemctl_bin is-active zenith-promoter, $journalctl_bin -u zenith-promoter -n 200 --no-pager"
+  local sudoers_zenith_units_cmds="$systemctl_bin start zenith-autorun, $systemctl_bin stop zenith-autorun, $systemctl_bin restart zenith-autorun, $systemctl_bin is-active zenith-autorun, $journalctl_bin -u zenith-autorun -n 200 --no-pager, $systemctl_bin start zenith-promoter, $systemctl_bin stop zenith-promoter, $systemctl_bin restart zenith-promoter, $systemctl_bin is-active zenith-promoter, $journalctl_bin -u zenith-promoter -n 200 --no-pager"
 
   # Автообновление -- панель ТОЛЬКО переключает флаги (autoupdate.sh
   # --set, тот же файл читает/пишет z0r пункт 25) и триггерит разовый
@@ -2536,13 +2566,18 @@ manage_panel() {
       esac
       ;;
     ON)
-      read -re -p "Сервис работает. Остановить и отключить? [y/N]: " ans
-      case "$ans" in
-        y|Y) systemctl disable --now "$PANEL_SERVICE" 2>/dev/null || true; echo "Остановлен." ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
+      _service_on_menu "web_panel" _panel_do_restart _panel_do_stop
       ;;
   esac
+}
+_panel_do_restart() {
+  systemctl restart "$PANEL_SERVICE"
+  sleep 2
+  systemctl status "$PANEL_SERVICE" --no-pager
+}
+_panel_do_stop() {
+  systemctl disable --now "$PANEL_SERVICE" 2>/dev/null || true
+  echo "Остановлен."
 }
 
 uninstall_panel() {
@@ -2693,17 +2728,21 @@ manage_tg_relay() {
       ;;
     OFF) tgrelay_enable ;;
     ON)
-      read -re -p "Сервис работает. Остановить, отключить и снять REDIRECT? [y/N]: " ans
-      case "$ans" in
-        y|Y)
-          bash "$TGRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
-          systemctl disable --now "$TGRELAY_SERVICE" 2>/dev/null || true
-          echo "Остановлен, REDIRECT снят."
-          ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
+      _service_on_menu "Zenith-TG" _tgrelay_do_restart _tgrelay_do_stop
       ;;
   esac
+}
+# Рестарт НЕ трогает iptables REDIRECT (см. _service_on_menu докстринг) --
+# это уже применённое сетевое правило, не завязанное на сам процесс.
+_tgrelay_do_restart() {
+  systemctl restart "$TGRELAY_SERVICE"
+  sleep 2
+  systemctl status "$TGRELAY_SERVICE" --no-pager
+}
+_tgrelay_do_stop() {
+  bash "$TGRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
+  systemctl disable --now "$TGRELAY_SERVICE" 2>/dev/null || true
+  echo "Остановлен, REDIRECT снят."
 }
 
 uninstall_tg_relay() {
@@ -3011,16 +3050,18 @@ manage_dnscrypt() {
       esac
       ;;
     ON)
-      read -re -p "Сервис работает. Остановить? [y/N]: " ans
-      case "$ans" in
-        y|Y)
-          systemctl disable --now dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1
-          echo "Остановлен (пакет и переключение системного DNS не тронуты -- пункт удаления снимает полностью)."
-          ;;
-        *) echo "Ок, не трогаю." ;;
-      esac
+      _service_on_menu "DNSCrypt-proxy" _dnscrypt_do_restart _dnscrypt_do_stop
       ;;
   esac
+}
+_dnscrypt_do_restart() {
+  systemctl restart dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1
+  sleep 1
+  systemctl status dnscrypt-proxy --no-pager
+}
+_dnscrypt_do_stop() {
+  systemctl disable --now dnscrypt-proxy dnscrypt-proxy.socket >/dev/null 2>&1
+  echo "Остановлен (пакет и переключение системного DNS не тронуты -- пункт удаления снимает полностью)."
 }
 
 uninstall_dnscrypt() {

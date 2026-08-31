@@ -1116,6 +1116,44 @@ project names here — same public-repo constraint as README.md.
   separate "synced from file" state to track or drift from what a human
   could've typed by hand.
 
+## Uniform restart/stop for every managed module (since 2026-08-31)
+
+- Live gap: every `manage_X()` in `z0r` had grown its own one-off ON-state
+  prompt, and none of them had BOTH restart and stop — `manage_zapret`
+  only ever offered restart, while `manage_daemon`/`manage_voice_bot`/
+  `manage_tg_relay`/`manage_panel`/`manage_dnscrypt` only ever offered
+  stop. Direct request, using `web_panel` as the concrete example: "заходим
+  в неё [пункт 24] — 2 пункта: рестарт и остановить".
+- Added a shared `_service_on_menu(label, restart_fn, stop_fn)` — prints
+  `1) Рестарт / 2) Остановить / 0) Назад` and dispatches to whichever
+  `_X_do_restart`/`_X_do_stop` function the caller passes by name (bash
+  resolves the function name at call time, so definition order relative
+  to `manage_X()` doesn't matter). Wired into all six: `manage_zapret`,
+  `manage_daemon` (autotune-daemon), `manage_voice_bot` (Discord_bot),
+  `manage_panel` (web_panel), `manage_tg_relay` (Zenith-TG),
+  `manage_dnscrypt`.
+- **`_tgrelay_do_restart` deliberately does NOT touch the iptables
+  REDIRECT rule** — that's an already-applied network change independent
+  of the process, only `_tgrelay_do_stop` removes it (same as before).
+  Restarting the relay process shouldn't silently undo working traffic
+  redirection.
+- **Not yet covered: `zenith_toggle()`** (Zenith's own `1) Запуск/Стоп`
+  inside its nested submenu) — three different backends (api/native
+  mariadb/docker compose), a genuinely different shape from the other
+  six's simple systemd on/off, and no restart concept wired in yet
+  (`docker compose restart` for the docker case would be the natural
+  fit). Left as a known follow-up rather than forced into today's pattern.
+- Panel side: added `.restart()` to `daemon_ctl.SystemdServiceCtl` (used
+  by all three panel-managed units: `autotune_daemon`/`zenith_autorun`/
+  `zenith_promoter`) and a matching `systemctl restart <unit>` sudoers
+  grant alongside each unit's existing start/stop/is-active/journalctl
+  set in `z0r::ensure_panel_runtime_grants`. `/controls/automation` now
+  shows a "рестарт" button next to start/stop for all three. Discord_bot/
+  DNSCrypt-proxy/Zenith-TG/web_panel have NO panel presence at all today
+  (CLI-only) — giving them one is a materially bigger scope (new pages,
+  new sudoers, new routes each) than "add restart where start/stop
+  already exist," deliberately not done in this same pass.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
