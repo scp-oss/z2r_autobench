@@ -87,15 +87,30 @@ update_git_repo() {
     return 1
   fi
 
-  local before after
-  before="$(git -C "$dir" rev-parse HEAD 2>/dev/null)" || { _log "$project" "не удалось прочитать текущий HEAD"; return 1; }
+  # -c safe.directory=$dir на каждом вызове git ниже: без него git
+  # отказывается работать в каталоге, который принадлежит не тому же
+  # пользователю, что и текущий процесс ("detected dubious ownership").
+  # Живой случай (2026-09-01, Server B): ensure_tgrelay_user() в z0r делает
+  # `chown -R tgrelay:tgrelay "$TGRELAY_DIR"` при каждом заходе в управление
+  # Zenith-TG, а autoupdate.sh обычно запущен от root -- владелец каталога и
+  # euid расходятся, и КАЖДЫЙ git-вызов ниже (включая самый первый,
+  # rev-parse HEAD) отказывает с этой ошибкой, проглоченной за 2>/dev/null.
+  # Итог: автообновление Zenith-TG молча не работало с тех пор, как
+  # ensure_tgrelay_user() начал делать chown (см. z0r's CLAUDE.md) --
+  # тот же класс "три недели правок никуда не доехали", что и в разделе
+  # "Feature branch merged into main" в CLAUDE.md, только для этого одного
+  # репозитория и по другой причине.
+  local git=(git -C "$dir" -c safe.directory="$dir")
 
-  if ! git -C "$dir" fetch origin "$branch" --quiet 2>>"$LOG_DIR/${project}.log"; then
+  local before after
+  before="$("${git[@]}" rev-parse HEAD 2>/dev/null)" || { _log "$project" "не удалось прочитать текущий HEAD"; return 1; }
+
+  if ! "${git[@]}" fetch origin "$branch" --quiet 2>>"$LOG_DIR/${project}.log"; then
     _log "$project" "git fetch не удался (GitHub недоступен?)"
     return 1
   fi
 
-  after="$(git -C "$dir" rev-parse "origin/$branch" 2>/dev/null)" || { _log "$project" "не удалось прочитать origin/$branch"; return 1; }
+  after="$("${git[@]}" rev-parse "origin/$branch" 2>/dev/null)" || { _log "$project" "не удалось прочитать origin/$branch"; return 1; }
 
   if [ "$before" = "$after" ]; then
     return 2
@@ -104,12 +119,12 @@ update_git_repo() {
   # Незакоммиченные локальные правки -- НЕ трогаем автоматически (могут
   # быть чьи-то ручные правки на конкретном узле), просто сообщаем и
   # пропускаем этот прогон, попробуем снова на следующем цикле таймера.
-  if ! git -C "$dir" diff --quiet 2>/dev/null || ! git -C "$dir" diff --cached --quiet 2>/dev/null; then
+  if ! "${git[@]}" diff --quiet 2>/dev/null || ! "${git[@]}" diff --cached --quiet 2>/dev/null; then
     _log "$project" "есть незакоммиченные локальные правки -- пропуск (разберитесь руками)"
     return 1
   fi
 
-  if ! git -C "$dir" pull --ff-only origin "$branch" --quiet >>"$LOG_DIR/${project}.log" 2>&1; then
+  if ! "${git[@]}" pull --ff-only origin "$branch" --quiet >>"$LOG_DIR/${project}.log" 2>&1; then
     _log "$project" "git pull --ff-only не удался (локальная история разошлась с origin?) -- пропуск"
     return 1
   fi

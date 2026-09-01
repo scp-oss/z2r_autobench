@@ -1402,6 +1402,31 @@ project names here — same public-repo constraint as README.md.
   (that one's on the panel side and calls a different directory set, so
   unaffected, but worth double-checking if `Zenith-TG (?)` shows up
   there too some day).
+- **Same-day follow-up, bigger than the menu-display bug above:**
+  `autoupdate.sh::update_git_repo()` has the exact same unguarded `git -C
+  "$dir"` pattern — `rev-parse HEAD`/`fetch`/`rev-parse origin/branch`/
+  `diff`/`diff --cached`/`pull --ff-only`, none of them scoped with
+  `safe.directory`. Since `TGRELAY_DIR` is the one directory
+  `ensure_tgrelay_user()` chowns away from root, and `autoupdate.sh` runs
+  as root via its own systemd timer (item 25, "Автообновление"), this
+  means **Zenith-TG's automatic updates have likely been silently broken
+  on every server since `ensure_tgrelay_user()` started doing that chown
+  (2026-08-24)** — the very first git call (`rev-parse HEAD`) fails with
+  the same swallowed "dubious ownership" error, logged only as "не
+  удалось прочитать текущий HEAD", so autoupdate.log never shows anything
+  actionable. This is the *exact* failure shape as "Feature branch merged
+  into main" elsewhere in this file (autoupdate silently not delivering
+  fixes to a specific repo for weeks) — just a different root cause
+  (ownership, not an unmerged PR) hitting the same repo. Directly explains
+  why Server B's Zenith-TG checkout was still missing `cf_worker/
+  deploy.sh` (added 2026-09-01, weeks after `ensure_tgrelay_user()`
+  landed) despite "Автообновление [ON]" in the menu. Fixed the same way:
+  `update_git_repo()` now builds a `git=(git -C "$dir" -c
+  safe.directory="$dir")` array and every git call goes through it. If
+  autoupdate for Zenith-TG still isn't advancing after this fix reaches a
+  server, check `$INSTALL_DIR/logs/autoupdate/tgrelay.log` for a
+  *different* error this time — this class of silent failure is now
+  closed, but something else could still be wrong.
 
 ## Publishing hygiene
 
