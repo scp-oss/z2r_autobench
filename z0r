@@ -2768,9 +2768,42 @@ tgrelay_enable() {
       else
         echo "Не удалось применить REDIRECT — сервис работает, но трафик пока не перенаправлен (доразберись руками: $TGRELAY_DIR/relay/setup_redirect.sh apply)." >&2
       fi
+      read -re -p "Настроить сейчас доступ к web.telegram.org/WhatsApp Web в браузере (Cloudflare Worker, обходит IP-блокировку, не связанную с zapret2)? [y/N]: " cfans
+      case "$cfans" in y|Y) tgrelay_setup_cf_worker ;; *) : ;; esac
       ;;
     *) echo "Ок, не трогаю." ;;
   esac
+}
+
+# web.telegram.org/web.whatsapp.com блокируются на уровне SYN
+# (null-route), независимо от zapret2 -- ни одна --lua-desync= стратегия
+# тут не поможет (см. Zenith-TG/CLAUDE.md "Android MTProto investigation"
+# и "Same fallback extended to WhatsApp"). Отдельная, опциональная
+# фича поверх основного relay (тот работает и без неё, просто без
+# доступа к этим двум сервисам в браузере) -- поэтому отдельный явный
+# шаг, а не часть tgrelay_install_files/tgrelay_enable по умолчанию.
+# CLOUDFLARE_API_TOKEN спрашиваем каждый раз заново (-rsp, скрытый ввод,
+# не сохраняем в переменных окружения между запусками z0r) -- сам
+# deploy.sh секрет НИКОГДА не переиспользует и не коммитит, генерирует
+# заново на каждый вызов (см. cf_worker/README.md "Почему нельзя просто
+# закоммитить готовый секрет").
+tgrelay_setup_cf_worker() {
+  local worker_script="$TGRELAY_DIR/relay/cf_worker/deploy.sh"
+  [ -f "$worker_script" ] || { echo "Не найден $worker_script — обнови Zenith-TG (git pull) и зайди снова." >&2; return 1; }
+  if ! command -v wrangler >/dev/null 2>&1; then
+    echo "wrangler (Cloudflare CLI) не установлен -- нужен Node >=22, Debian's apt" >&2
+    echo "обычно даёт только v20. Поставь и повтори:" >&2
+    echo "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash" >&2
+    echo "  export NVM_DIR=\"\$HOME/.nvm\"; . \"\$NVM_DIR/nvm.sh\"; nvm install 22" >&2
+    echo "  npm install -g wrangler" >&2
+    return 1
+  fi
+  echo "Нужен Cloudflare API-токен (dash.cloudflare.com/profile/api-tokens,"
+  echo "шаблон \"Edit Cloudflare Workers\" достаточен) -- без учётки Cloudflare"
+  echo "развернуть воркер физически негде, это не секрет z0r/Zenith-TG."
+  read -rsp "CLOUDFLARE_API_TOKEN: " cf_token; echo
+  [ -n "$cf_token" ] || { echo "Пустой токен, отмена." >&2; return 1; }
+  CLOUDFLARE_API_TOKEN="$cf_token" bash "$worker_script"
 }
 
 manage_tg_relay() {
@@ -2788,7 +2821,15 @@ manage_tg_relay() {
       ;;
     OFF) tgrelay_enable ;;
     ON)
-      _service_on_menu "Zenith-TG" _tgrelay_do_restart _tgrelay_do_stop _tgrelay_do_check_updates
+      echo "  1) Управление сервисом (рестарт/остановить/апдейты)"
+      echo "  2) Настроить доступ к web.telegram.org/WhatsApp Web в браузере (Cloudflare Worker)"
+      echo "  0) Назад"
+      read -re -p "> " tgch
+      case "$tgch" in
+        1) _service_on_menu "Zenith-TG" _tgrelay_do_restart _tgrelay_do_stop _tgrelay_do_check_updates ;;
+        2) tgrelay_setup_cf_worker ;;
+        *) : ;;
+      esac
       ;;
   esac
 }

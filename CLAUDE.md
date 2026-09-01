@@ -1277,6 +1277,43 @@ project names here — same public-repo constraint as README.md.
   the same way as `systemctl_bin`/`journalctl_bin`/`flock_bin` already
   were (`command -v` with a hardcoded fallback path).
 
+## z0r Zenith-TG menu wired to `cf_worker/deploy.sh` (since 2026-09-01)
+
+- Zenith-TG's Cloudflare Worker fallback (routes `web.telegram.org`/
+  `web.whatsapp.com` around their IP-level SYN-blackhole — see that
+  repo's own CLAUDE.md, this is unrelated to zapret2/strategies entirely,
+  a different failure class REDIRECT+desync can't touch) used to be a
+  script buried in `relay/cf_worker/`, only reachable by SSHing in and
+  reading that repo's README by hand. Wired into item 22's own menu:
+  `tgrelay_enable()` (first install / turning ON from OFF) now asks
+  "Настроить сейчас доступ к web.telegram.org/WhatsApp Web в браузере?"
+  right after REDIRECT is applied, and the ON-state submenu gained a
+  second option alongside the usual restart/stop/check-updates
+  (`_service_on_menu`) for revisiting/rotating it later.
+- New `tgrelay_setup_cf_worker()` deliberately does NOT touch
+  `_service_on_menu` itself — that helper is shared by six modules
+  (zapret, daemon, voice bot, panel, tgrelay, dnscrypt), adding a
+  Telegram-specific 5th action there would leak Zenith-TG-only concepts
+  into every other module's menu. Instead `manage_tg_relay()`'s ON-state
+  branch grew its own tiny two-item submenu (1=service management via
+  `_service_on_menu`, 2=this) — `_service_on_menu`'s own contract and
+  every other caller are untouched.
+- Prompts for `CLOUDFLARE_API_TOKEN` via `read -rsp` (hidden input) fresh
+  on every call — never stored between z0r invocations, never written to
+  disk by z0r itself. This is intentional, not a missed convenience: the
+  token is the human's own Cloudflare account credential, out of scope
+  for anything z0r/Zenith-TG should be persisting on its own — same
+  reasoning as why `deploy.sh` itself generates a brand new `RELAY_SECRET`
+  every run rather than accepting one as input (see Zenith-TG's own
+  CLAUDE.md "`cf_worker/deploy.sh` — one-command deploy").
+- Checks for `wrangler` on `$PATH` before prompting for the token at all
+  — if missing, prints the exact `nvm install 22 && npm install -g
+  wrangler` sequence (Debian's own `apt install nodejs` only gives v20,
+  too old for `wrangler`, confirmed live during the first-ever deploy)
+  instead of silently trying to install Node system-wide — installing a
+  language runtime is a bigger, more opinionated footprint than this
+  optional sub-feature should impose without an explicit ask.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
