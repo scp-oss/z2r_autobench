@@ -134,7 +134,15 @@ PANEL_SERVICE="zenith-panel"
 # Flowseal/tg-ws-proxy). Клиенту (Telegram Desktop/mobile) ничего
 # настраивать не нужно — см. README репозитория.
 WSRELAY_DIR="$INSTALL_DIR/Zenith-WS"
-WSRELAY_REPO_URL="https://github.com/scp-oss/Zenith-WS.git"
+# ВАЖНО: репозиторий на GitHub физически ЕЩЁ называется Zenith-TG --
+# переименование содержимого (2026-09-01, Zenith-TG -> Zenith-WS) не
+# переименовывает сам GitHub-репозиторий, это отдельный ручной шаг
+# (Settings -> Rename), который на момент этого коммита ещё не сделан.
+# Указывать здесь "Zenith-WS.git" до этого шага -- значит послать любой
+# свежий git clone на несуществующий URL (404). Поменять на .../Zenith-WS.git
+# ТОЛЬКО после того, как репозиторий реально переименован на GitHub (GitHub
+# сам держит редирект со старого имени, но новый URL заранее не работает).
+WSRELAY_REPO_URL="https://github.com/scp-oss/Zenith-TG.git"
 WSRELAY_SERVICE="ws-transparent-relay"
 # DNSCrypt-proxy -- локальный DoH-резолвер, не самописный компонент этого
 # репозитория, а обычный пакет дистрибутива. Появился из живого случая
