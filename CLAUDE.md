@@ -1367,6 +1367,42 @@ project names here — same public-repo constraint as README.md.
   the interactive question genuinely only appears the first time this
   menu item is used on a given server, not every time.
 
+## `_check_git_updates()`/`_git_short_commit()` fail with "dubious ownership" for tgrelay-owned checkouts (found 2026-09-01, Server B)
+
+- Live incident: "проверить обновления" for Zenith-TG (z0r item 22) on
+  Server B printed only `Не удалось получить origin/main (сеть или доступ
+  к репозиторию) — проверь вручную.` — looked like a network/GitHub-access
+  problem (see "z2r core install — GitHub is not reliable from every
+  provider" above), but manual `curl`/`nslookup` to `github.com` from the
+  same box worked fine. Running the swallowed `git fetch` by hand
+  surfaced the real error: `fatal: detected dubious ownership in
+  repository at '/opt/z2r_autobench/Zenith-TG'`.
+- Root cause: `ensure_tgrelay_user()` runs `chown -R tgrelay:tgrelay
+  "$TGRELAY_DIR"` on every visit to `manage_tg_relay()` (intentional
+  self-healing, see "First Provider B deploy" above) — but `z0r` itself
+  normally runs as root, so the checkout's owner (`tgrelay`) and the
+  euid running `_check_git_updates()`/`_git_short_commit()` (`root`)
+  disagree. Git's own ownership-safety check (post-CVE-2022-24765)
+  refuses to operate on a repo owned by a different user unless that
+  path is explicitly marked `safe.directory` — and both functions threw
+  that real error away behind `2>/dev/null`, so it surfaced as a generic
+  "network or access" message instead. Exact same "swallowed stderr
+  hides the real one-line error" class documented multiple times
+  elsewhere in this file (Zenith's `sandbox_apply.py`, `zenith_autorun.sh`
+  never checking `main.py`'s exit code) — worth grepping `2>/dev/null`
+  near any git/subprocess call before assuming a generic error message
+  is the real story.
+- Fixed: both functions now pass `-c safe.directory="$dir"` on every git
+  invocation — scoped to that single command, not a persistent
+  `--global` config change, so it doesn't silently widen trust for any
+  other repo on the box. This also means `_git_short_commit()` for
+  Zenith-TG was very likely showing `?` for the same reason on any
+  server where `ensure_tgrelay_user()` had already run — not just a
+  missing-sudoers-regen case as `z0r-panel`'s equivalent note assumed
+  (that one's on the panel side and calls a different directory set, so
+  unaffected, but worth double-checking if `Zenith-TG (?)` shows up
+  there too some day).
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

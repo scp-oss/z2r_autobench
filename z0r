@@ -1382,7 +1382,7 @@ _service_on_menu() {
 _git_short_commit() {
   local dir="$1"
   [ -d "$dir/.git" ] || { echo "?"; return; }
-  git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo "?"
+  git -C "$dir" -c safe.directory="$dir" rev-parse --short HEAD 2>/dev/null || echo "?"
 }
 
 _check_git_updates() {
@@ -1392,12 +1392,20 @@ _check_git_updates() {
     return 0
   fi
   echo "Проверяю обновления для $label ($dir)..."
-  if ! git -C "$dir" fetch origin main --quiet 2>/dev/null; then
+  # -c safe.directory=$dir: без этого git отказывается работать здесь же
+  # ("detected dubious ownership"), если каталог принадлежит не тому же
+  # пользователю, что и текущий процесс -- живой случай: ensure_tgrelay_user()
+  # делает `chown -R tgrelay:tgrelay "$TGRELAY_DIR"` при каждом заходе в
+  # управление Zenith-TG, а z0r сам обычно запущен от root, так что владелец
+  # каталога и euid расходятся. Раньше это тонуло за 2>/dev/null и
+  # выглядело как "сеть или доступ к репозиторию" -- на деле ни то, ни
+  # другое.
+  if ! git -C "$dir" -c safe.directory="$dir" fetch origin main --quiet 2>/dev/null; then
     echo "Не удалось получить origin/main (сеть или доступ к репозиторию) — проверь вручную." >&2
     return 1
   fi
   local behind
-  behind="$(git -C "$dir" rev-list --count HEAD..origin/main 2>/dev/null)"
+  behind="$(git -C "$dir" -c safe.directory="$dir" rev-list --count HEAD..origin/main 2>/dev/null)"
   if [ -z "$behind" ]; then
     echo "Не удалось сравнить текущий чекаут с origin/main (не на ветке main? отсоединённый HEAD?)." >&2
     return 1
@@ -1405,7 +1413,7 @@ _check_git_updates() {
     echo "$label: актуально, HEAD совпадает с origin/main."
   else
     echo "$label: отстаёт от origin/main на $behind коммит(ов) — обновить можно через пункт 25 (Автообновление)."
-    git -C "$dir" log --oneline "HEAD..origin/main" 2>/dev/null | head -10
+    git -C "$dir" -c safe.directory="$dir" log --oneline "HEAD..origin/main" 2>/dev/null | head -10
   fi
 }
 
