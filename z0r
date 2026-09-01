@@ -2819,15 +2819,25 @@ tgrelay_setup_cf_worker() {
     return 1
   fi
   local cf_token="${CLOUDFLARE_API_TOKEN:-}"
+  local cf_env_file="/etc/z2r_autobench/tgrelay.env"
+  # deploy.sh сам кэширует токен в tgrelay.env после ПЕРВОГО успешного
+  # запуска (chmod 600, тот же файл, что уже хранит остальные секреты
+  # проекта) -- если он там уже есть, второй/третий заход в этот пункт
+  # меню не должен спрашивать вообще ничего.
+  if [ -z "$cf_token" ] && [ -f "$cf_env_file" ]; then
+    cf_token="$(grep '^CLOUDFLARE_API_TOKEN=' "$cf_env_file" 2>/dev/null | tail -1 | cut -d= -f2-)"
+  fi
   if [ -n "$cf_token" ]; then
-    echo "Использую CLOUDFLARE_API_TOKEN из окружения (уже экспортирован)."
+    echo "Использую сохранённый CLOUDFLARE_API_TOKEN (из окружения или $cf_env_file) — не спрашиваю заново."
   else
     echo "Нужен Cloudflare API-токен (dash.cloudflare.com/profile/api-tokens,"
     echo "шаблон \"Edit Cloudflare Workers\" достаточен) -- без учётки Cloudflare"
     echo "развернуть воркер физически негде, это не секрет z0r/Zenith-TG."
+    echo "Спросится только сейчас, один раз на этот сервер — deploy.sh сам"
+    echo "сохранит его для всех следующих заходов сюда."
     echo "(Если вставка сюда не работает через твой SSH-клиент — вместо этого"
     echo "выйди [Ctrl+C], сделай 'export CLOUDFLARE_API_TOKEN=...' в шелле и"
-    echo "зайди в этот пункт меню заново — тогда спрашивать не будет вообще.)"
+    echo "зайди в этот пункт меню заново.)"
     read -rp "CLOUDFLARE_API_TOKEN: " cf_token
   fi
   [ -n "$cf_token" ] || { echo "Пустой токен, отмена." >&2; return 1; }

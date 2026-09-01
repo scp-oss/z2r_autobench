@@ -1355,6 +1355,18 @@ project names here — same public-repo constraint as README.md.
   same session just touched both) — revisit that item once before the
   panel's new commit labels actually resolve instead of showing `?`.
 
+## `tgrelay_setup_cf_worker()` no longer prompts on repeat visits (2026-09-01)
+
+- Full reasoning (why not Google Drive, why a local `chmod 600` cache
+  instead) lives in Zenith-TG's own CLAUDE.md "`CLOUDFLARE_API_TOKEN`
+  caching, and why not Google Drive" — this repo's side is just the
+  mirror check: `tgrelay_setup_cf_worker()` now greps
+  `/etc/z2r_autobench/tgrelay.env` for an already-cached
+  `CLOUDFLARE_API_TOKEN=` line (written by `cf_worker/deploy.sh` itself
+  after its first successful run) before ever printing the prompt — so
+  the interactive question genuinely only appears the first time this
+  menu item is used on a given server, not every time.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
