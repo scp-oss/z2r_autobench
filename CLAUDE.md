@@ -1298,14 +1298,28 @@ project names here — same public-repo constraint as README.md.
   branch grew its own tiny two-item submenu (1=service management via
   `_service_on_menu`, 2=this) — `_service_on_menu`'s own contract and
   every other caller are untouched.
-- Prompts for `CLOUDFLARE_API_TOKEN` via `read -rsp` (hidden input) fresh
-  on every call — never stored between z0r invocations, never written to
-  disk by z0r itself. This is intentional, not a missed convenience: the
-  token is the human's own Cloudflare account credential, out of scope
-  for anything z0r/Zenith-TG should be persisting on its own — same
-  reasoning as why `deploy.sh` itself generates a brand new `RELAY_SECRET`
-  every run rather than accepting one as input (see Zenith-TG's own
-  CLAUDE.md "`cf_worker/deploy.sh` — one-command deploy").
+- Prompts for `CLOUDFLARE_API_TOKEN` fresh on every call — never stored
+  between z0r invocations, never written to disk by z0r itself. This is
+  intentional, not a missed convenience: the token is the human's own
+  Cloudflare account credential, out of scope for anything z0r/Zenith-TG
+  should be persisting on its own — same reasoning as why `deploy.sh`
+  itself generates a brand new `RELAY_SECRET` every run rather than
+  accepting one as input (see Zenith-TG's own CLAUDE.md
+  "`cf_worker/deploy.sh` — one-command deploy").
+- **Live bug, same day**: originally used `read -rsp` (hidden input, no
+  echo at all) — on the live server, pasting the token into that field
+  through the SSH client in use produced zero visible feedback AND the
+  paste itself didn't reliably land (can't tell "invisible but worked"
+  from "silently dropped" with zero echo either way — a real, reported
+  "nothing gets typed into that field" symptom). Fixed two ways: (1) if
+  `CLOUDFLARE_API_TOKEN` is already exported in the shell before entering
+  z0r, the function uses it silently and never prompts at all — the
+  clean workaround, `export` in a normal (non-`-s`) shell doesn't have
+  this paste problem; (2) if not pre-exported, the prompt switched from
+  `read -rsp` to plain `read -rp` (visible input, no more silent
+  swallowing) — a one-time, single-use token briefly echoed to a
+  terminal is a smaller real risk than a hidden field that can silently
+  fail with no way to tell.
 - Checks for `wrangler` on `$PATH` before prompting for the token at all
   — if missing, prints the exact `nvm install 22 && npm install -g
   wrangler` sequence (Debian's own `apt install nodejs` only gives v20,
@@ -1313,6 +1327,33 @@ project names here — same public-repo constraint as README.md.
   instead of silently trying to install Node system-wide — installing a
   language runtime is a bigger, more opinionated footprint than this
   optional sub-feature should impose without an explicit ask.
+
+## "Какой коммит сейчас" next to check-updates (since 2026-09-01)
+
+- `_check_git_updates()`'s own output only appears after the human
+  explicitly clicks "проверить обновления" (item 3 in `_service_on_menu`'s
+  submenu) and does a real `git fetch` — useful for "is there anything
+  new," useless for "what am I running right now" without leaving the
+  menu to check manually. New `_git_short_commit(dir)` (plain, no-network
+  `git rev-parse --short HEAD`, `"?"` on any error) is shown inline in the
+  module's own label wherever `_service_on_menu` is called for a
+  git-backed module — `autotune-daemon (a1b2c3d)`, `Discord_bot (...)`,
+  `web_panel (...)`, `Zenith-TG (...)` — visible the moment you open that
+  module's ON-state menu, no extra click or network round-trip needed.
+  `zapret2`/`DNSCrypt-proxy` untouched (not git repos, same reasoning as
+  why they never got a check-updates option either).
+- Mirrored on the panel side: `daemon_ctl.git_short_commit(repo_dir)` (new,
+  same `sudo -n git rev-parse --short HEAD`) feeds `daemon_commit`/
+  `autorun_commit`/`promoter_commit` into `_controls_context()`, shown in
+  each card's own `<h3>` on `/controls/automation` — `zenith-autorun` and
+  `zenith-promoter` share `config.ZENITH_DIR`, so they correctly show the
+  identical hash (same checkout). New sudoers grant needed: `git -C <dir>
+  rev-parse --short HEAD` added to `sudoers_git_check_cmds` for both
+  `$INSTALL_DIR` and `$ZENITH_DIR` (two new literal lines, no `*` —
+  ensure_panel_runtime_grants must be re-run (it's called from `manage_panel()`,
+  z0r item 24/web_panel — NOT item 22/Zenith-TG, easy to mix up since this
+  same session just touched both) — revisit that item once before the
+  panel's new commit labels actually resolve instead of showing `?`.
 
 ## Publishing hygiene
 

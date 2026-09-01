@@ -1374,6 +1374,17 @@ _service_on_menu() {
 # только показываем, есть ли смысл туда заходить). "main", не текущая
 # ветка — тот же принцип, что у autoupdate.sh (см. его докстринг:
 # "продакшена должно идти от того, что реально смержено в main").
+# Короткий хэш текущего чекаута -- показывается рядом с названием
+# модуля в ON-подменю (см. вызовы _service_on_menu ниже), чтобы было
+# видно, на каком коммите реально стоит модуль, не только "актуально/
+# отстаёт" (то печатает уже сам "проверить обновления", отдельным
+# действием, а этот хэш виден сразу, без захода в тот пункт).
+_git_short_commit() {
+  local dir="$1"
+  [ -d "$dir/.git" ] || { echo "?"; return; }
+  git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo "?"
+}
+
 _check_git_updates() {
   local dir="$1" label="$2"
   if [ ! -d "$dir/.git" ]; then
@@ -1442,7 +1453,7 @@ manage_daemon() {
       esac
       ;;
     ON)
-      _service_on_menu "autotune-daemon" _daemon_do_restart _daemon_do_stop _daemon_do_check_updates
+      _service_on_menu "autotune-daemon ($(_git_short_commit "$INSTALL_DIR"))" _daemon_do_restart _daemon_do_stop _daemon_do_check_updates
       ;;
   esac
 }
@@ -1547,7 +1558,7 @@ manage_voice_bot() {
       esac
       ;;
     ON)
-      _service_on_menu "Discord_bot" _voice_bot_do_restart _voice_bot_do_stop _voice_bot_do_check_updates
+      _service_on_menu "Discord_bot ($(_git_short_commit "$VOICE_BOT_DIR"))" _voice_bot_do_restart _voice_bot_do_stop _voice_bot_do_check_updates
       ;;
   esac
 }
@@ -2474,7 +2485,11 @@ ensure_panel_runtime_grants() {
   # живут в одном репозитории, поэтому одна и та же тройка команд
   # обслуживает обе кнопки) — никаких "*", ровно то, что реально вызывает
   # check_git_updates().
-  local sudoers_git_check_cmds="$git_bin -C $INSTALL_DIR fetch origin main, $git_bin -C $INSTALL_DIR rev-list --count HEAD..origin/main, $git_bin -C $INSTALL_DIR log --oneline HEAD..origin/main, $git_bin -C $ZENITH_DIR fetch origin main, $git_bin -C $ZENITH_DIR rev-list --count HEAD..origin/main, $git_bin -C $ZENITH_DIR log --oneline HEAD..origin/main"
+  # rev-parse --short HEAD добавлен 2026-09-01 для "какой коммит сейчас"
+  # рядом с кнопкой "проверить обновления" (z0r-panel::daemon_ctl.
+  # git_short_commit()) -- отдельная литеральная команда, тот же принцип,
+  # что остальные три (никаких "*").
+  local sudoers_git_check_cmds="$git_bin -C $INSTALL_DIR fetch origin main, $git_bin -C $INSTALL_DIR rev-list --count HEAD..origin/main, $git_bin -C $INSTALL_DIR log --oneline HEAD..origin/main, $git_bin -C $INSTALL_DIR rev-parse --short HEAD, $git_bin -C $ZENITH_DIR fetch origin main, $git_bin -C $ZENITH_DIR rev-list --count HEAD..origin/main, $git_bin -C $ZENITH_DIR log --oneline HEAD..origin/main, $git_bin -C $ZENITH_DIR rev-parse --short HEAD"
 
   # Периодический автозапуск (zenith-autorun.service) и автопродвижение
   # (zenith-promoter.service) БЕЗ участия человека -- ЖИВУТ КАК
@@ -2623,7 +2638,7 @@ manage_panel() {
       esac
       ;;
     ON)
-      _service_on_menu "web_panel" _panel_do_restart _panel_do_stop _panel_do_check_updates
+      _service_on_menu "web_panel ($(_git_short_commit "$PANEL_DIR"))" _panel_do_restart _panel_do_stop _panel_do_check_updates
       ;;
   esac
 }
@@ -2782,11 +2797,16 @@ tgrelay_enable() {
 # фича поверх основного relay (тот работает и без неё, просто без
 # доступа к этим двум сервисам в браузере) -- поэтому отдельный явный
 # шаг, а не часть tgrelay_install_files/tgrelay_enable по умолчанию.
-# CLOUDFLARE_API_TOKEN спрашиваем каждый раз заново (-rsp, скрытый ввод,
-# не сохраняем в переменных окружения между запусками z0r) -- сам
-# deploy.sh секрет НИКОГДА не переиспользует и не коммитит, генерирует
-# заново на каждый вызов (см. cf_worker/README.md "Почему нельзя просто
-# закоммитить готовый секрет").
+# CLOUDFLARE_API_TOKEN: если уже экспортирован в окружении ДО запуска
+# z0r -- используем его молча, не спрашиваем (обходит живой баг
+# 2026-09-01: `read -rsp` скрытый ввод не показывает вообще ничего на
+# экране, что само по себе ожидаемо, НО через некоторые SSH-терминалы
+# вставка из буфера в такое поле реально теряется/не долетает -- совсем
+# без визуальной обратной связи не отличить "вставилось, просто не
+# видно" от "не вставилось вообще"). Если не экспортирован — спрашиваем
+# как раньше, но uже НЕ скрытым вводом (-rp, не -rsp) -- токен разового
+# использования, живёт секунду в терминале, тут скрывать меньший вред,
+# чем "тихо не работает и непонятно почему".
 tgrelay_setup_cf_worker() {
   local worker_script="$TGRELAY_DIR/relay/cf_worker/deploy.sh"
   [ -f "$worker_script" ] || { echo "Не найден $worker_script — обнови Zenith-TG (git pull) и зайди снова." >&2; return 1; }
@@ -2798,10 +2818,18 @@ tgrelay_setup_cf_worker() {
     echo "  npm install -g wrangler" >&2
     return 1
   fi
-  echo "Нужен Cloudflare API-токен (dash.cloudflare.com/profile/api-tokens,"
-  echo "шаблон \"Edit Cloudflare Workers\" достаточен) -- без учётки Cloudflare"
-  echo "развернуть воркер физически негде, это не секрет z0r/Zenith-TG."
-  read -rsp "CLOUDFLARE_API_TOKEN: " cf_token; echo
+  local cf_token="${CLOUDFLARE_API_TOKEN:-}"
+  if [ -n "$cf_token" ]; then
+    echo "Использую CLOUDFLARE_API_TOKEN из окружения (уже экспортирован)."
+  else
+    echo "Нужен Cloudflare API-токен (dash.cloudflare.com/profile/api-tokens,"
+    echo "шаблон \"Edit Cloudflare Workers\" достаточен) -- без учётки Cloudflare"
+    echo "развернуть воркер физически негде, это не секрет z0r/Zenith-TG."
+    echo "(Если вставка сюда не работает через твой SSH-клиент — вместо этого"
+    echo "выйди [Ctrl+C], сделай 'export CLOUDFLARE_API_TOKEN=...' в шелле и"
+    echo "зайди в этот пункт меню заново — тогда спрашивать не будет вообще.)"
+    read -rp "CLOUDFLARE_API_TOKEN: " cf_token
+  fi
   [ -n "$cf_token" ] || { echo "Пустой токен, отмена." >&2; return 1; }
   CLOUDFLARE_API_TOKEN="$cf_token" bash "$worker_script"
 }
@@ -2826,7 +2854,7 @@ manage_tg_relay() {
       echo "  0) Назад"
       read -re -p "> " tgch
       case "$tgch" in
-        1) _service_on_menu "Zenith-TG" _tgrelay_do_restart _tgrelay_do_stop _tgrelay_do_check_updates ;;
+        1) _service_on_menu "Zenith-TG ($(_git_short_commit "$TGRELAY_DIR"))" _tgrelay_do_restart _tgrelay_do_stop _tgrelay_do_check_updates ;;
         2) tgrelay_setup_cf_worker ;;
         *) : ;;
       esac
