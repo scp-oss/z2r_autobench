@@ -125,7 +125,7 @@ ZENITH_REPO_URL="https://github.com/scp-oss/zenith.git"
 PANEL_DIR="$INSTALL_DIR/z0r-panel"
 PANEL_REPO_URL="https://github.com/scp-oss/z0r-panel.git"
 PANEL_SERVICE="zenith-panel"
-# Zenith-TG — прозрачный доступ к Telegram (отдельный репозиторий). Не
+# Zenith-WS — прозрачный доступ к Telegram (отдельный репозиторий). Не
 # десинк-профиль zapret2 (проверено вживую — не помогает против
 # IP-блэклиста конкретных DC-адресов Telegram), а relay без MTProxy-
 # секрета: iptables REDIRECT молча заворачивает исходящий TCP:443 к
@@ -133,9 +133,9 @@ PANEL_SERVICE="zenith-panel"
 # умеет достучаться до Telegram (вендоренная relay-машинерия
 # Flowseal/tg-ws-proxy). Клиенту (Telegram Desktop/mobile) ничего
 # настраивать не нужно — см. README репозитория.
-TGRELAY_DIR="$INSTALL_DIR/Zenith-TG"
-TGRELAY_REPO_URL="https://github.com/scp-oss/Zenith-TG.git"
-TGRELAY_SERVICE="tg-transparent-relay"
+WSRELAY_DIR="$INSTALL_DIR/Zenith-WS"
+WSRELAY_REPO_URL="https://github.com/scp-oss/Zenith-WS.git"
+WSRELAY_SERVICE="ws-transparent-relay"
 # DNSCrypt-proxy -- локальный DoH-резолвер, не самописный компонент этого
 # репозитория, а обычный пакет дистрибутива. Появился из живого случая
 # 2026-08-22 (NETH-4): провайдер начал резать обычный DNS/DoT/DoH к
@@ -149,7 +149,7 @@ DNSCRYPT_TOML="/etc/dnscrypt-proxy/dnscrypt-proxy.toml"
 DNSCRYPT_SERVER_NAMES="server_names = ['cloudflare', 'cloudflare-ipv6', 'nextdns', 'sb']"
 DNSCRYPT_DHCPCD_MARKER="# z0r-dnscrypt: локальный DoH-резолвер (dnscrypt-proxy), добавлено z0r"
 # Автообновление всей экосистемы (z2r_autobench/Zenith/z0r-panel/
-# Zenith-TG) -- общий конфиг с z0r-panel (веб тоже читает/пишет ЭТОТ ЖЕ
+# Zenith-WS) -- общий конфиг с z0r-panel (веб тоже читает/пишет ЭТОТ ЖЕ
 # файл, см. autoupdate.sh и README z0r-panel), не свой отдельный.
 AUTOUPDATE_CONF="/etc/z2r_autobench/autoupdate.conf"
 PASSES="${PASSES:-$( [ -f "$PASSES_CONF" ] && cat "$PASSES_CONF" 2>/dev/null || echo 3 )}"
@@ -462,9 +462,9 @@ get_panel_status() {
   systemctl is-active --quiet "$PANEL_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
 }
 
-get_tg_relay_status() {
-  [ -d "$TGRELAY_DIR" ] || { echo "NONE"; return; }
-  systemctl is-active --quiet "$TGRELAY_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
+get_ws_relay_status() {
+  [ -d "$WSRELAY_DIR" ] || { echo "NONE"; return; }
+  systemctl is-active --quiet "$WSRELAY_SERVICE" 2>/dev/null && echo "ON" || echo "OFF"
 }
 
 get_dnscrypt_status() {
@@ -649,10 +649,10 @@ show_menu() {
   echo "" >&2
   echo " 20) DNSCrypt-proxy $(color_tag "$(get_dnscrypt_status)") (локальный DoH-резолвер — на случай блокировки DoT/DoH к обычным резолверам)" >&2
   echo " 21) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
-  echo " 22) Zenith-TG $(color_tag "$(get_tg_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
+  echo " 22) Zenith-WS $(color_tag "$(get_ws_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
   echo " 23) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
   echo " 24) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
-  echo " 25) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-TG)" >&2
+  echo " 25) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-WS)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
   echo "" >&2
@@ -662,10 +662,10 @@ show_menu() {
   echo " 29) Удалить web_panel" >&2
   echo " 30) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
   echo " 31) Удалить Zenith" >&2
-  echo " 32) Удалить Zenith-TG" >&2
+  echo " 32) Удалить Zenith-WS" >&2
   echo " 33) Удалить DNSCrypt-proxy" >&2
   echo "" >&2
-  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + web_panel + Zenith + Zenith-TG + DNSCrypt-proxy)" >&2
+  echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + web_panel + Zenith + Zenith-WS + DNSCrypt-proxy)" >&2
   echo "" >&2
   echo "  0) Выход" >&2
   echo "" >&2
@@ -807,7 +807,7 @@ run_domain_test() {
 
 # shorts_probe.sh — только диагностика (см. докстринг самого скрипта),
 # ничего не устанавливает/не удаляет отдельно (в отличие от Zenith/
-# Zenith-TG/Discord_bot) — это простой скрипт внутри z2r_autobench,
+# Zenith-WS/Discord_bot) — это простой скрипт внутри z2r_autobench,
 # приезжает вместе с ним через обычный git pull/автообновление, отдельного
 # жизненного цикла как у сервисов у него нет.
 run_shorts_test() {
@@ -1344,7 +1344,7 @@ launch_z2r() {
 # [3) Проверить обновления]  0) Назад" — вместо разрозненного одиночного
 # [y/N] в каждом manage_X() (живой запрос 2026-08-31: у части модулей
 # раньше был ТОЛЬКО restart (zapret2), у части ТОЛЬКО stop (autotune-
-# daemon/Discord_bot/Zenith-TG/web_panel/DNSCrypt-proxy) — ни у одного не
+# daemon/Discord_bot/Zenith-WS/web_panel/DNSCrypt-proxy) — ни у одного не
 # было обоих действий сразу в одном месте; следом в тот же день —
 # "проверить обновления" туда же). restart_fn/stop_fn/check_fn —
 # функции без аргументов; check_fn НЕОБЯЗАТЕЛЕН (пусто — пункт 3 вообще
@@ -1394,9 +1394,9 @@ _check_git_updates() {
   echo "Проверяю обновления для $label ($dir)..."
   # -c safe.directory=$dir: без этого git отказывается работать здесь же
   # ("detected dubious ownership"), если каталог принадлежит не тому же
-  # пользователю, что и текущий процесс -- живой случай: ensure_tgrelay_user()
-  # делает `chown -R tgrelay:tgrelay "$TGRELAY_DIR"` при каждом заходе в
-  # управление Zenith-TG, а z0r сам обычно запущен от root, так что владелец
+  # пользователю, что и текущий процесс -- живой случай: ensure_wsrelay_user()
+  # делает `chown -R wsrelay:wsrelay "$WSRELAY_DIR"` при каждом заходе в
+  # управление Zenith-WS, а z0r сам обычно запущен от root, так что владелец
   # каталога и euid расходятся. Раньше это тонуло за 2>/dev/null и
   # выглядело как "сеть или доступ к репозиторию" -- на деле ни то, ни
   # другое.
@@ -1873,7 +1873,7 @@ zenith_menu() {
 autoupdate_included_projects() {
   local projects=(z2r_autobench)
   [ -d "$PANEL_DIR" ] && projects+=(panel)
-  [ -d "$TGRELAY_DIR" ] && projects+=(tgrelay)
+  [ -d "$WSRELAY_DIR" ] && projects+=(wsrelay)
   printf '%s\n' "${projects[@]}"
 }
 
@@ -1881,7 +1881,7 @@ autoupdate_project_label() {
   case "$1" in
     z2r_autobench) echo "z2r_autobench (сам инструмент + autotune-daemon)" ;;
     panel) echo "z0r-panel (pip install + systemctl restart zenith-panel)" ;;
-    tgrelay) echo "Zenith-TG (pip install + systemctl restart tg-transparent-relay)" ;;
+    wsrelay) echo "Zenith-WS (pip install + systemctl restart ws-transparent-relay)" ;;
     zenith)
       if [ "$(zenith_db_backend)" = "native" ]; then
         echo "Zenith (git pull, БД нативная -- Docker не трогаю)"
@@ -2682,26 +2682,26 @@ uninstall_panel() {
   esac
 }
 
-# Юнит в репозитории Zenith-TG (relay/tg-transparent-relay.service)
-# захардкожен на /opt/Zenith-TG (так был вручную развёрнут и проверен
-# на первом сервере) — z0r клонирует в $TGRELAY_DIR (=$INSTALL_DIR/
-# Zenith-TG, по общей конвенции этого файла), путь может не совпадать,
-# поэтому подставляем реальный $TGRELAY_DIR при копировании юнита, а не
+# Юнит в репозитории Zenith-WS (relay/ws-transparent-relay.service)
+# захардкожен на /opt/Zenith-WS (так был вручную развёрнут и проверен
+# на первом сервере) — z0r клонирует в $WSRELAY_DIR (=$INSTALL_DIR/
+# Zenith-WS, по общей конвенции этого файла), путь может не совпадать,
+# поэтому подставляем реальный $WSRELAY_DIR при копировании юнита, а не
 # копируем как есть (см. manage_panel — там копия 1:1, т.к. её юнит уже
 # ссылается на $PANEL_DIR по той же конвенции).
-# Клонирует Zenith-TG + ставит venv/пользователя, БЕЗ вопроса -- вызывается
-# и из manage_tg_relay() (после её "клонировать? y/n"), и напрямую из
+# Клонирует Zenith-WS + ставит venv/пользователя, БЕЗ вопроса -- вызывается
+# и из manage_ws_relay() (после её "клонировать? y/n"), и напрямую из
 # первого запуска (см. first_run_install_modules). Включение (сервис +
 # iptables REDIRECT) сюда намеренно НЕ входит -- сетевое изменение,
 # отдельный осознанный шаг через пункт 22 ещё раз.
-tgrelay_install_files() {
+wsrelay_install_files() {
   if ! command -v git >/dev/null 2>&1; then
     echo "git не найден, пробую поставить..." >&2
     apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
     apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
   fi
-  if ! git clone "$TGRELAY_REPO_URL" "$TGRELAY_DIR"; then
-    echo "Не удалось склонировать $TGRELAY_REPO_URL — GitHub недоступен?" >&2
+  if ! git clone "$WSRELAY_REPO_URL" "$WSRELAY_DIR"; then
+    echo "Не удалось склонировать $WSRELAY_REPO_URL — GitHub недоступен?" >&2
     return 1
   fi
 
@@ -2709,17 +2709,17 @@ tgrelay_install_files() {
     echo "python3 не найден, пробую поставить..." >&2
     apt-get install -y python3 python3-venv >/dev/null 2>&1 || opkg install python3 >/dev/null 2>&1 || apk add python3 >/dev/null 2>&1
   fi
-  if ! ( cd "$TGRELAY_DIR" && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt ); then
-    echo "Не удалось поставить зависимости relay — доразберись руками в $TGRELAY_DIR." >&2
+  if ! ( cd "$WSRELAY_DIR" && python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt ); then
+    echo "Не удалось поставить зависимости relay — доразберись руками в $WSRELAY_DIR." >&2
     return 1
   fi
 
-  if ! bash "$TGRELAY_DIR/cidr/fetch_telegram_cidr.sh"; then
+  if ! bash "$WSRELAY_DIR/cidr/fetch_telegram_cidr.sh"; then
     echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
     return 1
   fi
 
-  ensure_tgrelay_user
+  ensure_wsrelay_user
 
   echo ""
   echo "Склонирован и готов. При включении (сейчас спросит) поднимется сервис"
@@ -2727,72 +2727,72 @@ tgrelay_install_files() {
   echo "репозитория, 'Что требует внимания при эксплуатации')."
 }
 
-# .service требует User=tgrelay/Group=tgrelay -- если юзера нет, systemd
+# .service требует User=wsrelay/Group=wsrelay -- если юзера нет, systemd
 # падает с "status=217/USER, Failed to determine user credentials: No such
 # process" и уходит в бесконечный auto-restart-цикл (Restart=on-failure),
 # без единого намёка на причину в статусе (только в полном journalctl).
 # Живой случай на Provider B 2026-08-24: юзер по какой-то причине не создался/не
 # сохранился при установке -- ~8000+ рестартов, сервис вечно "OFF" в
-# get_tg_relay_status(). Проверяем и чиним БЕЗУСЛОВНО при каждом заходе
-# в manage_tg_relay() (тот же принцип, что ensure_panel_runtime_grants и
+# get_ws_relay_status(). Проверяем и чиним БЕЗУСЛОВНО при каждом заходе
+# в manage_ws_relay() (тот же принцип, что ensure_panel_runtime_grants и
 # dnscrypt_wire_resolver -- см. их комментарии), не только при первой
 # установке -- следующий Restart=on-failure подхватит починку сам, без
 # ручного systemctl restart.
-ensure_tgrelay_user() {
-  if ! id tgrelay >/dev/null 2>&1; then
-    if ! useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay; then
-      echo "Не удалось создать системного пользователя tgrelay -- сервис не сможет запуститься (status=217/USER). Разберись руками: useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay" >&2
+ensure_wsrelay_user() {
+  if ! id wsrelay >/dev/null 2>&1; then
+    if ! useradd --system --no-create-home --shell /usr/sbin/nologin wsrelay; then
+      echo "Не удалось создать системного пользователя wsrelay -- сервис не сможет запуститься (status=217/USER). Разберись руками: useradd --system --no-create-home --shell /usr/sbin/nologin wsrelay" >&2
       return 1
     fi
-    echo "Создан системный пользователь tgrelay (отсутствовал -- сервис из-за этого падал в рестарт-цикл)."
+    echo "Создан системный пользователь wsrelay (отсутствовал -- сервис из-за этого падал в рестарт-цикл)."
   fi
-  chown -R tgrelay:tgrelay "$TGRELAY_DIR"
+  chown -R wsrelay:wsrelay "$WSRELAY_DIR"
 }
 
 # Копирует юнит (если ещё не скопирован) и спрашивает "включить сейчас
-# (сервис + REDIRECT)?" -- вынесено из OFF-ветки manage_tg_relay(), чтобы
+# (сервис + REDIRECT)?" -- вынесено из OFF-ветки manage_ws_relay(), чтобы
 # звать тем же кодом сразу после установки (NONE-ветка), в ОДНОМ заходе
 # в меню, а не заставлять заходить в пункт 22 второй раз подряд ("дважды
 # пикать пункт", живой запрос 2026-08-24). REDIRECT -- сетевое изменение,
 # поэтому вопрос [y/N] остаётся явным, просто больше не требует отдельного
 # захода в меню.
-tgrelay_enable() {
-  if [ ! -f "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" ]; then
-    echo "Не найден $TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
+wsrelay_enable() {
+  if [ ! -f "$WSRELAY_DIR/relay/${WSRELAY_SERVICE}.service" ]; then
+    echo "Не найден $WSRELAY_DIR/relay/${WSRELAY_SERVICE}.service — что-то не так с чекаутом репозитория." >&2
     return 1
   fi
-  # Один общий sed вместо двух точечных (были только на /opt/Zenith-TG/relay
-  # и /opt/Zenith-TG/.venv) -- пропускал ReadWritePaths=/opt/Zenith-TG (без
+  # Один общий sed вместо двух точечных (были только на /opt/Zenith-WS/relay
+  # и /opt/Zenith-WS/.venv) -- пропускал ReadWritePaths=/opt/Zenith-WS (без
   # хвоста /relay или /.venv), с ProtectSystem=strict это указывало на
   # несуществующий путь и systemd падал с status=226/NAMESPACE (не
   # мог настроить mount namespace) -- живой случай на Provider B 2026-08-24,
   # сервис даже не доходил до старта python. Регенерируем БЕЗУСЛОВНО при
   # каждом заходе (сравниваем через cmp, не просто "файла ещё нет") --
-  # тот же принцип, что ensure_tgrelay_user/dnscrypt_wire_resolver: чтобы
+  # тот же принцип, что ensure_wsrelay_user/dnscrypt_wire_resolver: чтобы
   # починка сама долетела до уже установленного (сломанного) юнита, а не
   # только до новых установок.
   local tmp_unit; tmp_unit="$(mktemp)"
-  sed "s#/opt/Zenith-TG#${TGRELAY_DIR}#g" "$TGRELAY_DIR/relay/${TGRELAY_SERVICE}.service" > "$tmp_unit"
-  if [ ! -f "/etc/systemd/system/${TGRELAY_SERVICE}.service" ] || ! cmp -s "$tmp_unit" "/etc/systemd/system/${TGRELAY_SERVICE}.service"; then
-    mv -f "$tmp_unit" "/etc/systemd/system/${TGRELAY_SERVICE}.service"
+  sed "s#/opt/Zenith-WS#${WSRELAY_DIR}#g" "$WSRELAY_DIR/relay/${WSRELAY_SERVICE}.service" > "$tmp_unit"
+  if [ ! -f "/etc/systemd/system/${WSRELAY_SERVICE}.service" ] || ! cmp -s "$tmp_unit" "/etc/systemd/system/${WSRELAY_SERVICE}.service"; then
+    mv -f "$tmp_unit" "/etc/systemd/system/${WSRELAY_SERVICE}.service"
     systemctl daemon-reload
-    echo "Юнит установлен/обновлён: /etc/systemd/system/${TGRELAY_SERVICE}.service"
+    echo "Юнит установлен/обновлён: /etc/systemd/system/${WSRELAY_SERVICE}.service"
   else
     rm -f "$tmp_unit"
   fi
   read -re -p "Включить сейчас (сервис + REDIRECT)? [y/N]: " ans
   case "$ans" in
     y|Y)
-      systemctl enable --now "$TGRELAY_SERVICE"
+      systemctl enable --now "$WSRELAY_SERVICE"
       sleep 2
-      systemctl status "$TGRELAY_SERVICE" --no-pager
-      if bash "$TGRELAY_DIR/relay/setup_redirect.sh" apply; then
+      systemctl status "$WSRELAY_SERVICE" --no-pager
+      if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply; then
         echo "REDIRECT применён — трафик к подсетям Telegram (443) теперь идёт через relay."
       else
-        echo "Не удалось применить REDIRECT — сервис работает, но трафик пока не перенаправлен (доразберись руками: $TGRELAY_DIR/relay/setup_redirect.sh apply)." >&2
+        echo "Не удалось применить REDIRECT — сервис работает, но трафик пока не перенаправлен (доразберись руками: $WSRELAY_DIR/relay/setup_redirect.sh apply)." >&2
       fi
       read -re -p "Настроить сейчас доступ к web.telegram.org/WhatsApp Web в браузере (Cloudflare Worker, обходит IP-блокировку, не связанную с zapret2)? [y/N]: " cfans
-      case "$cfans" in y|Y) tgrelay_setup_cf_worker ;; *) : ;; esac
+      case "$cfans" in y|Y) wsrelay_setup_cf_worker ;; *) : ;; esac
       ;;
     *) echo "Ок, не трогаю." ;;
   esac
@@ -2800,11 +2800,11 @@ tgrelay_enable() {
 
 # web.telegram.org/web.whatsapp.com блокируются на уровне SYN
 # (null-route), независимо от zapret2 -- ни одна --lua-desync= стратегия
-# тут не поможет (см. Zenith-TG/CLAUDE.md "Android MTProto investigation"
+# тут не поможет (см. Zenith-WS/CLAUDE.md "Android MTProto investigation"
 # и "Same fallback extended to WhatsApp"). Отдельная, опциональная
 # фича поверх основного relay (тот работает и без неё, просто без
 # доступа к этим двум сервисам в браузере) -- поэтому отдельный явный
-# шаг, а не часть tgrelay_install_files/tgrelay_enable по умолчанию.
+# шаг, а не часть wsrelay_install_files/wsrelay_enable по умолчанию.
 # CLOUDFLARE_API_TOKEN: если уже экспортирован в окружении ДО запуска
 # z0r -- используем его молча, не спрашиваем (обходит живой баг
 # 2026-09-01: `read -rsp` скрытый ввод не показывает вообще ничего на
@@ -2815,9 +2815,9 @@ tgrelay_enable() {
 # как раньше, но uже НЕ скрытым вводом (-rp, не -rsp) -- токен разового
 # использования, живёт секунду в терминале, тут скрывать меньший вред,
 # чем "тихо не работает и непонятно почему".
-tgrelay_setup_cf_worker() {
-  local worker_script="$TGRELAY_DIR/relay/cf_worker/deploy.sh"
-  [ -f "$worker_script" ] || { echo "Не найден $worker_script — обнови Zenith-TG (git pull) и зайди снова." >&2; return 1; }
+wsrelay_setup_cf_worker() {
+  local worker_script="$WSRELAY_DIR/relay/cf_worker/deploy.sh"
+  [ -f "$worker_script" ] || { echo "Не найден $worker_script — обнови Zenith-WS (git pull) и зайди снова." >&2; return 1; }
   if ! command -v wrangler >/dev/null 2>&1; then
     echo "wrangler (Cloudflare CLI) не установлен -- нужен Node >=22, Debian's apt" >&2
     echo "обычно даёт только v20. Поставь и повтори:" >&2
@@ -2827,8 +2827,8 @@ tgrelay_setup_cf_worker() {
     return 1
   fi
   local cf_token="${CLOUDFLARE_API_TOKEN:-}"
-  local cf_env_file="/etc/z2r_autobench/tgrelay.env"
-  # deploy.sh сам кэширует токен в tgrelay.env после ПЕРВОГО успешного
+  local cf_env_file="/etc/z2r_autobench/wsrelay.env"
+  # deploy.sh сам кэширует токен в wsrelay.env после ПЕРВОГО успешного
   # запуска (chmod 600, тот же файл, что уже хранит остальные секреты
   # проекта) -- если он там уже есть, второй/третий заход в этот пункт
   # меню не должен спрашивать вообще ничего.
@@ -2840,7 +2840,7 @@ tgrelay_setup_cf_worker() {
   else
     echo "Нужен Cloudflare API-токен (dash.cloudflare.com/profile/api-tokens,"
     echo "шаблон \"Edit Cloudflare Workers\" достаточен) -- без учётки Cloudflare"
-    echo "развернуть воркер физически негде, это не секрет z0r/Zenith-TG."
+    echo "развернуть воркер физически негде, это не секрет z0r/Zenith-WS."
     echo "Спросится только сейчас, один раз на этот сервер — deploy.sh сам"
     echo "сохранит его для всех следующих заходов сюда."
     echo "(Если вставка сюда не работает через твой SSH-клиент — вместо этого"
@@ -2852,28 +2852,28 @@ tgrelay_setup_cf_worker() {
   CLOUDFLARE_API_TOKEN="$cf_token" bash "$worker_script"
 }
 
-manage_tg_relay() {
-  local st; st="$(get_tg_relay_status)"
-  echo "Zenith-TG (Telegram relay): $st"
+manage_ws_relay() {
+  local st; st="$(get_ws_relay_status)"
+  echo "Zenith-WS (Telegram relay): $st"
   if [ "$st" != "NONE" ]; then
-    ensure_tgrelay_user
+    ensure_wsrelay_user
   fi
   case "$st" in
     NONE)
-      read -re -p "Склонировать и подготовить Zenith-TG в $TGRELAY_DIR? [y/N]: " ans
+      read -re -p "Склонировать и подготовить Zenith-WS в $WSRELAY_DIR? [y/N]: " ans
       case "$ans" in y|Y) ;; *) echo "Отмена."; return 0 ;; esac
-      tgrelay_install_files || return 1
-      tgrelay_enable
+      wsrelay_install_files || return 1
+      wsrelay_enable
       ;;
-    OFF) tgrelay_enable ;;
+    OFF) wsrelay_enable ;;
     ON)
       echo "  1) Управление сервисом (рестарт/остановить/апдейты)"
       echo "  2) Настроить доступ к web.telegram.org/WhatsApp Web в браузере (Cloudflare Worker)"
       echo "  0) Назад"
       read -re -p "> " tgch
       case "$tgch" in
-        1) _service_on_menu "Zenith-TG ($(_git_short_commit "$TGRELAY_DIR"))" _tgrelay_do_restart _tgrelay_do_stop _tgrelay_do_check_updates ;;
-        2) tgrelay_setup_cf_worker ;;
+        1) _service_on_menu "Zenith-WS ($(_git_short_commit "$WSRELAY_DIR"))" _wsrelay_do_restart _wsrelay_do_stop _wsrelay_do_check_updates ;;
+        2) wsrelay_setup_cf_worker ;;
         *) : ;;
       esac
       ;;
@@ -2881,36 +2881,36 @@ manage_tg_relay() {
 }
 # Рестарт НЕ трогает iptables REDIRECT (см. _service_on_menu докстринг) --
 # это уже применённое сетевое правило, не завязанное на сам процесс.
-_tgrelay_do_restart() {
-  systemctl restart "$TGRELAY_SERVICE"
+_wsrelay_do_restart() {
+  systemctl restart "$WSRELAY_SERVICE"
   sleep 2
-  systemctl status "$TGRELAY_SERVICE" --no-pager
+  systemctl status "$WSRELAY_SERVICE" --no-pager
 }
-_tgrelay_do_stop() {
-  bash "$TGRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
-  systemctl disable --now "$TGRELAY_SERVICE" 2>/dev/null || true
+_wsrelay_do_stop() {
+  bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
+  systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
   echo "Остановлен, REDIRECT снят."
 }
-_tgrelay_do_check_updates() {
-  _check_git_updates "$TGRELAY_DIR" "Zenith-TG"
+_wsrelay_do_check_updates() {
+  _check_git_updates "$WSRELAY_DIR" "Zenith-WS"
 }
 
-uninstall_tg_relay() {
-  if [ ! -d "$TGRELAY_DIR" ]; then
-    echo "Zenith-TG ($TGRELAY_DIR) не найден — нечего удалять."
+uninstall_ws_relay() {
+  if [ ! -d "$WSRELAY_DIR" ]; then
+    echo "Zenith-WS ($WSRELAY_DIR) не найден — нечего удалять."
     return 0
   fi
-  read -re -p "Найден $TGRELAY_DIR — снять REDIRECT, остановить сервис и удалить? [y/N]: " ans
+  read -re -p "Найден $WSRELAY_DIR — снять REDIRECT, остановить сервис и удалить? [y/N]: " ans
   case "$ans" in
     y|Y)
-      bash "$TGRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
-      systemctl disable --now "$TGRELAY_SERVICE" 2>/dev/null || true
-      rm -f "/etc/systemd/system/${TGRELAY_SERVICE}.service"
+      bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
+      systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${WSRELAY_SERVICE}.service"
       systemctl daemon-reload
-      rm -rf "$TGRELAY_DIR"
-      echo "Zenith-TG удалён. Юзер tgrelay не тронут — удали вручную при необходимости: userdel tgrelay"
+      rm -rf "$WSRELAY_DIR"
+      echo "Zenith-WS удалён. Юзер wsrelay не тронут — удали вручную при необходимости: userdel wsrelay"
       ;;
-    *) echo "Отмена, Zenith-TG не тронут." ;;
+    *) echo "Отмена, Zenith-WS не тронут." ;;
   esac
 }
 
@@ -3334,7 +3334,7 @@ uninstall_everything() {
   echo ""
   uninstall_zenith
   echo ""
-  uninstall_tg_relay
+  uninstall_ws_relay
   echo ""
   uninstall_dnscrypt
   echo ""
@@ -3349,7 +3349,7 @@ uninstall_everything() {
 # сразу следом через zenith_configure_wizard, а не потом через меню.
 # У панели/бота настройка -- это правка .env токеном/паролем руками, тут
 # автоматизировать нечего, install_files печатает точные инструкции.
-# DNSCrypt/Zenith-TG -- install_files и всё, доп. мастера нет.
+# DNSCrypt/Zenith-WS -- install_files и всё, доп. мастера нет.
 first_run_install_modules() {
   echo ""
   echo "Какие дополнительные модули поставить? (номера через запятую/пробел,"
@@ -3360,11 +3360,11 @@ first_run_install_modules() {
   echo "  3) web_panel        -- управление через браузер"
   echo "  4) Discord_bot      -- тестирование VOICE_UDP"
   echo "  5) DNSCrypt-proxy   -- локальный DoH-резолвер"
-  echo "  6) Zenith-TG        -- прозрачный доступ к Telegram"
+  echo "  6) Zenith-WS        -- прозрачный доступ к Telegram"
   read -re -p "Модули: " modsel
 
   local norm tok
-  local want_daemon=0 want_zenith=0 want_panel=0 want_bot=0 want_dnscrypt=0 want_tgrelay=0
+  local want_daemon=0 want_zenith=0 want_panel=0 want_bot=0 want_dnscrypt=0 want_wsrelay=0
   norm="$(echo "$modsel" | tr ',' ' ')"
   for tok in $norm; do
     case "$tok" in
@@ -3373,7 +3373,7 @@ first_run_install_modules() {
       3) want_panel=1 ;;
       4) want_bot=1 ;;
       5) want_dnscrypt=1 ;;
-      6) want_tgrelay=1 ;;
+      6) want_wsrelay=1 ;;
       "") ;;
       *) echo "Пропускаю неизвестный номер: $tok" >&2 ;;
     esac
@@ -3400,9 +3400,9 @@ first_run_install_modules() {
     install_dnscrypt
     echo "Проверь, что системный DNS реально переключился -- пункт 16 (проверка на дырявость)."
   fi
-  if [ "$want_tgrelay" = "1" ]; then
-    echo ""; echo "--- Zenith-TG ---"
-    tgrelay_install_files
+  if [ "$want_wsrelay" = "1" ]; then
+    echo ""; echo "--- Zenith-WS ---"
+    wsrelay_install_files
   fi
 
   echo ""
@@ -3582,7 +3582,7 @@ while true; do
     19) run_blob_tune ;;
     20) manage_dnscrypt ;;
     21) manage_zenith ;;
-    22) manage_tg_relay ;;
+    22) manage_ws_relay ;;
     23) manage_voice_bot ;;
     24) manage_panel ;;
     25) autoupdate_menu ;;
@@ -3592,7 +3592,7 @@ while true; do
     29) uninstall_panel ;;
     30) uninstall_autobench_self ;;
     31) uninstall_zenith ;;
-    32) uninstall_tg_relay ;;
+    32) uninstall_ws_relay ;;
     33) uninstall_dnscrypt ;;
     999) uninstall_everything ;;
     *)

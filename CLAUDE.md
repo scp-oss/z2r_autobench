@@ -467,7 +467,7 @@ project names here — same public-repo constraint as README.md.
   arithmetic comparison on a two-field string doesn't error loudly, it
   just evaluates false and looks like every strategy failing).
 
-## Zenith-TG (scp-oss/Zenith-TG)
+## Zenith-WS (scp-oss/Zenith-WS)
 
 - Separate repo: transparent Telegram access, not a zapret2 desync
   profile — tried that first (`zapret2/TG_MTPROTO.block.conf` still in
@@ -498,33 +498,33 @@ project names here — same public-repo constraint as README.md.
   "autotune-daemon moved to main menu" below; before that, 2026-08-24, see
   "z0r main menu renumbering"), same on-demand-clone pattern as Zenith's
   20/30 — but note its shipped
-  `relay/tg-transparent-relay.service` hardcodes `/opt/Zenith-TG`
-  (how it was first deployed by hand); `manage_tg_relay()` in `z0r`
-  `sed`-rewrites that path to the real `$TGRELAY_DIR` before installing
+  `relay/ws-transparent-relay.service` hardcodes `/opt/Zenith-WS`
+  (how it was first deployed by hand); `manage_ws_relay()` in `z0r`
+  `sed`-rewrites that path to the real `$WSRELAY_DIR` before installing
   the unit, don't `cp` it as-is like `manage_panel` does.
 - **First Provider B deploy (2026-08-24) hit two real bugs in that install path,
   both now fixed and confirmed working end-to-end on `Server B`:**
-  1. `.service` has `User=tgrelay`/`Group=tgrelay`; the system user wasn't
+  1. `.service` has `User=wsrelay`/`Group=wsrelay`; the system user wasn't
      getting created reliably (or didn't survive an uninstall/reinstall
      cycle via the menu — root cause not fully pinned down, `useradd` run
      by hand worked fine every time), so `systemctl` failed with
      `status=217/USER` ("Failed to determine user credentials: No such
      process") and crash-looped on `Restart=on-failure` — 8000+ restarts
-     before it was caught, `get_tg_relay_status()` just reports this as
+     before it was caught, `get_ws_relay_status()` just reports this as
      plain `OFF`, no hint that the real problem was a missing user, not
-     "not started yet". Fixed: `ensure_tgrelay_user()` now runs
-     unconditionally on every visit to `manage_tg_relay()` while
-     Zenith-TG is installed (same self-healing pattern as
+     "not started yet". Fixed: `ensure_wsrelay_user()` now runs
+     unconditionally on every visit to `manage_ws_relay()` while
+     Zenith-WS is installed (same self-healing pattern as
      `ensure_panel_runtime_grants`/`dnscrypt_wire_resolver`), not only
      during the original clone.
   2. Once the user existed, the service *still* failed to start, now with
      `status=226/NAMESPACE`. The `sed` rewrite above only covered
-     `/opt/Zenith-TG/relay` and `/opt/Zenith-TG/.venv` — it missed a bare
-     `ReadWritePaths=/opt/Zenith-TG` (no `/relay`/`/.venv` suffix) further
+     `/opt/Zenith-WS/relay` and `/opt/Zenith-WS/.venv` — it missed a bare
+     `ReadWritePaths=/opt/Zenith-WS` (no `/relay`/`/.venv` suffix) further
      down the same file. Combined with `ProtectSystem=strict`, systemd
      tried to bind-mount that literal (nonexistent on this layout) path
      read-write and failed to set up the mount namespace before Python
-     ever started. Fixed: one general `s#/opt/Zenith-TG#$TGRELAY_DIR#g`
+     ever started. Fixed: one general `s#/opt/Zenith-WS#$WSRELAY_DIR#g`
      substitution instead of two narrow ones, robust against any other
      directive in the unit that references the same base path.
   Both fixes are **unconditional on every menu visit**, not just at first
@@ -534,7 +534,7 @@ project names here — same public-repo constraint as README.md.
   up either fix otherwise, no matter how many times `git pull` ran.
   Also: install (clone+deps) and enable (systemd unit + iptables
   REDIRECT) used to require visiting menu item 20 twice in a row for a
-  fresh install — merged into one visit (`tgrelay_enable()` called
+  fresh install — merged into one visit (`wsrelay_enable()` called
   directly after a successful install), the `[y/N]` before applying
   REDIRECT stays since it's a live network change.
 - **New open issue, found 2026-08-24 after the fixes above — service runs
@@ -593,7 +593,7 @@ project names here — same public-repo constraint as README.md.
   17 -> 18  zenith-promoter (быстрый доступ)
   18 -> 19  DNSCrypt-proxy
   19 -> 20  Zenith
-  20 -> 21  Zenith-TG
+  20 -> 21  Zenith-WS
   21 -> 22  Discord_bot
   22 -> 23  web_panel
   23 -> 24  Автообновление
@@ -603,7 +603,7 @@ project names here — same public-repo constraint as README.md.
   27 -> 28  Удалить web_panel
   28 -> 29  Удалить z2r_autobench
   29 -> 30  Удалить Zenith
-  30 -> 31  Удалить Zenith-TG
+  30 -> 31  Удалить Zenith-WS
   31 -> 32  Удалить DNSCrypt-proxy
   ```
   Items `1-13` (profile IDs, число проходов, ручное переключение, тест
@@ -642,7 +642,7 @@ project names here — same public-repo constraint as README.md.
   (new) 19  blob_tune.sh                (inserted here)
   19 -> 20  DNSCrypt-proxy
   20 -> 21  Zenith
-  21 -> 22  Zenith-TG
+  21 -> 22  Zenith-WS
   22 -> 23  Discord_bot
   23 -> 24  web_panel
   24 -> 25  Автообновление
@@ -652,7 +652,7 @@ project names here — same public-repo constraint as README.md.
   28 -> 29  Удалить web_panel
   29 -> 30  Удалить z2r_autobench
   30 -> 31  Удалить Zenith
-  31 -> 32  Удалить Zenith-TG
+  31 -> 32  Удалить Zenith-WS
   32 -> 33  Удалить DNSCrypt-proxy
   ```
   Items `1-18` and `111`/`999`/`0` unchanged, same rule as every prior
@@ -681,13 +681,13 @@ project names here — same public-repo constraint as README.md.
   31 (zenith-promoter)       -> 17
   28 (DNSCrypt-proxy)        -> 18
   22 (Zenith)                -> 19
-  24 (Zenith-TG)             -> 20
+  24 (Zenith-WS)             -> 20
   14 (Discord_bot)           -> 21
   15 (web_panel)             -> 22
   26 (Автообновление)        -> 23
   16-20, 23, 25, 29          -> 24-31 (Удаление, same relative order)
   ```
-  New section `=== Модули ===` (18-23: DNSCrypt-proxy/Zenith/Zenith-TG/
+  New section `=== Модули ===` (18-23: DNSCrypt-proxy/Zenith/Zenith-WS/
   Discord_bot/web_panel/Автообновление) split out of the old flat
   `=== Управление ===`, which now holds only the three items used most
   often for a quick check/toggle (DNSCrypt leak check, Zapret service
@@ -1220,7 +1220,7 @@ project names here — same public-repo constraint as README.md.
 - Live gap: every `manage_X()` in `z0r` had grown its own one-off ON-state
   prompt, and none of them had BOTH restart and stop — `manage_zapret`
   only ever offered restart, while `manage_daemon`/`manage_voice_bot`/
-  `manage_tg_relay`/`manage_panel`/`manage_dnscrypt` only ever offered
+  `manage_ws_relay`/`manage_panel`/`manage_dnscrypt` only ever offered
   stop. Direct request, using `web_panel` as the concrete example: "заходим
   в неё [пункт 24] — 2 пункта: рестарт и остановить".
 - Added a shared `_service_on_menu(label, restart_fn, stop_fn)` — prints
@@ -1229,11 +1229,11 @@ project names here — same public-repo constraint as README.md.
   resolves the function name at call time, so definition order relative
   to `manage_X()` doesn't matter). Wired into all six: `manage_zapret`,
   `manage_daemon` (autotune-daemon), `manage_voice_bot` (Discord_bot),
-  `manage_panel` (web_panel), `manage_tg_relay` (Zenith-TG),
+  `manage_panel` (web_panel), `manage_ws_relay` (Zenith-WS),
   `manage_dnscrypt`.
-- **`_tgrelay_do_restart` deliberately does NOT touch the iptables
+- **`_wsrelay_do_restart` deliberately does NOT touch the iptables
   REDIRECT rule** — that's an already-applied network change independent
-  of the process, only `_tgrelay_do_stop` removes it (same as before).
+  of the process, only `_wsrelay_do_stop` removes it (same as before).
   Restarting the relay process shouldn't silently undo working traffic
   redirection.
 - **Not yet covered: `zenith_toggle()`** (Zenith's own `1) Запуск/Стоп`
@@ -1248,7 +1248,7 @@ project names here — same public-repo constraint as README.md.
   grant alongside each unit's existing start/stop/is-active/journalctl
   set in `z0r::ensure_panel_runtime_grants`. `/controls/automation` now
   shows a "рестарт" button next to start/stop for all three. Discord_bot/
-  DNSCrypt-proxy/Zenith-TG/web_panel have NO panel presence at all today
+  DNSCrypt-proxy/Zenith-WS/web_panel have NO panel presence at all today
   (CLI-only) — giving them one is a materially bigger scope (new pages,
   new sudoers, new routes each) than "add restart where start/stop
   already exist," deliberately not done in this same pass.
@@ -1260,8 +1260,8 @@ project names here — same public-repo constraint as README.md.
   don't get the option instead of showing something that can't work.
   Wired into the four that DO live in a git checkout: `autotune-daemon`
   (→ `$INSTALL_DIR`, this repo itself), `Discord_bot` (→
-  `$VOICE_BOT_DIR`), `web_panel` (→ `$PANEL_DIR`), `Zenith-TG` (→
-  `$TGRELAY_DIR`). `_check_git_updates(dir, label)` is read-only —
+  `$VOICE_BOT_DIR`), `web_panel` (→ `$PANEL_DIR`), `Zenith-WS` (→
+  `$WSRELAY_DIR`). `_check_git_updates(dir, label)` is read-only —
   `git fetch origin main` + `rev-list --count HEAD..origin/main`,
   reports "actual" or "N commits behind" (with a short log) — it never
   runs the actual `pull`, that stays item 25's (Автообновление) job
@@ -1277,34 +1277,34 @@ project names here — same public-repo constraint as README.md.
   the same way as `systemctl_bin`/`journalctl_bin`/`flock_bin` already
   were (`command -v` with a hardcoded fallback path).
 
-## z0r Zenith-TG menu wired to `cf_worker/deploy.sh` (since 2026-09-01)
+## z0r Zenith-WS menu wired to `cf_worker/deploy.sh` (since 2026-09-01)
 
-- Zenith-TG's Cloudflare Worker fallback (routes `web.telegram.org`/
+- Zenith-WS's Cloudflare Worker fallback (routes `web.telegram.org`/
   `web.whatsapp.com` around their IP-level SYN-blackhole — see that
   repo's own CLAUDE.md, this is unrelated to zapret2/strategies entirely,
   a different failure class REDIRECT+desync can't touch) used to be a
   script buried in `relay/cf_worker/`, only reachable by SSHing in and
   reading that repo's README by hand. Wired into item 22's own menu:
-  `tgrelay_enable()` (first install / turning ON from OFF) now asks
+  `wsrelay_enable()` (first install / turning ON from OFF) now asks
   "Настроить сейчас доступ к web.telegram.org/WhatsApp Web в браузере?"
   right after REDIRECT is applied, and the ON-state submenu gained a
   second option alongside the usual restart/stop/check-updates
   (`_service_on_menu`) for revisiting/rotating it later.
-- New `tgrelay_setup_cf_worker()` deliberately does NOT touch
+- New `wsrelay_setup_cf_worker()` deliberately does NOT touch
   `_service_on_menu` itself — that helper is shared by six modules
-  (zapret, daemon, voice bot, panel, tgrelay, dnscrypt), adding a
-  Telegram-specific 5th action there would leak Zenith-TG-only concepts
-  into every other module's menu. Instead `manage_tg_relay()`'s ON-state
+  (zapret, daemon, voice bot, panel, wsrelay, dnscrypt), adding a
+  Telegram-specific 5th action there would leak Zenith-WS-only concepts
+  into every other module's menu. Instead `manage_ws_relay()`'s ON-state
   branch grew its own tiny two-item submenu (1=service management via
   `_service_on_menu`, 2=this) — `_service_on_menu`'s own contract and
   every other caller are untouched.
 - Prompts for `CLOUDFLARE_API_TOKEN` fresh on every call — never stored
   between z0r invocations, never written to disk by z0r itself. This is
   intentional, not a missed convenience: the token is the human's own
-  Cloudflare account credential, out of scope for anything z0r/Zenith-TG
+  Cloudflare account credential, out of scope for anything z0r/Zenith-WS
   should be persisting on its own — same reasoning as why `deploy.sh`
   itself generates a brand new `RELAY_SECRET` every run rather than
-  accepting one as input (see Zenith-TG's own CLAUDE.md
+  accepting one as input (see Zenith-WS's own CLAUDE.md
   "`cf_worker/deploy.sh` — one-command deploy").
 - **Live bug, same day**: originally used `read -rsp` (hidden input, no
   echo at all) — on the live server, pasting the token into that field
@@ -1338,7 +1338,7 @@ project names here — same public-repo constraint as README.md.
   `git rev-parse --short HEAD`, `"?"` on any error) is shown inline in the
   module's own label wherever `_service_on_menu` is called for a
   git-backed module — `autotune-daemon (a1b2c3d)`, `Discord_bot (...)`,
-  `web_panel (...)`, `Zenith-TG (...)` — visible the moment you open that
+  `web_panel (...)`, `Zenith-WS (...)` — visible the moment you open that
   module's ON-state menu, no extra click or network round-trip needed.
   `zapret2`/`DNSCrypt-proxy` untouched (not git repos, same reasoning as
   why they never got a check-updates option either).
@@ -1351,36 +1351,36 @@ project names here — same public-repo constraint as README.md.
   rev-parse --short HEAD` added to `sudoers_git_check_cmds` for both
   `$INSTALL_DIR` and `$ZENITH_DIR` (two new literal lines, no `*` —
   ensure_panel_runtime_grants must be re-run (it's called from `manage_panel()`,
-  z0r item 24/web_panel — NOT item 22/Zenith-TG, easy to mix up since this
+  z0r item 24/web_panel — NOT item 22/Zenith-WS, easy to mix up since this
   same session just touched both) — revisit that item once before the
   panel's new commit labels actually resolve instead of showing `?`.
 
-## `tgrelay_setup_cf_worker()` no longer prompts on repeat visits (2026-09-01)
+## `wsrelay_setup_cf_worker()` no longer prompts on repeat visits (2026-09-01)
 
 - Full reasoning (why not Google Drive, why a local `chmod 600` cache
-  instead) lives in Zenith-TG's own CLAUDE.md "`CLOUDFLARE_API_TOKEN`
+  instead) lives in Zenith-WS's own CLAUDE.md "`CLOUDFLARE_API_TOKEN`
   caching, and why not Google Drive" — this repo's side is just the
-  mirror check: `tgrelay_setup_cf_worker()` now greps
-  `/etc/z2r_autobench/tgrelay.env` for an already-cached
+  mirror check: `wsrelay_setup_cf_worker()` now greps
+  `/etc/z2r_autobench/wsrelay.env` for an already-cached
   `CLOUDFLARE_API_TOKEN=` line (written by `cf_worker/deploy.sh` itself
   after its first successful run) before ever printing the prompt — so
   the interactive question genuinely only appears the first time this
   menu item is used on a given server, not every time.
 
-## `_check_git_updates()`/`_git_short_commit()` fail with "dubious ownership" for tgrelay-owned checkouts (found 2026-09-01, Server B)
+## `_check_git_updates()`/`_git_short_commit()` fail with "dubious ownership" for wsrelay-owned checkouts (found 2026-09-01, Server B)
 
-- Live incident: "проверить обновления" for Zenith-TG (z0r item 22) on
+- Live incident: "проверить обновления" for Zenith-WS (z0r item 22) on
   Server B printed only `Не удалось получить origin/main (сеть или доступ
   к репозиторию) — проверь вручную.` — looked like a network/GitHub-access
   problem (see "z2r core install — GitHub is not reliable from every
   provider" above), but manual `curl`/`nslookup` to `github.com` from the
   same box worked fine. Running the swallowed `git fetch` by hand
   surfaced the real error: `fatal: detected dubious ownership in
-  repository at '/opt/z2r_autobench/Zenith-TG'`.
-- Root cause: `ensure_tgrelay_user()` runs `chown -R tgrelay:tgrelay
-  "$TGRELAY_DIR"` on every visit to `manage_tg_relay()` (intentional
+  repository at '/opt/z2r_autobench/Zenith-WS'`.
+- Root cause: `ensure_wsrelay_user()` runs `chown -R wsrelay:wsrelay
+  "$WSRELAY_DIR"` on every visit to `manage_ws_relay()` (intentional
   self-healing, see "First Provider B deploy" above) — but `z0r` itself
-  normally runs as root, so the checkout's owner (`tgrelay`) and the
+  normally runs as root, so the checkout's owner (`wsrelay`) and the
   euid running `_check_git_updates()`/`_git_short_commit()` (`root`)
   disagree. Git's own ownership-safety check (post-CVE-2022-24765)
   refuses to operate on a repo owned by a different user unless that
@@ -1396,21 +1396,21 @@ project names here — same public-repo constraint as README.md.
   invocation — scoped to that single command, not a persistent
   `--global` config change, so it doesn't silently widen trust for any
   other repo on the box. This also means `_git_short_commit()` for
-  Zenith-TG was very likely showing `?` for the same reason on any
-  server where `ensure_tgrelay_user()` had already run — not just a
+  Zenith-WS was very likely showing `?` for the same reason on any
+  server where `ensure_wsrelay_user()` had already run — not just a
   missing-sudoers-regen case as `z0r-panel`'s equivalent note assumed
   (that one's on the panel side and calls a different directory set, so
-  unaffected, but worth double-checking if `Zenith-TG (?)` shows up
+  unaffected, but worth double-checking if `Zenith-WS (?)` shows up
   there too some day).
 - **Same-day follow-up, bigger than the menu-display bug above:**
   `autoupdate.sh::update_git_repo()` has the exact same unguarded `git -C
   "$dir"` pattern — `rev-parse HEAD`/`fetch`/`rev-parse origin/branch`/
   `diff`/`diff --cached`/`pull --ff-only`, none of them scoped with
-  `safe.directory`. Since `TGRELAY_DIR` is the one directory
-  `ensure_tgrelay_user()` chowns away from root, and `autoupdate.sh` runs
+  `safe.directory`. Since `WSRELAY_DIR` is the one directory
+  `ensure_wsrelay_user()` chowns away from root, and `autoupdate.sh` runs
   as root via its own systemd timer (item 25, "Автообновление"), this
-  means **Zenith-TG's automatic updates have likely been silently broken
-  on every server since `ensure_tgrelay_user()` started doing that chown
+  means **Zenith-WS's automatic updates have likely been silently broken
+  on every server since `ensure_wsrelay_user()` started doing that chown
   (2026-08-24)** — the very first git call (`rev-parse HEAD`) fails with
   the same swallowed "dubious ownership" error, logged only as "не
   удалось прочитать текущий HEAD", so autoupdate.log never shows anything
@@ -1418,15 +1418,55 @@ project names here — same public-repo constraint as README.md.
   into main" elsewhere in this file (autoupdate silently not delivering
   fixes to a specific repo for weeks) — just a different root cause
   (ownership, not an unmerged PR) hitting the same repo. Directly explains
-  why Server B's Zenith-TG checkout was still missing `cf_worker/
-  deploy.sh` (added 2026-09-01, weeks after `ensure_tgrelay_user()`
+  why Server B's Zenith-WS checkout was still missing `cf_worker/
+  deploy.sh` (added 2026-09-01, weeks after `ensure_wsrelay_user()`
   landed) despite "Автообновление [ON]" in the menu. Fixed the same way:
   `update_git_repo()` now builds a `git=(git -C "$dir" -c
   safe.directory="$dir")` array and every git call goes through it. If
-  autoupdate for Zenith-TG still isn't advancing after this fix reaches a
-  server, check `$INSTALL_DIR/logs/autoupdate/tgrelay.log` for a
+  autoupdate for Zenith-WS still isn't advancing after this fix reaches a
+  server, check `$INSTALL_DIR/logs/autoupdate/wsrelay.log` for a
   *different* error this time — this class of silent failure is now
   closed, but something else could still be wrong.
+
+## Zenith-TG renamed to Zenith-WS (2026-09-01)
+
+- Direct request, full rename, not just a display label: every
+  identifier tied to the old name changed — the `wsrelay` system user
+  (was `tgrelay`), `$WSRELAY_DIR`/`$WSRELAY_SERVICE`/
+  `$WSRELAY_REPO_URL` (were `$TGRELAY_*`), the `ws-transparent-relay`/
+  `ws-mtproxy-relay`/`ws-redirect-watchdog` systemd units (were `tg-*`),
+  the `ZWS_*` env var prefix (was `ZTG_*`) and `wsrelay.env` (was
+  `tgrelay.env`), the Cloudflare Worker name `zenith-ws-relay` (was
+  `zenith-tg-relay`), and every function in `z0r` (`manage_ws_relay`,
+  `ensure_wsrelay_user`, `wsrelay_enable`, `wsrelay_setup_cf_worker`,
+  `get_ws_relay_status`, `uninstall_ws_relay`, `_wsrelay_do_restart`,
+  `_wsrelay_do_stop`, `_wsrelay_do_check_updates`). Every historical
+  incident note in this file that named the old identifiers was updated
+  in the same pass so they still match the actual current code instead
+  of describing functions/services that no longer exist under those
+  names.
+- **This commit only covers what git can reach.** Three things are
+  explicitly NOT done by this commit and need separate, manual handling:
+  1. The GitHub repository itself (`scp-oss/Zenith-TG`) still needs a
+     human rename via Settings → repository name (no API/tool available
+     here for that) — GitHub keeps an automatic redirect from the old
+     name afterward, so existing `git remote`/clone URLs on servers
+     keep working without an immediate update, but should eventually be
+     repointed.
+  2. **Every server already running this needs its own migration**,
+     ideally in one sitting since the live service depends on names
+     matching across several independently-changing pieces
+     (directory, user, systemd units, env file, Cloudflare Worker) —
+     see the next section for the exact sequence.
+  3. The Cloudflare Worker rename in `wrangler.toml`
+     (`zenith-tg-relay` → `zenith-ws-relay`) means the **next**
+     `wrangler deploy` on any server creates a brand-new Worker under
+     the new name — it does NOT rename the existing live one. The old
+     `zenith-tg-relay` Worker keeps running, unaffected, until someone
+     deletes it by hand from the Cloudflare dashboard — until every
+     server has redeployed under the new name AND had its env file
+     updated to the new host/secret, deleting the old Worker would
+     break whichever server hasn't migrated yet.
 
 ## Publishing hygiene
 
