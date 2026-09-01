@@ -82,7 +82,7 @@ REPO_URL="https://github.com/scp-oss/z2r_autobench.git"
 LOG_DIR="/opt/z2r_autobench/logs"
 # Та же автодетекция базы, что в z2r_autobench_lib.sh::_z2r_detect_base()
 # (z0r не сорсит эту lib — отдельный скрипт, копия логики держит оба места
-# в согласии). Живой баг 2026-08-23 на miha: тут было жёстко зашито
+# в согласии). Живой баг 2026-08-23 на Server B: тут было жёстко зашито
 # /opt/zapret2/..., а на этом сервере (штатная раскладка апстрим-
 # установщика, см. lib) z2r_lib/extra_strats реально лежат под /opt/zator
 # без symlink — locked.tsv по факту писался туда через set_strategy_cli.sh
@@ -2731,7 +2731,7 @@ tgrelay_install_files() {
 # падает с "status=217/USER, Failed to determine user credentials: No such
 # process" и уходит в бесконечный auto-restart-цикл (Restart=on-failure),
 # без единого намёка на причину в статусе (только в полном journalctl).
-# Живой случай на MTS 2026-08-24: юзер по какой-то причине не создался/не
+# Живой случай на Provider B 2026-08-24: юзер по какой-то причине не создался/не
 # сохранился при установке -- ~8000+ рестартов, сервис вечно "OFF" в
 # get_tg_relay_status(). Проверяем и чиним БЕЗУСЛОВНО при каждом заходе
 # в manage_tg_relay() (тот же принцип, что ensure_panel_runtime_grants и
@@ -2765,7 +2765,7 @@ tgrelay_enable() {
   # и /opt/Zenith-TG/.venv) -- пропускал ReadWritePaths=/opt/Zenith-TG (без
   # хвоста /relay или /.venv), с ProtectSystem=strict это указывало на
   # несуществующий путь и systemd падал с status=226/NAMESPACE (не
-  # мог настроить mount namespace) -- живой случай на MTS 2026-08-24,
+  # мог настроить mount namespace) -- живой случай на Provider B 2026-08-24,
   # сервис даже не доходил до старта python. Регенерируем БЕЗУСЛОВНО при
   # каждом заходе (сравниваем через cmp, не просто "файла ещё нет") --
   # тот же принцип, что ensure_tgrelay_user/dnscrypt_wire_resolver: чтобы
