@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # autoupdate.sh -- периодическое автообновление всей экосистемы
-# z2r_autobench (сам z2r_autobench + Zenith + z0r-panel + Zenith-TG).
+# z2r_autobench (сам z2r_autobench + Zenith + z0r-panel + Zenith-WS).
 #
 # Запускается по таймеру (z2r-autoupdate.timer -> z2r-autoupdate.service,
 # см. соседние .service/.timer файлы), но можно и вручную:
@@ -26,7 +26,7 @@ set -uo pipefail
 INSTALL_DIR="/opt/z2r_autobench"
 ZENITH_DIR="$INSTALL_DIR/Zenith"
 PANEL_DIR="$INSTALL_DIR/z0r-panel"
-TGRELAY_DIR="$INSTALL_DIR/Zenith-TG"
+WSRELAY_DIR="$INSTALL_DIR/Zenith-WS"
 
 CONF_DIR="/etc/z2r_autobench"
 CONF="$CONF_DIR/autoupdate.conf"
@@ -55,8 +55,8 @@ if [ -n "$SET_PROJECT" ]; then
     *) echo "Значение должно быть 0 или 1, получено: '$SET_VALUE'" >&2; exit 1 ;;
   esac
   case "$SET_PROJECT" in
-    z2r_autobench|zenith|panel|tgrelay) ;;
-    *) echo "Неизвестный проект: '$SET_PROJECT' (ожидается z2r_autobench|zenith|panel|tgrelay)" >&2; exit 1 ;;
+    z2r_autobench|zenith|panel|wsrelay) ;;
+    *) echo "Неизвестный проект: '$SET_PROJECT' (ожидается z2r_autobench|zenith|panel|wsrelay)" >&2; exit 1 ;;
   esac
   mkdir -p "$CONF_DIR"
   touch "$CONF"
@@ -90,13 +90,13 @@ update_git_repo() {
   # -c safe.directory=$dir на каждом вызове git ниже: без него git
   # отказывается работать в каталоге, который принадлежит не тому же
   # пользователю, что и текущий процесс ("detected dubious ownership").
-  # Живой случай (2026-09-01, Server B): ensure_tgrelay_user() в z0r делает
-  # `chown -R tgrelay:tgrelay "$TGRELAY_DIR"` при каждом заходе в управление
-  # Zenith-TG, а autoupdate.sh обычно запущен от root -- владелец каталога и
+  # Живой случай (2026-09-01, Server B): ensure_wsrelay_user() в z0r делает
+  # `chown -R wsrelay:wsrelay "$WSRELAY_DIR"` при каждом заходе в управление
+  # Zenith-WS, а autoupdate.sh обычно запущен от root -- владелец каталога и
   # euid расходятся, и КАЖДЫЙ git-вызов ниже (включая самый первый,
   # rev-parse HEAD) отказывает с этой ошибкой, проглоченной за 2>/dev/null.
-  # Итог: автообновление Zenith-TG молча не работало с тех пор, как
-  # ensure_tgrelay_user() начал делать chown (см. z0r's CLAUDE.md) --
+  # Итог: автообновление Zenith-WS молча не работало с тех пор, как
+  # ensure_wsrelay_user() начал делать chown (см. z0r's CLAUDE.md) --
   # тот же класс "три недели правок никуда не доехали", что и в разделе
   # "Feature branch merged into main" в CLAUDE.md, только для этого одного
   # репозитория и по другой причине.
@@ -180,17 +180,17 @@ if should_run "panel"; then
   fi
 fi
 
-if should_run "tgrelay"; then
-  if update_git_repo tgrelay "$TGRELAY_DIR" main; then
-    if ( cd "$TGRELAY_DIR" && .venv/bin/pip install -q -r requirements.txt ) >>"$LOG_DIR/tgrelay.log" 2>&1; then
-      if [ -f "$TGRELAY_DIR/relay/tg-transparent-relay.service" ]; then
-        cp "$TGRELAY_DIR/relay/tg-transparent-relay.service" /etc/systemd/system/tg-transparent-relay.service
+if should_run "wsrelay"; then
+  if update_git_repo wsrelay "$WSRELAY_DIR" main; then
+    if ( cd "$WSRELAY_DIR" && .venv/bin/pip install -q -r requirements.txt ) >>"$LOG_DIR/wsrelay.log" 2>&1; then
+      if [ -f "$WSRELAY_DIR/relay/ws-transparent-relay.service" ]; then
+        cp "$WSRELAY_DIR/relay/ws-transparent-relay.service" /etc/systemd/system/ws-transparent-relay.service
         systemctl daemon-reload
       fi
-      systemctl restart tg-transparent-relay 2>>"$LOG_DIR/tgrelay.log"
-      _log tgrelay "зависимости обновлены, юнит переустановлен, tg-transparent-relay перезапущен"
+      systemctl restart ws-transparent-relay 2>>"$LOG_DIR/wsrelay.log"
+      _log wsrelay "зависимости обновлены, юнит переустановлен, ws-transparent-relay перезапущен"
     else
-      _log tgrelay "pip install не удался -- сервис НЕ перезапущен, разберитесь руками"
+      _log wsrelay "pip install не удался -- сервис НЕ перезапущен, разберитесь руками"
     fi
   fi
 fi
