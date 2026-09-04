@@ -1468,6 +1468,39 @@ project names here — same public-repo constraint as README.md.
      updated to the new host/secret, deleting the old Worker would
      break whichever server hasn't migrated yet.
 
+## Independent Telegram/WhatsApp REDIRECT toggle for Zenith-WS (2026-09-04)
+
+- Direct request: experimenting with the WhatsApp REDIRECT broke
+  Instagram for the user — real architectural reason, not a fluke, see
+  Zenith-WS's own CLAUDE.md for the full writeup (WhatsApp and Instagram
+  share the same Meta ASN/CIDR ranges, so REDIRECT-ing one unavoidably
+  REDIRECTs the other too; the only real fix is being able to turn
+  WhatsApp's REDIRECT off independently while keeping Telegram's on).
+- Item 22's ON-state submenu gained a third option (alongside the
+  existing `_service_on_menu` service management and the Cloudflare
+  Worker setup): "Включить/выключить Telegram и WhatsApp REDIRECT по
+  отдельности" → `wsrelay_toggle_redirect_menu()` — shows live ON/OFF
+  for each (via Zenith-WS's new `setup_redirect.sh enabled --cidr-file`
+  action, not a second CIDR-file parse here) and calls `apply`/`remove
+  --cidr-file` for just the one picked. Persists the choice into
+  `ZWS_TELEGRAM_REDIRECT`/`ZWS_WHATSAPP_REDIRECT` in the same
+  `/etc/z2r_autobench/wsrelay.env` that already holds the project's
+  other secrets — purely so `cf_worker/deploy.sh` (can be re-run just to
+  rotate the Worker secret) knows not to silently re-enable a list the
+  user deliberately turned off; live state itself is always read from
+  iptables, not from this flag.
+- **Live bug found and fixed in the same pass**: `_wsrelay_do_stop()`
+  and `uninstall_ws_relay()` both called `setup_redirect.sh remove` with
+  no `--cidr-file`, which only ever touched Telegram's default list —
+  WhatsApp's REDIRECT rules (applied unconditionally by
+  `cf_worker/deploy.sh` before this change) were silently left behind in
+  `nat OUTPUT` after "stopping" the relay, or even after fully
+  uninstalling Zenith-WS entirely. Both now explicitly remove both
+  lists. A second, more subtle bug in the underlying `setup_redirect.sh`
+  itself (the self-loop exclusion getting stripped by a partial `remove`
+  even while the other list stayed active) was found and fixed on the
+  Zenith-WS side of this same change — see that repo's CLAUDE.md.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

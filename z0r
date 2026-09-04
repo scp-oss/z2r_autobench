@@ -2860,6 +2860,94 @@ wsrelay_setup_cf_worker() {
   CLOUDFLARE_API_TOKEN="$cf_token" bash "$worker_script"
 }
 
+# Независимое включение/выключение REDIRECT для Telegram и WhatsApp
+# (добавлено 2026-09-04, прямой запрос: эксперименты с WhatsApp сломали
+# Instagram у пользователя -- WhatsApp и Instagram лежат в одном и том же
+# ASN/CIDR-диапазоне Meta (157.240.0.0/17, 31.13.64.0/18, см.
+# Zenith-WS/cidr/whatsapp_ipv4.txt), так что включённый WhatsApp-REDIRECT
+# заодно заворачивает через relay и обычный трафик Instagram к тем же
+# подсетям -- нужен способ выключить именно WhatsApp, не трогая рабочий
+# Telegram). Статус читается напрямую из iptables через
+# `setup_redirect.sh enabled` (та же логика, что apply/remove используют
+# для парсинга CIDR-файла -- не дублируем её здесь второй раз, см.
+# "same fact duplicated in two files" в CLAUDE.md), а не из отдельного
+# файла-состояния -- iptables и есть источник истины по факту "применено
+# сейчас или нет". ZWS_TELEGRAM_REDIRECT/ZWS_WHATSAPP_REDIRECT в
+# wsrelay.env -- отдельно, только чтобы cf_worker/deploy.sh (может быть
+# вызван повторно просто для ротации секрета воркера) не включал список
+# обратно молча, если человек его осознанно выключил здесь.
+_wsrelay_cidr_file() {
+  case "$1" in
+    tg) echo "$WSRELAY_DIR/cidr/telegram_ipv4.txt" ;;
+    wa) echo "$WSRELAY_DIR/cidr/whatsapp_ipv4.txt" ;;
+  esac
+}
+
+_wsrelay_redirect_enabled() {
+  bash "$WSRELAY_DIR/relay/setup_redirect.sh" enabled --cidr-file "$(_wsrelay_cidr_file "$1")" >/dev/null 2>&1
+}
+
+_wsrelay_set_redirect_flag() {
+  local which="$1" value="$2" envfile="/etc/z2r_autobench/wsrelay.env" key
+  case "$which" in tg) key=ZWS_TELEGRAM_REDIRECT ;; wa) key=ZWS_WHATSAPP_REDIRECT ;; esac
+  mkdir -p "$(dirname "$envfile")"
+  touch "$envfile"; chmod 600 "$envfile"
+  if grep -q "^${key}=" "$envfile" 2>/dev/null; then
+    sed -i "s/^${key}=.*/${key}=${value}/" "$envfile"
+  else
+    echo "${key}=${value}" >> "$envfile"
+  fi
+}
+
+wsrelay_toggle_redirect_menu() {
+  local tg_on wa_on
+  _wsrelay_redirect_enabled tg && tg_on=ON || tg_on=OFF
+  _wsrelay_redirect_enabled wa && wa_on=ON || wa_on=OFF
+  echo "  1) Telegram: $(color_tag "$tg_on")"
+  echo "  2) WhatsApp: $(color_tag "$wa_on")"
+  echo "  0) Назад"
+  read -re -p "> " ch
+  case "$ch" in
+    1)
+      if [ "$tg_on" = ON ]; then
+        read -re -p "Выключить REDIRECT для Telegram? [y/N]: " ans
+        case "$ans" in
+          y|Y)
+            bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)"
+            _wsrelay_set_redirect_flag tg disabled
+            echo "Telegram REDIRECT выключен."
+            ;;
+          *) : ;;
+        esac
+      else
+        if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply --cidr-file "$(_wsrelay_cidr_file tg)"; then
+          _wsrelay_set_redirect_flag tg enabled
+          echo "Telegram REDIRECT включён."
+        fi
+      fi
+      ;;
+    2)
+      if [ "$wa_on" = ON ]; then
+        read -re -p "Выключить REDIRECT для WhatsApp? [y/N]: " ans
+        case "$ans" in
+          y|Y)
+            bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)"
+            _wsrelay_set_redirect_flag wa disabled
+            echo "WhatsApp REDIRECT выключен."
+            ;;
+          *) : ;;
+        esac
+      else
+        if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply --cidr-file "$(_wsrelay_cidr_file wa)"; then
+          _wsrelay_set_redirect_flag wa enabled
+          echo "WhatsApp REDIRECT включён."
+        fi
+      fi
+      ;;
+    *) : ;;
+  esac
+}
+
 manage_ws_relay() {
   local st; st="$(get_ws_relay_status)"
   echo "Zenith-WS (Telegram relay): $st"
@@ -2877,11 +2965,13 @@ manage_ws_relay() {
     ON)
       echo "  1) Управление сервисом (рестарт/остановить/апдейты)"
       echo "  2) Настроить доступ к web.telegram.org/WhatsApp Web в браузере (Cloudflare Worker)"
+      echo "  3) Включить/выключить Telegram и WhatsApp REDIRECT по отдельности"
       echo "  0) Назад"
       read -re -p "> " tgch
       case "$tgch" in
         1) _service_on_menu "Zenith-WS ($(_git_short_commit "$WSRELAY_DIR"))" _wsrelay_do_restart _wsrelay_do_stop _wsrelay_do_check_updates ;;
         2) wsrelay_setup_cf_worker ;;
+        3) wsrelay_toggle_redirect_menu ;;
         *) : ;;
       esac
       ;;
@@ -2895,9 +2985,14 @@ _wsrelay_do_restart() {
   systemctl status "$WSRELAY_SERVICE" --no-pager
 }
 _wsrelay_do_stop() {
-  bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
+  # Оба списка -- живой баг, найденный 2026-09-04 при разборе независимого
+  # включения/выключения Telegram/WhatsApp: `setup_redirect.sh remove` без
+  # --cidr-file трогает только Telegram (свой дефолт), WhatsApp-правила
+  # (если применялись) оставались висеть в nat OUTPUT после "остановки".
+  bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)" 2>/dev/null || true
+  bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" 2>/dev/null || true
   systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
-  echo "Остановлен, REDIRECT снят."
+  echo "Остановлен, REDIRECT (Telegram и WhatsApp) снят."
 }
 _wsrelay_do_check_updates() {
   _check_git_updates "$WSRELAY_DIR" "Zenith-WS"
@@ -2911,7 +3006,11 @@ uninstall_ws_relay() {
   read -re -p "Найден $WSRELAY_DIR — снять REDIRECT, остановить сервис и удалить? [y/N]: " ans
   case "$ans" in
     y|Y)
-      bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove 2>/dev/null || true
+      # Оба списка -- см. _wsrelay_do_stop, тот же баг: голый `remove` без
+      # --cidr-file трогает только Telegram, WhatsApp-правила остались бы
+      # висеть в nat OUTPUT даже после удаления самого Zenith-WS.
+      bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)" 2>/dev/null || true
+      bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" 2>/dev/null || true
       systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
       rm -f "/etc/systemd/system/${WSRELAY_SERVICE}.service"
       systemctl daemon-reload
