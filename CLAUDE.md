@@ -1501,6 +1501,48 @@ project names here — same public-repo constraint as README.md.
   even while the other list stayed active) was found and fixed on the
   Zenith-WS side of this same change — see that repo's CLAUDE.md.
 
+## Zenith-WS submenu flattened + a second (Worker-level) toggle (2026-09-04, same-day follow-up)
+
+- Direct request: collapse item 22's ON-state menu from a nested
+  "1) service / 2) worker setup / 3) REDIRECT submenu" into five direct
+  items, each showing its own live `[ON]`/`[OFF]` tag inline instead of
+  needing a second prompt to see status:
+  ```
+  1) Управление сервисом (рестарт/остановить/апдейты)
+  2) Telegram REDIRECT [ON/OFF]
+  3) WhatsApp REDIRECT [ON/OFF]
+  4) web.telegram.org [ON/OFF]
+  5) web.WhatsApp [ON/OFF]
+  0) Назад
+  ```
+  `wsrelay_toggle_redirect_menu()` (the nested submenu from earlier the
+  same day) is gone — its two branches became `wsrelay_toggle_redirect
+  tg|wa`, called directly from items 2/3. `_wsrelay_set_redirect_flag`
+  was generalized into `_wsrelay_set_env_flag(key, value)` (no longer
+  redirect-specific) since the new items 4/5 needed the identical
+  sed-or-append idiom against a *different* pair of keys.
+- Items 4/5 are a **second, independent toggle layer**, not a
+  duplicate of 2/3 — see Zenith-WS's own CLAUDE.md "Second, independent
+  toggle layer: the Cloudflare Worker itself" for the full reasoning
+  (REDIRECT decides whether traffic reaches the relay at all; this
+  layer decides whether the *separately deployed* `cf_worker/worker.js`
+  will carry it once it arrives — a real distinction for Telegram,
+  since MTProto never needs the Worker, only the web.telegram.org side
+  does). `_wsrelay_worker_status()` shows `NONE` (not `OFF`) when the
+  Worker has never been deployed at all (`ZWS_CF_WORKER_HOST` absent) —
+  selecting the item in that state runs first-time setup
+  (`wsrelay_setup_cf_worker()`, prompts for the Cloudflare token) rather
+  than erroring.
+- `WSRELAY_REPO_URL` switched from `.../Zenith-TG.git` to the canonical
+  `.../Zenith-WS.git` — the human completed the GitHub rename (Settings
+  → Rename) this same day, closing the "repository not yet renamed"
+  caveat this variable's own comment had been carrying since
+  2026-09-01. Verified live (`git ls-remote .../Zenith-WS.git HEAD`
+  resolves) before switching — the old URL keeps working too via
+  GitHub's redirect, so this isn't urgent for existing checkouts, just
+  no reason to keep pointing new clones at the old name once the real
+  rename is done.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

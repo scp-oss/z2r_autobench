@@ -134,15 +134,13 @@ PANEL_SERVICE="zenith-panel"
 # Flowseal/tg-ws-proxy). Клиенту (Telegram Desktop/mobile) ничего
 # настраивать не нужно — см. README репозитория.
 WSRELAY_DIR="$INSTALL_DIR/Zenith-WS"
-# ВАЖНО: репозиторий на GitHub физически ЕЩЁ называется Zenith-TG --
-# переименование содержимого (2026-09-01, Zenith-TG -> Zenith-WS) не
-# переименовывает сам GitHub-репозиторий, это отдельный ручной шаг
-# (Settings -> Rename), который на момент этого коммита ещё не сделан.
-# Указывать здесь "Zenith-WS.git" до этого шага -- значит послать любой
-# свежий git clone на несуществующий URL (404). Поменять на .../Zenith-WS.git
-# ТОЛЬКО после того, как репозиторий реально переименован на GitHub (GitHub
-# сам держит редирект со старого имени, но новый URL заранее не работает).
-WSRELAY_REPO_URL="https://github.com/scp-oss/Zenith-TG.git"
+# Репозиторий на GitHub переименован Zenith-TG -> Zenith-WS 2026-09-04
+# (человеком, Settings -> Rename) -- см. предыдущую версию этого
+# комментария для истории, почему это раньше указывало на старое имя.
+# GitHub держит редирект со старого имени на новое (`.../Zenith-TG.git`
+# продолжит клонироваться и дальше), но новый канонический URL указан
+# здесь начиная с этого коммита, а не только по инерции редиректа.
+WSRELAY_REPO_URL="https://github.com/scp-oss/Zenith-WS.git"
 WSRELAY_SERVICE="ws-transparent-relay"
 # DNSCrypt-proxy -- локальный DoH-резолвер, не самописный компонент этого
 # репозитория, а обычный пакет дистрибутива. Появился из живого случая
@@ -2887,9 +2885,8 @@ _wsrelay_redirect_enabled() {
   bash "$WSRELAY_DIR/relay/setup_redirect.sh" enabled --cidr-file "$(_wsrelay_cidr_file "$1")" >/dev/null 2>&1
 }
 
-_wsrelay_set_redirect_flag() {
-  local which="$1" value="$2" envfile="/etc/z2r_autobench/wsrelay.env" key
-  case "$which" in tg) key=ZWS_TELEGRAM_REDIRECT ;; wa) key=ZWS_WHATSAPP_REDIRECT ;; esac
+_wsrelay_set_env_flag() {
+  local key="$1" value="$2" envfile="/etc/z2r_autobench/wsrelay.env"
   mkdir -p "$(dirname "$envfile")"
   touch "$envfile"; chmod 600 "$envfile"
   if grep -q "^${key}=" "$envfile" 2>/dev/null; then
@@ -2899,53 +2896,77 @@ _wsrelay_set_redirect_flag() {
   fi
 }
 
-wsrelay_toggle_redirect_menu() {
-  local tg_on wa_on
-  _wsrelay_redirect_enabled tg && tg_on=ON || tg_on=OFF
-  _wsrelay_redirect_enabled wa && wa_on=ON || wa_on=OFF
-  echo "  1) Telegram: $(color_tag "$tg_on")"
-  echo "  2) WhatsApp: $(color_tag "$wa_on")"
-  echo "  0) Назад"
-  read -re -p "> " ch
-  case "$ch" in
-    1)
-      if [ "$tg_on" = ON ]; then
-        read -re -p "Выключить REDIRECT для Telegram? [y/N]: " ans
-        case "$ans" in
-          y|Y)
-            bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)"
-            _wsrelay_set_redirect_flag tg disabled
-            echo "Telegram REDIRECT выключен."
-            ;;
-          *) : ;;
-        esac
-      else
-        if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply --cidr-file "$(_wsrelay_cidr_file tg)"; then
-          _wsrelay_set_redirect_flag tg enabled
-          echo "Telegram REDIRECT включён."
-        fi
-      fi
-      ;;
-    2)
-      if [ "$wa_on" = ON ]; then
-        read -re -p "Выключить REDIRECT для WhatsApp? [y/N]: " ans
-        case "$ans" in
-          y|Y)
-            bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)"
-            _wsrelay_set_redirect_flag wa disabled
-            echo "WhatsApp REDIRECT выключен."
-            ;;
-          *) : ;;
-        esac
-      else
-        if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply --cidr-file "$(_wsrelay_cidr_file wa)"; then
-          _wsrelay_set_redirect_flag wa enabled
-          echo "WhatsApp REDIRECT включён."
-        fi
-      fi
-      ;;
-    *) : ;;
-  esac
+_wsrelay_get_env_flag() {
+  local key="$1" envfile="/etc/z2r_autobench/wsrelay.env" v
+  [ -f "$envfile" ] || { echo "$2"; return; }
+  v="$(grep "^${key}=" "$envfile" 2>/dev/null | tail -1 | cut -d= -f2-)"
+  [ -n "$v" ] && echo "$v" || echo "$2"
+}
+
+_wsrelay_redirect_key() { case "$1" in tg) echo ZWS_TELEGRAM_REDIRECT ;; wa) echo ZWS_WHATSAPP_REDIRECT ;; esac; }
+
+# Пункты 2/3 плоского меню manage_ws_relay() -- переключает REDIRECT для
+# одного из двух списков, не трогая другой (см. докстринг выше).
+wsrelay_toggle_redirect() {
+  local which="$1" on
+  _wsrelay_redirect_enabled "$which" && on=ON || on=OFF
+  if [ "$on" = ON ]; then
+    read -re -p "Выключить REDIRECT? [y/N]: " ans
+    case "$ans" in
+      y|Y)
+        bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file "$which")"
+        _wsrelay_set_env_flag "$(_wsrelay_redirect_key "$which")" disabled
+        echo "REDIRECT выключен."
+        ;;
+      *) : ;;
+    esac
+  else
+    if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply --cidr-file "$(_wsrelay_cidr_file "$which")"; then
+      _wsrelay_set_env_flag "$(_wsrelay_redirect_key "$which")" enabled
+      echo "REDIRECT включён."
+    fi
+  fi
+}
+
+# Пункты 4/5 -- независимое включение/выключение доступа к
+# web.telegram.org/web.WhatsApp ЧЕРЕЗ ВОРКЕР (второй, отдельный от
+# REDIRECT уровень -- см. Zenith-WS/CLAUDE.md "Независимое включение/
+# выключение Telegram и WhatsApp"): REDIRECT решает, попадает ли трафик
+# к этому CIDR на relay вообще, а этот тумблер -- пускает ли САМ воркер
+# (`cf_worker/worker.js`, отдельный деплой на Cloudflare) соединения к
+# этой подсети дальше. У WhatsApp это фактически единственный работающий
+# путь (нативного протокола-обхода для него, в отличие от Telegram/
+# MTProto, нет — весь его трафик идёт через passthrough → воркер), у
+# Telegram — независимая вторая нога (сам MTProto прекрасно работает и
+# без воркера, воркер нужен только для браузерного web.telegram.org).
+# NONE вместо ON/OFF, если воркер вообще ни разу не был задеплоен
+# (`ZWS_CF_WORKER_HOST` не найден) -- нечему быть "включённым".
+_wsrelay_worker_configured() {
+  local envfile="/etc/z2r_autobench/wsrelay.env"
+  [ -f "$envfile" ] && grep -q '^ZWS_CF_WORKER_HOST=' "$envfile" 2>/dev/null
+}
+_wsrelay_worker_key() { case "$1" in tg) echo ZWS_TELEGRAM_WORKER ;; wa) echo ZWS_WHATSAPP_WORKER ;; esac; }
+_wsrelay_worker_status() {
+  _wsrelay_worker_configured || { echo NONE; return; }
+  [ "$(_wsrelay_get_env_flag "$(_wsrelay_worker_key "$1")" enabled)" = "disabled" ] && echo OFF || echo ON
+}
+wsrelay_toggle_worker() {
+  local which="$1" label st
+  case "$which" in tg) label="web.telegram.org" ;; wa) label="web.WhatsApp" ;; esac
+  st="$(_wsrelay_worker_status "$which")"
+  if [ "$st" = "ON" ]; then
+    read -re -p "Выключить доступ к $label через воркер? [y/N]: " ans
+    case "$ans" in y|Y) ;; *) return 0 ;; esac
+    _wsrelay_set_env_flag "$(_wsrelay_worker_key "$which")" disabled
+  else
+    _wsrelay_set_env_flag "$(_wsrelay_worker_key "$which")" enabled
+  fi
+  # Изменение вступает в силу только новым `wrangler deploy` -- перечитать
+  # ALLOW_TELEGRAM/ALLOW_WHATSAPP в самом воркере иначе неоткуда (это
+  # обычные vars воркера, не что-то, что REDIRECT/локальный relay может
+  # поменять на лету). Если воркер ещё ни разу не настраивался --
+  # тот же вызов сам спросит токен и сделает первый деплой.
+  wsrelay_setup_cf_worker
 }
 
 manage_ws_relay() {
@@ -2963,15 +2984,24 @@ manage_ws_relay() {
       ;;
     OFF) wsrelay_enable ;;
     ON)
+      local tg_r wa_r tg_w wa_w
+      _wsrelay_redirect_enabled tg && tg_r=ON || tg_r=OFF
+      _wsrelay_redirect_enabled wa && wa_r=ON || wa_r=OFF
+      tg_w="$(_wsrelay_worker_status tg)"
+      wa_w="$(_wsrelay_worker_status wa)"
       echo "  1) Управление сервисом (рестарт/остановить/апдейты)"
-      echo "  2) Настроить доступ к web.telegram.org/WhatsApp Web в браузере (Cloudflare Worker)"
-      echo "  3) Включить/выключить Telegram и WhatsApp REDIRECT по отдельности"
+      echo "  2) Telegram REDIRECT $(color_tag "$tg_r")"
+      echo "  3) WhatsApp REDIRECT $(color_tag "$wa_r")"
+      echo "  4) web.telegram.org $(color_tag "$tg_w")"
+      echo "  5) web.WhatsApp $(color_tag "$wa_w")"
       echo "  0) Назад"
       read -re -p "> " tgch
       case "$tgch" in
         1) _service_on_menu "Zenith-WS ($(_git_short_commit "$WSRELAY_DIR"))" _wsrelay_do_restart _wsrelay_do_stop _wsrelay_do_check_updates ;;
-        2) wsrelay_setup_cf_worker ;;
-        3) wsrelay_toggle_redirect_menu ;;
+        2) wsrelay_toggle_redirect tg ;;
+        3) wsrelay_toggle_redirect wa ;;
+        4) wsrelay_toggle_worker tg ;;
+        5) wsrelay_toggle_worker wa ;;
         *) : ;;
       esac
       ;;
