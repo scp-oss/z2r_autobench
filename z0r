@@ -687,7 +687,7 @@ show_menu() {
   echo " 16) Проверка DNSCrypt на дырявость (реально ли системные запросы идут через него, а не в обход)" >&2
   echo " 17) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
   if [ -d "$ZENITH_DIR" ]; then
-    echo " 18) zenith-promoter $(color_tag "$(get_zenith_promoter_status)") (автопродвижение в прод БЕЗ человека -- быстрый доступ, тот же тумблер, что 21 -> 4 -> 2)" >&2
+    echo " 18) zenith-promoter $(color_tag "$(get_zenith_promoter_status)") (автопродвижение в прод БЕЗ человека -- вкл/выкл + свои профили для продвижения)" >&2
   echo " 19) blob_tune.sh (перебор TLS ClientHello blob'ов -- ДОРОГОЙ, рестарт zapret2 на каждого кандидата, гонять редко)" >&2
   fi
   echo "" >&2
@@ -2130,6 +2130,96 @@ zenith_promoter_toggle() {
   fi
 }
 
+# ZENITH_PROMOTE_PROFILES -- отдельный от ZENITH_PROFILES выбор именно
+# для zenith-promoter (см. Zenith/orchestrator/config.py и CLAUDE.md
+# "ZENITH_PROMOTE_PROFILES — decoupling promotion's profile list from
+# generation's"), добавлено 2026-09-05 по прямому запросу: раньше ОДНА
+# переменная (ZENITH_PROFILES, см. пункт 21 -> 4 -> 5) решала и что
+# генерируется, и что продвигается -- нельзя было, например, генерировать
+# кандидатов для всех 4 профилей, но автономно продвигать только 2 из
+# них. Пусто (дефолт) = наследует ZENITH_PROFILES целиком -- сервер,
+# который никогда сюда не заходил, ведёт себя ровно как раньше.
+zenith_promote_profiles_display() {
+  local val; val="$(zenith_env_get ZENITH_PROMOTE_PROFILES)"
+  if [ -n "$val" ]; then
+    echo "$val"
+  else
+    echo "как у генерации ($(zenith_profiles_display))"
+  fi
+}
+
+zenith_promote_profiles_menu() {
+  [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 21)." >&2; return; }
+  echo ""
+  echo "Текущий выбор для продвижения: $(zenith_promote_profiles_display)"
+  echo "Доступные профили: YT_TLS GV_TLS RKN_TLS DS_TLS VOICE_UDP"
+  echo "(это НЕЗАВИСИМО от профилей генерации, пункт 21 -> 4 -> 5 -- можно"
+  echo "генерировать кандидатов для одних профилей, а автономно продвигать"
+  echo "только часть из них)"
+  read -re -p "Профили через запятую/пробел (Enter — наследовать список генерации): " psel
+  if [ -z "$psel" ]; then
+    if grep -q '^ZENITH_PROMOTE_PROFILES=' "$ZENITH_DIR/.env" 2>/dev/null; then
+      sed -i 's/^ZENITH_PROMOTE_PROFILES=.*/ZENITH_PROMOTE_PROFILES=/' "$ZENITH_DIR/.env"
+    else
+      echo "ZENITH_PROMOTE_PROFILES=" >> "$ZENITH_DIR/.env"
+    fi
+    echo "Продвижение будет наследовать список генерации: $(zenith_profiles_display)."
+  else
+    local norm tok valid=1 out=""
+    norm="$(echo "$psel" | tr ',' ' ')"
+    for tok in $norm; do
+      case "$tok" in
+        YT_TLS|GV_TLS|RKN_TLS|DS_TLS|VOICE_UDP) out="${out:+$out,}$tok" ;;
+        "") ;;
+        *) echo "Неизвестный профиль: $tok (доступны: YT_TLS GV_TLS RKN_TLS DS_TLS VOICE_UDP)" >&2; valid=0 ;;
+      esac
+    done
+    if [ "$valid" = "1" ] && [ -n "$out" ]; then
+      if grep -q '^ZENITH_PROMOTE_PROFILES=' "$ZENITH_DIR/.env" 2>/dev/null; then
+        sed -i "s/^ZENITH_PROMOTE_PROFILES=.*/ZENITH_PROMOTE_PROFILES=$out/" "$ZENITH_DIR/.env"
+      else
+        echo "ZENITH_PROMOTE_PROFILES=$out" >> "$ZENITH_DIR/.env"
+      fi
+      echo "Сохранено: $out"
+      if [ "$(get_zenith_promoter_status)" = "ON" ]; then
+        echo "zenith-promoter сейчас работает -- перезапусти (пункт 1 дважды: выкл/вкл), чтобы применить сразу."
+      else
+        echo "Применится при следующем включении (пункт 1)."
+      fi
+    else
+      echo "Не сохранено — есть неизвестные профили."
+    fi
+  fi
+}
+
+# Пункт 18 главного меню -- было прямым тумблером (zenith_promoter_toggle),
+# стало подменю по прямому запросу: нужен способ выбрать профили для
+# продвижения быстрым доступом, не уходя в 21 -> 4.
+zenith_promoter_menu() {
+  if [ ! -d "$ZENITH_DIR" ]; then
+    echo "Zenith ещё не установлен (пункт 21)." >&2
+    return
+  fi
+  while true; do
+    local pr_st; pr_st="$(get_zenith_promoter_status)"
+    echo ""
+    echo "=== zenith-promoter ==="
+    echo "  1) Вкл/выкл $(color_tag "$pr_st")"
+    echo "  2) Профили для продвижения: $(zenith_promote_profiles_display)"
+    echo "  3) Лог (journalctl -f, Ctrl+C для выхода)"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "zenith-promoter > " pmchoice
+    case "$pmchoice" in
+      1) zenith_promoter_toggle ;;
+      2) zenith_promote_profiles_menu ;;
+      3) journalctl -u zenith-promoter -f ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
 zenith_autonomy_menu() {
   while true; do
     local ar_st pr_st
@@ -2141,7 +2231,7 @@ zenith_autonomy_menu() {
     echo "  2) zenith-promoter (автопродвижение в прод) $(color_tag "$pr_st")"
     echo "  3) Лог zenith-autorun (journalctl -f, Ctrl+C для выхода)"
     echo "  4) Лог zenith-promoter (journalctl -f, Ctrl+C для выхода)"
-    echo "  5) Профили: $(zenith_profiles_display)"
+    echo "  5) Профили для генерации: $(zenith_profiles_display) (для продвижения -- отдельно, пункт 18 -> 2)"
     echo "  6) Настройки zenith-autorun (раундов за заход: $(zenith_autorun_get_setting ZENITH_AUTORUN_ROUNDS 20), интервал: $(zenith_autorun_get_setting ZENITH_AUTORUN_INTERVAL_MINUTES 240)м)"
     echo "  0) Назад"
     echo ""
@@ -3749,13 +3839,7 @@ while true; do
       fi
       ;;
     17) manage_zapret ;;
-    18)
-      if [ -d "$ZENITH_DIR" ]; then
-        zenith_promoter_toggle
-      else
-        echo "Zenith ещё не установлен (пункт 21)." >&2
-      fi
-      ;;
+    18) zenith_promoter_menu ;;
     19) run_blob_tune ;;
     20) manage_dnscrypt ;;
     21) manage_zenith ;;

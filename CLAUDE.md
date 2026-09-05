@@ -1590,6 +1590,34 @@ project names here — same public-repo constraint as README.md.
   line (still true, just no longer repeated here — item 111's own
   "6 — из кэша" note above already flags it as special).
 
+## Item 18 (zenith-promoter) turned into a submenu with its own profile selector (2026-09-05)
+
+- Direct follow-up to the `[auto]`/`[freez]` change above, same
+  conversation: "как я помню автопродвижение должно работать только для
+  выбранных профилей, а не для всех" — until now `ZENITH_PROFILES` (see
+  item 21 -> 4 -> 5) was ONE shared list read by both zenith-autorun
+  (generation) and zenith-promoter (promotion), so there was no way to
+  generate for all profiles while auto-promoting only some of them. See
+  Zenith's own CLAUDE.md "`ZENITH_PROMOTE_PROFILES` — decoupling
+  promotion's profile list from generation's" for the actual mechanism
+  (new, independent env var, empty = inherits `ZENITH_PROFILES`
+  wholesale — existing servers keep working identically until this is
+  explicitly set).
+- Item 18 was a single-shot toggle (`zenith_promoter_toggle()` called
+  directly) — now `zenith_promoter_menu()`, a real submenu: `1)` the
+  same toggle as before, `2)` profile selector for promotion
+  (`zenith_promote_profiles_menu()`, writes `ZENITH_PROMOTE_PROFILES`
+  to `Zenith/.env`, same sed-or-append idiom as every other `.env`
+  writer in this file), `3)` log tail. Item 21 -> 4 -> 5's own label
+  updated to say "Профили для генерации" and point at item 18 for
+  promotion, so the two no longer read as the same setting.
+- **Two independent env vars means two independent restarts** — changing
+  either one only takes effect on that service's next start; toggling
+  `ZENITH_PROMOTE_PROFILES` does NOT need `zenith-autorun` restarted,
+  and vice versa. The menu's own prompt after saving says this
+  explicitly (same pattern as the pre-existing generation-profiles
+  prompt at 21 -> 4 -> 5).
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
