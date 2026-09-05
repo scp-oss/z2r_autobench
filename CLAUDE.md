@@ -1543,6 +1543,53 @@ project names here — same public-repo constraint as README.md.
   no reason to keep pointing new clones at the old name once the real
   rename is done.
 
+## `[auto]`/`[freez]` live status in the profile menu (2026-09-05)
+
+- Direct request: the profile list (item 111's header, `1)`-`9)` rows)
+  showed a strategy number tag but nothing about whether autotune is
+  actually managing that profile right now versus a human having frozen
+  it on purpose. Added `autotune_status_tag(pid)` — queries
+  `autotune-profile@N.service` (N=1..6, the per-profile template unit
+  from "autotune_daemon.sh — per-profile processes" above) via
+  `systemctl is-active`/`is-failed` and prints `[auto]` (active),
+  `[freez]` (stopped — assumed a deliberate human choice, e.g. via item
+  12/`set_strategy_cli.sh`), or `[!упал]` (failed — a REAL problem, not a
+  freeze). Profiles 7/8/9 (dev stubs / legacy `autotune-daemon.service`)
+  get no tag at all since no `autotune-profile@N` unit exists for them.
+- **This directly closes the gap flagged (but not fixed) in "All six
+  `autotune-profile@N.service` silently dead for 5 days" above** — that
+  incident's own "Open gap" note asked for exactly this: a
+  `systemctl is-failed autotune-profile@*` check surfaced somewhere in
+  the menu, so a unit stuck in `failed` for days doesn't look identical
+  to one nobody's watching. Distinguishing `[freez]` from `[!упал]`
+  matters precisely because that incident's units were in `failed`
+  (a real crash), not merely stopped — collapsing both into one tag
+  would have hidden the exact thing this is meant to surface.
+- **Renamed the PRE-EXISTING `[auto]` tag to `[fallback]`** —
+  `display_strategy_tag()` already used `[auto]` for a completely
+  different, older meaning (this profile itself isn't explicitly locked,
+  so the number shown is the FB_TLS/FB_HTTP fallback's own locked
+  strategy instead — see that function's own comment). Reusing the same
+  word for two unrelated concepts (strategy-lock state vs.
+  autotune-daemon process state) on the same menu line would have been
+  genuinely ambiguous, not just inconsistent naming — a profile could
+  plausibly show both meanings' tags on one row simultaneously. Grepped
+  the whole repo for `\[auto\]` before renaming — only appeared in `z0r`
+  itself (three spots: the function's own tag, its docstring comment,
+  the item 111 help text), nothing in `z0r-panel`/`Zenith`/README
+  referenced this specific tag text, so no cross-repo sweep was needed
+  this time (unlike every menu-number renumbering elsewhere in this
+  file).
+- Item 6 (VOICE_UDP) folded into the same uniform `for pid in 1 2 3 4 5
+  6` loop as 1-5 — previously printed on its own line with a `[бета]`
+  tag and a `(требуется Discord_bot)` note instead of its actual
+  strategy number, the only profile among 1-6 not showing `[#N]` at all.
+  Now shows the same `[#N]`/`[fallback]` + `[auto]`/`[freez]`/`[!упал]`
+  pair as every other profile, per direct request for a uniform view;
+  the `[бета]` tag and Discord_bot dependency note are gone from this
+  line (still true, just no longer repeated here — item 111's own
+  "6 — из кэша" note above already flags it as special).
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

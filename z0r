@@ -558,13 +558,17 @@ get_locked_strategy() {
 }
 
 # Для показа в списке профилей: если сам профиль явно залочен -- просто
-# "[#N]", как раньше. Если НЕТ (get_locked_strategy=0/auto) -- circular_locked
+# "[#N]", как раньше. Если НЕТ (get_locked_strategy=0) -- circular_locked
 # в этом случае реально падает на fallback-профиль (8=FB_TLS/9=FB_HTTP, см.
 # TITLES/PROFILE_PROTO выше -- то же деление, что показывает "(fallback
 # TLS: [N], HTTP: [N])" в шапке НАСТОЯЩЕГО меню z2r, пункт 11) -- если у
 # того fallback-профиля есть залоченный номер, показываем именно его,
-# "[#N] [auto]", а не голый бессмысленный "[#0]". Если и fallback не
+# "[#N] [fallback]", а не голый бессмысленный "[#0]". Если и fallback не
 # залочен -- показать нечего, остаётся "[#0]" как было.
+# Тег переименован из "[auto]" в "[fallback]" 2026-09-05 -- иначе он бы
+# путался с НОВЫМ "[auto]" ниже (autotune_status_tag), у которого
+# СОВЕРШЕННО другой смысл (крутится ли автоподбор), а не "залочена ли
+# явно стратегия у самого профиля".
 display_strategy_tag() {
   local pid="$1" cur fb_pid fb proto
   cur="$(get_locked_strategy "$pid")"
@@ -580,13 +584,14 @@ display_strategy_tag() {
   esac
   fb="$(get_locked_strategy "$fb_pid")"
   if [ "$fb" != "0" ]; then
-    echo "[#$fb] [auto]"
+    echo "[#$fb] [fallback]"
   else
     echo "[#0]"
   fi
 }
 
-# Цвета для тегов в квадратных скобках ([ON]/[OFF]/[NONE]/[dev]/[бета]).
+# Цвета для тегов в квадратных скобках ([ON]/[OFF]/[NONE]/[dev]/[бета]/
+# [auto]/[freez]/[!упал]).
 # $'...' — байты экранирования уже в значении переменной, обычный echo/printf
 # без -e их и так выведет как есть.
 C_RESET=$'\033[0m'
@@ -604,8 +609,42 @@ color_tag() {
     NONE) color="$C_GRAY" ;;
     dev) color="$C_YELLOW" ;;
     бета|beta) color="$C_CYAN" ;;
+    auto) color="$C_GREEN" ;;
+    freez) color="$C_YELLOW" ;;
+    "!упал") color="$C_RED" ;;
   esac
   printf '%s[%s]%s' "$color" "$word" "$C_RESET"
+}
+
+# Статус автономного per-profile автоподбора (autotune-profile@N.service,
+# N=1..6, см. autotune_daemon.sh --profile N / autotune-profile@.service) --
+# отвечает на прямой вопрос "это авто или заморожено руками":
+#   [auto]  -- юнит active, health-check+ретюн крутится сам.
+#   [freez] -- юнит существует, но остановлен -- предполагается, что
+#              осознанно (человек залочил стратегию руками через пункт 12
+#              /set_strategy_cli.sh и не хочет, чтобы автоподбор её трогал).
+#   [!упал] -- юнит failed. НЕ то же самое, что freez -- это реальная
+#              поломка, не осознанный выбор. Закрывает ровно тот gap, что
+#              CLAUDE.md "All six autotune-profile@N.service silently dead
+#              for 5 days" называет неисправленным: такой юнит мог сидеть
+#              в failed 5 дней подряд, ничем не отличаясь от штатного
+#              состояния, пока никто не заглянул в systemctl вручную.
+# Пусто (ничего не показываем), если юнит для этого pid вообще не
+# установлен -- профили 7/8/9 (dev-заглушки/легаси autotune-daemon.service,
+# см. show_menu) сюда не попадают.
+autotune_status_tag() {
+  local pid="$1" unit
+  unit="autotune-profile@${pid}.service"
+  systemctl list-unit-files "$unit" >/dev/null 2>&1 || return 0
+  if systemctl is-failed --quiet "$unit" 2>/dev/null; then
+    color_tag "!упал"
+    return
+  fi
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    color_tag auto
+  else
+    color_tag freez
+  fi
 }
 
 show_menu() {
@@ -616,16 +655,17 @@ show_menu() {
   echo "" >&2
   echo "111) Тестировать все профили" >&2
   echo "     (1 2 3 4 5 — полный тест; 6 — из кэша; 7 8 9 — заглушка)" >&2
-  echo "     [#N] = явно выбранная стратегия; [#N] [auto] = профиль не залочен," >&2
+  echo "     [#N] = явно выбранная стратегия; [#N] [fallback] = профиль не залочен," >&2
   echo "     показан fallback-номер (FB_TLS/FB_HTTP, реально используемый z2r); [#0] = совсем ничего не залочено" >&2
+  echo "     $(color_tag auto) = крутится автоподбор (autotune-profile@N); $(color_tag freez) = заморожено вручную;" >&2
+  echo "     $(color_tag "!упал") = юнит автоподбора упал -- нужна проверка, это НЕ заморозка" >&2
   echo "     $(color_tag dev) = заглушка, пока в разработке" >&2
   echo "     (можно перечислить несколько через запятую/пробел, например: 1,3,4)" >&2
   echo "     (проходов на попытку: $PASSES — изменить пунктом 11)" >&2
   echo "" >&2
-  for pid in 1 2 3 4 5; do
-    printf "  %s) %-18s %s\n" "$pid" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")" >&2
+  for pid in 1 2 3 4 5 6; do
+    printf "  %s) %-18s %s %s\n" "$pid" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")" "$(autotune_status_tag "$pid")" >&2
   done
-  printf "  6) %-18s %s (требуется Discord_bot)\n" "${TITLES[6]}" "$(color_tag бета)" >&2
   printf "  7) %-18s %s\n" "${TITLES[7]}" "$(color_tag dev)" >&2
   printf "  8) %-18s %s\n" "${TITLES[8]}" "$(color_tag dev)" >&2
   printf "  9) %-18s %s\n" "${TITLES[9]}" "$(color_tag dev)" >&2
