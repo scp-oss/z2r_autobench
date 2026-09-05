@@ -1592,6 +1592,11 @@ project names here — same public-repo constraint as README.md.
 
 ## Item 18 (zenith-promoter) turned into a submenu with its own profile selector (2026-09-05)
 
+- **Renumbered to item 27 later the SAME day** — see "z0r main menu
+  renumbering (2026-09-05)" below, 9 new per-profile items were inserted
+  at 16-24. Every "item 18"/"21 -> 4 -> 5" mention in this section is the
+  number as it was AT THE TIME this feature was built, earlier the same
+  day — read as item 27 / 30 -> 4 -> 5 for the current, real menu.
 - Direct follow-up to the `[auto]`/`[freez]` change above, same
   conversation: "как я помню автопродвижение должно работать только для
   выбранных профилей, а не для всех" — until now `ZENITH_PROFILES` (see
@@ -1617,6 +1622,101 @@ project names here — same public-repo constraint as README.md.
   and vice versa. The menu's own prompt after saving says this
   explicitly (same pattern as the pre-existing generation-profiles
   prompt at 21 -> 4 -> 5).
+
+## z0r main menu renumbering: per-profile items 16-24 inserted, delete items collapsed to a submenu (2026-09-05)
+
+- Direct request, same conversation as the `[auto]`/`[freez]` tags above:
+  a way to manage ONE profile directly (set a strategy number, or
+  toggle its `autotune-profile@N` on/off) without first picking it out
+  of a list (item 12) or only seeing its status with nothing to click
+  (the horizontal 1-9 row). Inserted 9 new top-level items, one per
+  profile 1-9, right after item 15 ("Запустить меню z2r") — pushed
+  every item from the old 16 onward up by exactly 9:
+  ```
+  (new) 16  YT_TLS        -- profile_manage_menu 1
+  (new) 17  GV_TLS        -- profile_manage_menu 2
+  (new) 18  RKN_TLS       -- profile_manage_menu 3
+  (new) 19  DS_TLS        -- profile_manage_menu 4
+  (new) 20  YT_QUIC_UDP   -- profile_manage_menu 5
+  (new) 21  VOICE_UDP     -- profile_manage_menu 6
+  (new) 22  GAMES_UDP     -- profile_manage_menu 7 (заглушка, тестер не реализован)
+  (new) 23  FB_TLS        -- profile_manage_menu 8
+  (new) 24  FB_HTTP       -- profile_manage_menu 9
+  16 -> 25  Проверка DNSCrypt на дырявость
+  17 -> 26  Zapret сервис
+  18 -> 27  zenith-promoter
+  19 -> 28  blob_tune.sh
+  20 -> 29  DNSCrypt-proxy
+  21 -> 30  Zenith
+  22 -> 31  Zenith-WS
+  23 -> 32  Discord_bot
+  24 -> 33  web_panel
+  25 -> 34  Автообновление
+  26-33     -> собраны в подменю пункта 35 "Удаление" (см. ниже),
+             больше не отдельные top-level пункты
+  ```
+  Items `1-9` (profile IDs), `10-15`, `111`/`999`/`0` are unchanged, same
+  rule as every prior renumbering in this file. Nested submenu numbering
+  (Zenith's own `1-4`, its autonomy submenu's own `1-6`, `_service_on_menu`'s
+  `1-3`) is untouched — separate namespace, see the note under "z0r main
+  menu renumbering (2026-08-24)" above.
+- `profile_manage_menu(pid)` (new) — opens a per-profile submenu: `1)`
+  set a strategy number manually (`profile_set_strategy_manual()`,
+  factored out of the pre-existing `manual_switch_strategy()` so item 12
+  and the new per-profile items share one implementation instead of
+  duplicating the `set_strategy_cli.sh set` call), `2)` toggle
+  `autotune-profile@N.service` on/off (`profile_toggle_autotune()`, new
+  — there was previously NO way to start/stop this unit from `z0r` at
+  all, only the read-only status tag added earlier the same day). Item
+  `2` only appears if the unit actually exists for that profile (`8`/`9`
+  have no per-profile unit, see "autotune_daemon.sh — per-profile
+  processes" above — legacy `autotune-daemon.service` covers them
+  instead). Profile `7` (GAMES_UDP) has no tester at all (same exclusion
+  `manual_switch_strategy()` already had) — its item just says so and
+  returns.
+- **Delete items collapsed into one submenu** (direct request, "можно
+  убрать в подменю удаление") — the 8 individual `Удалить *` items (old
+  26-33, new range would have been 35-42) are now `uninstall_menu()`,
+  reached via a single item 35 "Удаление", with its OWN `1-8` numbering
+  (separate namespace, same principle as Zenith's nested submenus).
+  `999` ("Удалить всё") is untouched — still top-level, never nested,
+  same "never renumbered" rule as `111`/`0`. Each `uninstall_*` function
+  already prompts its own confirmation (`DELETE`/`[y/N]`) — the submenu
+  is pure navigation, no second confirmation layer added.
+- Found and fixed the same day, same sweep: `uninstall_autobench_self()`
+  had a already-stale self-reference ("z2r и autotune-daemon.service не
+  тронет — это отдельные пункты (16/17)") that didn't match ANY
+  numbering scheme from any prior renumbering — likely drifted across
+  more than one earlier pass without being caught (same lesson as
+  `blob_tune.sh`'s stale `zenith_autorun.sh` reference, 2026-08-31 entry
+  above: a stale cross-reference can survive multiple renumbering
+  sweeps). Now correctly points at the new submenu's own items 1/2.
+- **New status summary at the very top of the menu** (`show_status_summary()`,
+  printed right after `[Provider: ...]`, before any section) — direct
+  request for an at-a-glance health check without opening item 14/27 or
+  any of 16-24: aggregate `[ON]`/`[OFF]` + active count across all
+  `autotune-profile@1-6` units, a separate "юнит(ы) автоподбора"
+  line distinguishing healthy from `[!упал]` (aggregate — ANY unit
+  failed trips it), and the same two-line shape for `zenith-promoter`.
+  This directly extends the earlier `[auto]`/`[freez]`/`[!упал]` per-profile
+  work to closing the same "All six autotune-profile@N.service silently
+  dead for 5 days" gap at the point someone would notice it fastest —
+  the very first screen, before choosing anything.
+- **Sibling-repo sweep**: same mechanical process as every prior
+  renumbering — grepped `z0r-panel`, `Zenith`, and `Zenith-WS` for
+  hardcoded "z0r item N"/"пункт N" text referencing anything ≥16 and
+  updated each to the new number (`z0r-panel`: `main.py`, `README.md`,
+  `CLAUDE.md`, `autoupdate_ctl.py`, `.env.example`,
+  `templates/nodes.html`, `templates/automation.html`; `Zenith`:
+  `orchestrator/config.py`, `zenith_autorun.sh`, `README.md`,
+  `CLAUDE.md`; `Zenith-WS`: `CLAUDE.md`, `relay/cf_worker/README.md`,
+  `relay/cf_worker/deploy.sh` — Zenith-WS's own item 22 became 31).
+  Older, already-historical narrative entries (e.g. "z0r main menu
+  renumbering (2026-08-24)"'s own mapping table, or "inserted as new
+  top-level item 19" for `blob_tune.sh`) were deliberately left
+  describing the numbering as it was AT THAT TIME, not rewritten — only
+  live "this is how it works now" references were updated, same
+  distinction this file has drawn on every prior pass.
 
 ## Publishing hygiene
 

@@ -612,6 +612,7 @@ color_tag() {
     auto) color="$C_GREEN" ;;
     freez) color="$C_YELLOW" ;;
     "!упал") color="$C_RED" ;;
+    активен) color="$C_GREEN" ;;
   esac
   printf '%s[%s]%s' "$color" "$word" "$C_RESET"
 }
@@ -647,28 +648,58 @@ autotune_status_tag() {
   fi
 }
 
+# Сводка наверху меню -- видно с первого взгляда, не заходя в пункты
+# 14/16-24/27, есть ли вообще что-то в работе и не упало ли оно молча.
+# Добавлено 2026-09-05 по прямому запросу, напрямую закрывает тот же
+# класс проблемы, что "All six autotune-profile@N.service silently dead
+# for 5 days" в CLAUDE.md -- юнит в failed выглядел неотличимо от
+# здорового, пока никто не заглядывал в systemctl руками; теперь это
+# видно на самом первом экране меню.
+show_status_summary() {
+  local active=0 failed=0 total=0 pid unit
+  for pid in 1 2 3 4 5 6; do
+    unit="autotune-profile@${pid}.service"
+    systemctl list-unit-files "$unit" >/dev/null 2>&1 || continue
+    total=$((total + 1))
+    systemctl is-active --quiet "$unit" 2>/dev/null && active=$((active + 1))
+    systemctl is-failed --quiet "$unit" 2>/dev/null && failed=$((failed + 1))
+  done
+  printf "  %-22s %s (%s/%s)\n" "Автоподбор (1-6):" "$(color_tag "$([ "$active" -gt 0 ] && echo ON || echo OFF)")" "$active" "$total" >&2
+  if [ "$failed" -gt 0 ]; then
+    printf "  %-22s %s\n" "юнит(ы) автоподбора:" "$(color_tag "!упал")" >&2
+  else
+    printf "  %-22s %s\n" "юнит(ы) автоподбора:" "$(color_tag активен)" >&2
+  fi
+  if [ -d "$ZENITH_DIR" ]; then
+    printf "  %-22s %s\n" "Автопродвижение:" "$(color_tag "$(get_zenith_promoter_status)")" >&2
+    if systemctl is-failed --quiet zenith-promoter 2>/dev/null; then
+      printf "  %-22s %s\n" "юнит автопродвижения:" "$(color_tag "!упал")" >&2
+    else
+      printf "  %-22s %s\n" "юнит автопродвижения:" "$(color_tag активен)" >&2
+    fi
+  fi
+}
+
 show_menu() {
   echo "=== z0r ===" >&2
   echo "[Provider: $(get_provider)]" >&2
+  echo "" >&2
+  show_status_summary
   echo "" >&2
   echo "=== Тест профилей ===" >&2
   echo "" >&2
   echo "111) Тестировать все профили" >&2
   echo "     (1 2 3 4 5 — полный тест; 6 — из кэша; 7 8 9 — заглушка)" >&2
-  echo "     [#N] = явно выбранная стратегия; [#N] [fallback] = профиль не залочен," >&2
-  echo "     показан fallback-номер (FB_TLS/FB_HTTP, реально используемый z2r); [#0] = совсем ничего не залочено" >&2
-  echo "     $(color_tag auto) = крутится автоподбор (autotune-profile@N); $(color_tag freez) = заморожено вручную;" >&2
-  echo "     $(color_tag "!упал") = юнит автоподбора упал -- нужна проверка, это НЕ заморозка" >&2
-  echo "     $(color_tag dev) = заглушка, пока в разработке" >&2
-  echo "     (можно перечислить несколько через запятую/пробел, например: 1,3,4)" >&2
+  echo "     (можно перечислить несколько через запятую/пробел, например: 1,3,4 -- запускает" >&2
+  echo "     тест/подбор сразу; отдельный номер, например просто 1, делает то же самое)" >&2
   echo "     (проходов на попытку: $PASSES — изменить пунктом 11)" >&2
+  echo "     (номер стратегии и статус автоподбора каждого профиля -- пункты 16-24 ниже)" >&2
   echo "" >&2
-  for pid in 1 2 3 4 5 6; do
-    printf "  %s) %-18s %s %s\n" "$pid" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")" "$(autotune_status_tag "$pid")" >&2
+  local _row=""
+  for pid in 1 2 3 4 5 6 7 8 9; do
+    _row+="$(printf '%2s)%-14s' "$pid" "${TITLES[$pid]}")"
   done
-  printf "  7) %-18s %s\n" "${TITLES[7]}" "$(color_tag dev)" >&2
-  printf "  8) %-18s %s\n" "${TITLES[8]}" "$(color_tag dev)" >&2
-  printf "  9) %-18s %s\n" "${TITLES[9]}" "$(color_tag dev)" >&2
+  echo "  $_row" >&2
   echo "" >&2
   echo "=== Подбор стратегии ===" >&2
   echo "" >&2
@@ -684,32 +715,32 @@ show_menu() {
   echo "" >&2
   echo "=== Управление ===" >&2
   echo "" >&2
-  echo " 16) Проверка DNSCrypt на дырявость (реально ли системные запросы идут через него, а не в обход)" >&2
-  echo " 17) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
+  for pid in 1 2 3 4 5 6; do
+    printf "    %s) %-18s %s %s\n" "$((pid + 15))" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")" "$(autotune_status_tag "$pid")" >&2
+  done
+  printf "    %s) %-18s %s\n" 22 "${TITLES[7]}" "$(color_tag dev)" >&2
+  printf "    %s) %-18s %s\n" 23 "${TITLES[8]}" "$(color_tag dev)" >&2
+  printf "    %s) %-18s %s\n" 24 "${TITLES[9]}" "$(color_tag dev)" >&2
+  echo "" >&2
+  echo " 25) Проверка DNSCrypt на дырявость (реально ли системные запросы идут через него, а не в обход)" >&2
+  echo " 26) Zapret сервис $(color_tag "$(get_zapret_status)") (статус и перезапуск)" >&2
   if [ -d "$ZENITH_DIR" ]; then
-    echo " 18) zenith-promoter $(color_tag "$(get_zenith_promoter_status)") (автопродвижение в прод БЕЗ человека -- вкл/выкл + свои профили для продвижения)" >&2
-  echo " 19) blob_tune.sh (перебор TLS ClientHello blob'ов -- ДОРОГОЙ, рестарт zapret2 на каждого кандидата, гонять редко)" >&2
+    echo " 27) zenith-promoter $(color_tag "$(get_zenith_promoter_status)") (автопродвижение в прод БЕЗ человека -- вкл/выкл + свои профили для продвижения)" >&2
+  echo " 28) blob_tune.sh (перебор TLS ClientHello blob'ов -- ДОРОГОЙ, рестарт zapret2 на каждого кандидата, гонять редко)" >&2
   fi
   echo "" >&2
   echo "=== Модули ===" >&2
   echo "" >&2
-  echo " 20) DNSCrypt-proxy $(color_tag "$(get_dnscrypt_status)") (локальный DoH-резолвер — на случай блокировки DoT/DoH к обычным резолверам)" >&2
-  echo " 21) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
-  echo " 22) Zenith-WS $(color_tag "$(get_ws_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
-  echo " 23) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
-  echo " 24) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
-  echo " 25) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-WS)" >&2
+  echo " 29) DNSCrypt-proxy $(color_tag "$(get_dnscrypt_status)") (локальный DoH-резолвер — на случай блокировки DoT/DoH к обычным резолверам)" >&2
+  echo " 30) Zenith $(color_tag "$(get_zenith_status)") (автоподборщик-генератор стратегий)" >&2
+  echo " 31) Zenith-WS $(color_tag "$(get_ws_relay_status)") (прозрачный доступ к Telegram, без настройки в клиенте)" >&2
+  echo " 32) Discord_bot $(color_tag "$(get_voice_bot_status)") (требуется для тестирования VOICE_UDP)" >&2
+  echo " 33) web_panel $(color_tag "$(get_panel_status)") (управление через браузер, обзор по нодам/провайдерам)" >&2
+  echo " 34) Автообновление $(color_tag "$(get_autoupdate_timer_status)") (z2r_autobench/Zenith/z0r-panel/Zenith-WS)" >&2
   echo "" >&2
   echo "=== Удаление ===" >&2
   echo "" >&2
-  echo " 26) Удалить z2r" >&2
-  echo " 27) Удалить autotune-daemon" >&2
-  echo " 28) Удалить Discord_bot" >&2
-  echo " 29) Удалить web_panel" >&2
-  echo " 30) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)" >&2
-  echo " 31) Удалить Zenith" >&2
-  echo " 32) Удалить Zenith-WS" >&2
-  echo " 33) Удалить DNSCrypt-proxy" >&2
+  echo " 35) Удаление (подменю -- z2r/autotune-daemon/Discord_bot/web_panel/z2r_autobench/Zenith/Zenith-WS/DNSCrypt-proxy)" >&2
   echo "" >&2
   echo "999) Удалить всё (z2r + autotune-daemon + autobench + Discord_bot + web_panel + Zenith + Zenith-WS + DNSCrypt-proxy)" >&2
   echo "" >&2
@@ -757,26 +788,12 @@ apply_best_auto() {
   done
 }
 
-# Ручное переключение стратегии профиля на конкретный номер, без прогона
-# rank_strategies.sh/rank_quic.sh — для быстрой точечной проверки (например,
-# сверить номер из чужой статистики или руками попробовать конкретную
-# стратегию). Профиль 7 (GAMES_UDP) исключён — тестер не реализован, у
-# профиля нет согласованного числа стратегий, ставить туда что-то вручную
-# бессмысленно.
-manual_switch_strategy() {
-  echo ""
-  echo "=== Ручное переключение стратегии ==="
-  local pid
-  for pid in 1 2 3 4 5 6 8 9; do
-    printf "  %s) %-18s %s\n" "$pid" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")"
-  done
-  read -re -p "Профиль: " pid
-  case " 1 2 3 4 5 6 8 9 " in
-    *" $pid "*) ;;
-    *) echo "Нет такого профиля (или для него нет ручного переключения)."; return 1 ;;
-  esac
-
-  local cur strat proto ans
+# Общая логика "спросить новый номер стратегии, подтвердить, применить" --
+# вынесена из manual_switch_strategy() 2026-09-05, чтобы её же переиспользовать
+# из НОВОГО per-profile меню (пункты 16-24, см. profile_manage_menu) без
+# дублирования set_strategy_cli.sh-вызова в двух местах.
+profile_set_strategy_manual() {
+  local pid="$1" cur strat proto ans
   cur="$(get_locked_strategy "$pid")"
   echo "Текущая стратегия профиля $pid (${TITLES[$pid]}): $cur"
   read -re -p "Новый номер стратегии: " strat
@@ -795,6 +812,94 @@ manual_switch_strategy() {
       ;;
     *) echo "Отменено." ;;
   esac
+}
+
+# Ручное переключение стратегии профиля на конкретный номер, без прогона
+# rank_strategies.sh/rank_quic.sh — для быстрой точечной проверки (например,
+# сверить номер из чужой статистики или руками попробовать конкретную
+# стратегию). Профиль 7 (GAMES_UDP) исключён — тестер не реализован, у
+# профиля нет согласованного числа стратегий, ставить туда что-то вручную
+# бессмысленно. Держим этот пункт (12) отдельно от per-profile пунктов
+# 16-24 (см. profile_manage_menu) — иногда удобнее выбрать профиль из
+# общего списка, не запоминая заранее его конкретный пункт меню.
+manual_switch_strategy() {
+  echo ""
+  echo "=== Ручное переключение стратегии ==="
+  local pid
+  for pid in 1 2 3 4 5 6 8 9; do
+    printf "  %s) %-18s %s\n" "$pid" "${TITLES[$pid]}" "$(display_strategy_tag "$pid")"
+  done
+  read -re -p "Профиль: " pid
+  case " 1 2 3 4 5 6 8 9 " in
+    *" $pid "*) ;;
+    *) echo "Нет такого профиля (или для него нет ручного переключения)."; return 1 ;;
+  esac
+  profile_set_strategy_manual "$pid"
+}
+
+# Вкл/выкл autotune-profile@N.service для ОДНОГО профиля -- раньше в z0r
+# не было НИКАКОГО способа включить/выключить именно этот юнит (только
+# статус-тег [auto]/[freez]/[!упал], см. autotune_status_tag выше), юнит
+# приходилось трогать напрямую через systemctl в обход z0r. Тот же
+# паттерн предупреждения, что zenith_promoter_toggle() -- это тоже
+# автономный процесс, который сам рестартует zapret2 без подтверждения
+# на каждое срабатывание.
+profile_toggle_autotune() {
+  local pid="$1" unit
+  unit="autotune-profile@${pid}.service"
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    systemctl disable --now "$unit"
+    echo "$unit остановлен и отключён -- стратегия профиля $pid (${TITLES[$pid]}) заморожена на текущем значении."
+  else
+    echo "!!! $unit периодически перебирает стратегии этого профиля и рестартует"
+    echo "zapret2 БЕЗ подтверждения на каждое срабатывание."
+    read -re -p "Включить автоподбор для профиля $pid сейчас? [y/N]: " ans
+    case "$ans" in
+      y|Y)
+        systemctl enable --now "$unit"
+        sleep 1
+        systemctl status "$unit" --no-pager
+        ;;
+      *) echo "Отменено." ;;
+    esac
+  fi
+}
+
+# Пункты 16-24 главного меню (по одному на профиль 1-9, см. show_menu) --
+# добавлено 2026-09-05 по прямому запросу: раньше единственный способ
+# управлять КОНКРЕТНЫМ профилем был либо пункт 12 (сначала выбрать номер
+# профиля из списка), либо статус-теги в самом списке без возможности
+# что-то нажать. Теперь каждый профиль -- отдельный пункт меню, сразу
+# открывающий именно его управление, без выбора профиля из списка вручную.
+# Профиль 7 (GAMES_UDP) -- тестер не реализован (см. manual_switch_strategy),
+# только сообщение об этом. Пункт "вкл/выкл автоподбор" показывается,
+# только если для профиля вообще существует autotune-profile@N.service --
+# у 8/9 (fallback) такого юнита нет (см. CLAUDE.md "autotune_daemon.sh —
+# per-profile processes": 8/9 навсегда в SKIP_PROFILES легаси-демона,
+# отдельного per-profile юнита для них никогда не заводили).
+profile_manage_menu() {
+  local pid="$1"
+  case " 1 2 3 4 5 6 8 9 " in
+    *" $pid "*) ;;
+    *) echo "Профиль $pid (${TITLES[$pid]:-?}): управление стратегией не реализовано (тестер отсутствует)." >&2; return 1 ;;
+  esac
+  while true; do
+    local has_autotune=""
+    systemctl list-unit-files "autotune-profile@${pid}.service" >/dev/null 2>&1 && has_autotune=1
+    echo ""
+    echo "=== ${TITLES[$pid]} (профиль $pid) ==="
+    echo "Текущее: $(display_strategy_tag "$pid") $(autotune_status_tag "$pid")"
+    echo "  1) Задать номер стратегии вручную"
+    [ -n "$has_autotune" ] && echo "  2) Вкл/выкл автоподбор (autotune-profile@$pid)"
+    echo "  0) Назад"
+    read -re -p "> " pmchoice
+    case "$pmchoice" in
+      1) profile_set_strategy_manual "$pid" ;;
+      2) if [ -n "$has_autotune" ]; then profile_toggle_autotune "$pid"; else echo "Неизвестный выбор."; fi ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
 }
 
 # Фоновый запуск длинного прогона (111/список профилей) -- вместо попытки
@@ -1415,7 +1520,7 @@ _service_on_menu() {
 }
 
 # Read-only: git fetch + сравнение HEAD с origin/main, НИЧЕГО не
-# применяет (сам pull делает пункт 25 "Автообновление" — тот же git-
+# применяет (сам pull делает пункт 34 "Автообновление" — тот же git-
 # репозиторий, что и тут, не дублируем логику обновления второй раз,
 # только показываем, есть ли смысл туда заходить). "main", не текущая
 # ветка — тот же принцип, что у autoupdate.sh (см. его докстринг:
@@ -1458,7 +1563,7 @@ _check_git_updates() {
   elif [ "$behind" -eq 0 ]; then
     echo "$label: актуально, HEAD совпадает с origin/main."
   else
-    echo "$label: отстаёт от origin/main на $behind коммит(ов) — обновить можно через пункт 25 (Автообновление)."
+    echo "$label: отстаёт от origin/main на $behind коммит(ов) — обновить можно через пункт 34 (Автообновление)."
     git -C "$dir" -c safe.directory="$dir" log --oneline "HEAD..origin/main" 2>/dev/null | head -10
   fi
 }
@@ -1560,12 +1665,12 @@ voice_bot_install_files() {
   [ -f "$VOICE_BOT_DIR/.env" ] || cp "$VOICE_BOT_DIR/.env.example" "$VOICE_BOT_DIR/.env"
 
   echo ""
-  echo "Склонирован и готов к настройке. Перед включением (пункт 23 ещё раз):"
+  echo "Склонирован и готов к настройке. Перед включением (пункт 32 ещё раз):"
   echo "  1. Заполни реальными значениями: $VOICE_BOT_DIR/.env"
   echo "     (DISCORD_TOKEN, GUILD_ID, TEST_VOICE_CHANNEL_ID, OWNER_USER_ID)"
   echo "     Список стратегий бот строит сам динамически (set_strategy_cli.sh"
   echo "     max) — отдельного файла со списком заводить не нужно."
-  echo "  2. Нужен уже поставленный Zenith (пункт 21) — бот тестирует через"
+  echo "  2. Нужен уже поставленный Zenith (пункт 30) — бот тестирует через"
   echo "     его песочницу, юзера zenith-voice-bot без него не будет."
 }
 
@@ -1580,7 +1685,7 @@ manage_voice_bot() {
       ;;
     OFF)
       if ! id zenith-voice-bot >/dev/null 2>&1; then
-        echo "Юзера zenith-voice-bot нет — сначала поставь/настрой Zenith (пункт 21," >&2
+        echo "Юзера zenith-voice-bot нет — сначала поставь/настрой Zenith (пункт 30," >&2
         echo "manage_zenith -> setup_sandbox.sh создаёт этого юзера)." >&2
         return 1
       fi
@@ -2105,7 +2210,7 @@ zenith_autorun_config_menu() {
 }
 
 # Вынесено из zenith_autonomy_menu(), чтобы дёргать тем же кодом и из
-# главного меню (пункт 18, для быстрого доступа без 21 -> 4 -> 2) -- сама
+# главного меню (пункт 27, для быстрого доступа без 30 -> 4 -> 2) -- сама
 # логика ТОЛЬКО тут, обе точки входа зовут эту функцию, а не дублируют.
 zenith_promoter_toggle() {
   local pr_st; pr_st="$(get_zenith_promoter_status)"
@@ -2134,7 +2239,7 @@ zenith_promoter_toggle() {
 # для zenith-promoter (см. Zenith/orchestrator/config.py и CLAUDE.md
 # "ZENITH_PROMOTE_PROFILES — decoupling promotion's profile list from
 # generation's"), добавлено 2026-09-05 по прямому запросу: раньше ОДНА
-# переменная (ZENITH_PROFILES, см. пункт 21 -> 4 -> 5) решала и что
+# переменная (ZENITH_PROFILES, см. пункт 30 -> 4 -> 5) решала и что
 # генерируется, и что продвигается -- нельзя было, например, генерировать
 # кандидатов для всех 4 профилей, но автономно продвигать только 2 из
 # них. Пусто (дефолт) = наследует ZENITH_PROFILES целиком -- сервер,
@@ -2149,11 +2254,11 @@ zenith_promote_profiles_display() {
 }
 
 zenith_promote_profiles_menu() {
-  [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 21)." >&2; return; }
+  [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 30)." >&2; return; }
   echo ""
   echo "Текущий выбор для продвижения: $(zenith_promote_profiles_display)"
   echo "Доступные профили: YT_TLS GV_TLS RKN_TLS DS_TLS VOICE_UDP"
-  echo "(это НЕЗАВИСИМО от профилей генерации, пункт 21 -> 4 -> 5 -- можно"
+  echo "(это НЕЗАВИСИМО от профилей генерации, пункт 30 -> 4 -> 5 -- можно"
   echo "генерировать кандидатов для одних профилей, а автономно продвигать"
   echo "только часть из них)"
   read -re -p "Профили через запятую/пробел (Enter — наследовать список генерации): " psel
@@ -2192,12 +2297,13 @@ zenith_promote_profiles_menu() {
   fi
 }
 
-# Пункт 18 главного меню -- было прямым тумблером (zenith_promoter_toggle),
+# Пункт 27 главного меню (был 18 до вставки per-profile пунктов 16-24
+# 2026-09-05, см. CLAUDE.md) -- было прямым тумблером (zenith_promoter_toggle),
 # стало подменю по прямому запросу: нужен способ выбрать профили для
-# продвижения быстрым доступом, не уходя в 21 -> 4.
+# продвижения быстрым доступом, не уходя в 30 -> 4.
 zenith_promoter_menu() {
   if [ ! -d "$ZENITH_DIR" ]; then
-    echo "Zenith ещё не установлен (пункт 21)." >&2
+    echo "Zenith ещё не установлен (пункт 30)." >&2
     return
   fi
   while true; do
@@ -2231,7 +2337,7 @@ zenith_autonomy_menu() {
     echo "  2) zenith-promoter (автопродвижение в прод) $(color_tag "$pr_st")"
     echo "  3) Лог zenith-autorun (journalctl -f, Ctrl+C для выхода)"
     echo "  4) Лог zenith-promoter (journalctl -f, Ctrl+C для выхода)"
-    echo "  5) Профили для генерации: $(zenith_profiles_display) (для продвижения -- отдельно, пункт 18 -> 2)"
+    echo "  5) Профили для генерации: $(zenith_profiles_display) (для продвижения -- отдельно, пункт 27 -> 2)"
     echo "  6) Настройки zenith-autorun (раундов за заход: $(zenith_autorun_get_setting ZENITH_AUTORUN_ROUNDS 20), интервал: $(zenith_autorun_get_setting ZENITH_AUTORUN_INTERVAL_MINUTES 240)м)"
     echo "  0) Назад"
     echo ""
@@ -2252,7 +2358,7 @@ zenith_autonomy_menu() {
       3) journalctl -u zenith-autorun -f ;;
       4) journalctl -u zenith-promoter -f ;;
       5)
-        [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 21)." >&2; continue; }
+        [ -f "$ZENITH_DIR/.env" ] || { echo "Zenith ещё не установлен (пункт 30)." >&2; continue; }
         echo ""
         echo "Текущий выбор: $(zenith_profiles_display)"
         echo "Доступные профили: YT_TLS GV_TLS RKN_TLS DS_TLS VOICE_UDP"
@@ -2398,7 +2504,7 @@ zenith_profiles_submenu() {
     echo "  3) RKN_TLS"
     echo "  4) DS_TLS"
     echo "  5) YT_QUIC_UDP $(color_tag бета) — этот провайдер не блокирует QUIC, проверить пока нельзя"
-    echo "  6) VOICE_UDP  — реальный Discord voice-тест (orchestrator/voice_tester.py), заменяет ручной Discord-бот (пункт 23)"
+    echo "  6) VOICE_UDP  — реальный Discord voice-тест (orchestrator/voice_tester.py), заменяет ручной Discord-бот (пункт 32)"
     echo "  7) GAMES_UDP  $(color_tag dev) добавим позже"
     echo "  8) FB_TLS     $(color_tag dev) добавим позже"
     echo "  9) FB_HTTP    $(color_tag dev) добавим позже"
@@ -2488,6 +2594,44 @@ uninstall_daemon() {
   esac
 }
 
+# Пункт 35 главного меню -- свёрнутое подменю удаления (было 8 отдельных
+# top-level пунктов 35-42, занимавших много места на экране без реальной
+# необходимости -- по прямому запросу). Отдельная нумерация 1-8, тот же
+# принцип "вложенное подменю -- своё пространство номеров", что у
+# zenith_menu/zenith_autonomy_menu (см. CLAUDE.md "z0r main menu
+# renumbering" про это правило). Каждая uninstall_* функция уже сама
+# спрашивает подтверждение (обычно 'DELETE' или [y/N]) -- подменю здесь
+# только НАВИГАЦИЯ, без второго слоя подтверждений.
+uninstall_menu() {
+  while true; do
+    echo ""
+    echo "=== Удаление ==="
+    echo "  1) Удалить z2r"
+    echo "  2) Удалить autotune-daemon"
+    echo "  3) Удалить Discord_bot"
+    echo "  4) Удалить web_panel"
+    echo "  5) Удалить z2r_autobench (сам себя, весь $INSTALL_DIR)"
+    echo "  6) Удалить Zenith"
+    echo "  7) Удалить Zenith-WS"
+    echo "  8) Удалить DNSCrypt-proxy"
+    echo "  0) Назад"
+    echo ""
+    read -re -p "Удаление > " uchoice
+    case "$uchoice" in
+      1) uninstall_z2r ;;
+      2) uninstall_daemon ;;
+      3) uninstall_voice_bot ;;
+      4) uninstall_panel ;;
+      5) uninstall_autobench_self ;;
+      6) uninstall_zenith ;;
+      7) uninstall_ws_relay ;;
+      8) uninstall_dnscrypt ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
+}
+
 uninstall_z2r() {
   if ! z2r_installed; then
     echo "z2r (/opt/zapret2) не найден — нечего удалять."
@@ -2534,13 +2678,13 @@ uninstall_voice_bot() {
 
 # run_logs/ + sudoers для zenith-panel -- вынесено из ветки первого клона
 # (case NONE) manage_panel и вызывается ЕЩЁ И безусловно в начале
-# manage_panel при каждом заходе в пункт 24, а не только при первой
+# manage_panel при каждом заходе в пункт 33, а не только при первой
 # установке -- иначе апдейт z0r-скрипта, принёсший новое правило sudoers
 # (или починку старого), никогда не долетает до уже установленной панели:
 # ON/OFF-ветки только дёргают systemd, старый файл в /etc/sudoers.d/ так
 # и остаётся лежать нетронутым. Живой инцидент 2026-08-15: правило чинили
 # дважды (сначала write-доступ к run_logs, потом баг в самом sudoers-glob),
-# и оба раза пункт 24 -> "ON/OFF" ничего не обновлял, пока это не стало
+# и оба раза пункт 33 -> "ON/OFF" ничего не обновлял, пока это не стало
 # отдельной идемпотентной функцией, вызываемой всегда.
 ensure_panel_runtime_grants() {
   [ -d "$PANEL_DIR" ] || return 0
@@ -2649,7 +2793,7 @@ ensure_panel_runtime_grants() {
   local sudoers_zenith_units_cmds="$systemctl_bin start zenith-autorun, $systemctl_bin stop zenith-autorun, $systemctl_bin restart zenith-autorun, $systemctl_bin is-active zenith-autorun, $journalctl_bin -u zenith-autorun -n 200 --no-pager, $systemctl_bin start zenith-promoter, $systemctl_bin stop zenith-promoter, $systemctl_bin restart zenith-promoter, $systemctl_bin is-active zenith-promoter, $journalctl_bin -u zenith-promoter -n 200 --no-pager"
 
   # Автообновление -- панель ТОЛЬКО переключает флаги (autoupdate.sh
-  # --set, тот же файл читает/пишет z0r пункт 25) и триггерит разовый
+  # --set, тот же файл читает/пишет z0r пункт 34) и триггерит разовый
   # прогон/смотрит статус таймера -- саму УСТАНОВКУ таймера (копирование
   # .service/.timer в /etc/systemd/system, daemon-reload) панель делать
   # не должна, это шаг через z0r/SSH, как и первичная установка любого
@@ -2747,7 +2891,7 @@ panel_install_files() {
   ensure_panel_runtime_grants
 
   echo ""
-  echo "Склонирован и готов к настройке. Перед включением (пункт 24 ещё раз):"
+  echo "Склонирован и готов к настройке. Перед включением (пункт 33 ещё раз):"
   echo "  1. Проверь/заполни: $PANEL_DIR/.env — PANEL_ADMIN_PASSWORD_HASH"
   echo "     ($PANEL_DIR/gen_password_hash.py) и PANEL_SESSION_SECRET"
   echo "     (python3 -c 'import secrets; print(secrets.token_hex(32))')."
@@ -2829,7 +2973,7 @@ uninstall_panel() {
 # и из manage_ws_relay() (после её "клонировать? y/n"), и напрямую из
 # первого запуска (см. first_run_install_modules). Включение (сервис +
 # iptables REDIRECT) сюда намеренно НЕ входит -- сетевое изменение,
-# отдельный осознанный шаг через пункт 22 ещё раз.
+# отдельный осознанный шаг через пункт 31 ещё раз.
 wsrelay_install_files() {
   if ! command -v git >/dev/null 2>&1; then
     echo "git не найден, пробую поставить..." >&2
@@ -2888,7 +3032,7 @@ ensure_wsrelay_user() {
 # Копирует юнит (если ещё не скопирован) и спрашивает "включить сейчас
 # (сервис + REDIRECT)?" -- вынесено из OFF-ветки manage_ws_relay(), чтобы
 # звать тем же кодом сразу после установки (NONE-ветка), в ОДНОМ заходе
-# в меню, а не заставлять заходить в пункт 22 второй раз подряд ("дважды
+# в меню, а не заставлять заходить в пункт 31 второй раз подряд ("дважды
 # пикать пункт", живой запрос 2026-08-24). REDIRECT -- сетевое изменение,
 # поэтому вопрос [y/N] остаётся явным, просто больше не требует отдельного
 # захода в меню.
@@ -3200,7 +3344,7 @@ dnscrypt_listen_addr() {
 # сценарий, ради которого его вообще ставили (см. NONE-ветку
 # manage_dnscrypt: живой случай 2026-08-22, ISP резал DNS напрямую).
 # Не чинит ничего сама -- только показывает, где смотреть; починка --
-# dnscrypt_wire_resolver()/пункт 20 ещё раз, или руками для не-dhcpcd схем.
+# dnscrypt_wire_resolver()/пункт 29 ещё раз, или руками для не-dhcpcd схем.
 dnscrypt_leak_check() {
   local addr; addr="$(dnscrypt_listen_addr)"
   echo ""
@@ -3314,7 +3458,7 @@ dnscrypt_leak_check() {
 # install_dnscrypt() ставил и запускал резолвер, а resolv.conf так и
 # оставался со старым nameserver, пока кто-то не пропишет его руками --
 # живой случай 2026-08-23: ни dhcpcd не было, ни явного вопроса не было
-# задано вовремя, дырявость (пункт 16) поймала это уже постфактум.
+# задано вовремя, дырявость (пункт 25) поймала это уже постфактум.
 # Метка $DNSCRYPT_DHCPCD_MARKER нужна, чтобы uninstall_dnscrypt() снял
 # ТОЛЬКО то, что добавили сами, не трогая чужие static-записи (тот же
 # принцип и для прямой записи resolv.conf ниже).
@@ -3457,7 +3601,7 @@ manage_dnscrypt() {
         echo "Проверка: dig @$addr youtube.com +short"
         dig "@$addr" youtube.com +short
       fi
-      echo "Проверь, что системный DNS реально переключился -- пункт 16 (проверка на дырявость)."
+      echo "Проверь, что системный DNS реально переключился -- пункт 25 (проверка на дырявость)."
       ;;
     OFF)
       read -re -p "Сервис остановлен. Запустить? [y/N]: " ans
@@ -3562,7 +3706,7 @@ ensure_z0r_command() {
 uninstall_autobench_self() {
   echo "ВНИМАНИЕ: удалит весь $INSTALL_DIR — сам этот инструмент и все его файлы"
   echo "(включая логи тестов и Discord_bot внутри него, если он тут склонирован)."
-  echo "z2r и autotune-daemon.service не тронет — это отдельные пункты (16/17)."
+  echo "z2r и autotune-daemon.service не тронет — это отдельные пункты этого же подменю (1/2)."
   read -re -p "Точно удалить z2r_autobench? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
     echo "Удаляю $INSTALL_DIR..."
@@ -3665,7 +3809,7 @@ first_run_install_modules() {
   if [ "$want_dnscrypt" = "1" ]; then
     echo ""; echo "--- DNSCrypt-proxy ---"
     install_dnscrypt
-    echo "Проверь, что системный DNS реально переключился -- пункт 16 (проверка на дырявость)."
+    echo "Проверь, что системный DNS реально переключился -- пункт 25 (проверка на дырявость)."
   fi
   if [ "$want_wsrelay" = "1" ]; then
     echo ""; echo "--- Zenith-WS ---"
@@ -3831,30 +3975,32 @@ while true; do
       ;;
     14) manage_daemon ;;
     15) launch_z2r ;;
-    16)
+    16) profile_manage_menu 1 ;;
+    17) profile_manage_menu 2 ;;
+    18) profile_manage_menu 3 ;;
+    19) profile_manage_menu 4 ;;
+    20) profile_manage_menu 5 ;;
+    21) profile_manage_menu 6 ;;
+    22) profile_manage_menu 7 ;;
+    23) profile_manage_menu 8 ;;
+    24) profile_manage_menu 9 ;;
+    25)
       if command -v dnscrypt-proxy >/dev/null 2>&1; then
         dnscrypt_leak_check
       else
-        echo "DNSCrypt-proxy не установлен (пункт 20)." >&2
+        echo "DNSCrypt-proxy не установлен (пункт 29)." >&2
       fi
       ;;
-    17) manage_zapret ;;
-    18) zenith_promoter_menu ;;
-    19) run_blob_tune ;;
-    20) manage_dnscrypt ;;
-    21) manage_zenith ;;
-    22) manage_ws_relay ;;
-    23) manage_voice_bot ;;
-    24) manage_panel ;;
-    25) autoupdate_menu ;;
-    26) uninstall_z2r ;;
-    27) uninstall_daemon ;;
-    28) uninstall_voice_bot ;;
-    29) uninstall_panel ;;
-    30) uninstall_autobench_self ;;
-    31) uninstall_zenith ;;
-    32) uninstall_ws_relay ;;
-    33) uninstall_dnscrypt ;;
+    26) manage_zapret ;;
+    27) zenith_promoter_menu ;;
+    28) run_blob_tune ;;
+    29) manage_dnscrypt ;;
+    30) manage_zenith ;;
+    31) manage_ws_relay ;;
+    32) manage_voice_bot ;;
+    33) manage_panel ;;
+    34) autoupdate_menu ;;
+    35) uninstall_menu ;;
     999) uninstall_everything ;;
     *)
       # список из нескольких профилей: "1,3,4" / "1 3 4" — все токены
