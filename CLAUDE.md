@@ -1718,6 +1718,45 @@ project names here — same public-repo constraint as README.md.
   live "this is how it works now" references were updated, same
   distinction this file has drawn on every prior pass.
 
+## `[auto]`/`[freez]` tags silently never appeared for any profile — `systemctl list-unit-files` doesn't resolve instantiated template units (found and fixed 2026-09-05, same day as the feature)
+
+- Live bug reported immediately after pulling the per-profile menu
+  (16-24) above into production: every profile showed its real `[#N]`
+  strategy number, but the `[auto]`/`[freez]`/`[!упал]` tag was missing
+  entirely on ALL of them, including ones with genuinely active units
+  (VOICE_UDP showed a real, working strategy `[#35]`, so its
+  `autotune-profile@6` unit clearly had been doing real work).
+- Root cause: `autotune_status_tag()`, `profile_manage_menu()`'s
+  `has_autotune` check, and `show_status_summary()`'s counting loop all
+  gated on `systemctl list-unit-files "autotune-profile@${pid}.service"`
+  to test whether the per-profile template unit exists for this pid.
+  **This check is unreliable for instantiated systemd template units** —
+  `list-unit-files` only sees the template file on disk
+  (`autotune-profile@.service`) and does not resolve an instantiated
+  name (`autotune-profile@1.service`) against it, unlike
+  `systemctl is-active`/`is-failed`, which DO correctly resolve an
+  instance back to its template. The existence check therefore always
+  failed, and all three functions silently produced no tag/no option/
+  a permanent `0/0` — for every profile, always, regardless of the
+  unit's real state.
+- Fixed by replacing the systemctl-based existence gate with a static
+  pid-membership check (`case " 1 2 3 4 5 6 " in *" $pid "*) ;; *) return
+  0 ;; esac`, or the `has_autotune=1`-setting equivalent) in all three
+  functions — correct because unit *existence* for this project is
+  architecturally fixed (profiles 1-6 always have a per-profile unit,
+  7/8/9 never do, see "autotune_daemon.sh — per-profile processes"
+  above), not something that needs a live systemd query to determine.
+  `show_status_summary()`'s loop went one step further: since
+  `is-active`/`is-failed` already correctly resolve the instance name on
+  their own, the existence check was dropped entirely there, not just
+  replaced — calling them directly for pid 1-6 is sufficient.
+- **Lesson for any future systemd-template status code in this repo**:
+  `systemctl list-unit-files <template>@<N>.service` is not a valid way
+  to check "does this specific instance exist" — either use a static/
+  architectural fact about which instances are valid (as done here), or
+  query `is-active`/`is-failed`/`show` directly, which do resolve
+  instances against their template correctly.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

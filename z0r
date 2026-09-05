@@ -635,8 +635,23 @@ color_tag() {
 # см. show_menu) сюда не попадают.
 autotune_status_tag() {
   local pid="$1" unit
+  # Профили 7/8/9 -- нет отдельного autotune-profile@N юнита вообще
+  # (dev-заглушка / легаси autotune-daemon.service, см. show_menu).
+  # ВАЖНО: раньше существование юнита проверялось через
+  # `systemctl list-unit-files "autotune-profile@$pid.service"` -- это
+  # НЕНАДЁЖНО для инстанцированных шаблонных юнитов: list-unit-files
+  # видит на диске только сам шаблон autotune-profile@.service и не
+  # резолвит инстанцированное имя, в отличие от is-active/is-failed,
+  # которые резолвят корректно. Проверка всегда проваливалась, и тег
+  # молча пропадал для ВСЕХ профилей 1-6, даже реально активных (живой
+  # баг, найден 2026-09-05: [#N] показывался, тега auto/freez не было
+  # вообще ни у одного профиля). Заменено на статическую проверку
+  # принадлежности pid к 1-6.
+  case " 1 2 3 4 5 6 " in
+    *" $pid "*) ;;
+    *) return 0 ;;
+  esac
   unit="autotune-profile@${pid}.service"
-  systemctl list-unit-files "$unit" >/dev/null 2>&1 || return 0
   if systemctl is-failed --quiet "$unit" 2>/dev/null; then
     color_tag "!упал"
     return
@@ -657,9 +672,17 @@ autotune_status_tag() {
 # видно на самом первом экране меню.
 show_status_summary() {
   local active=0 failed=0 total=0 pid unit
+  # Та же поправка, что и в autotune_status_tag()/profile_manage_menu()
+  # выше -- systemctl list-unit-files не резолвит инстанцированные
+  # шаблонные юниты (autotune-profile@N.service против шаблона на диске
+  # autotune-profile@.service), поэтому проверка существования через
+  # него всегда проваливалась и total/active/failed молча оставались
+  # нулями (живой баг 2026-09-05: "0/0" и ложный "активен" вместо
+  # реального статуса). is-active/is-failed сами по себе уже корректно
+  # резолвят инстанс к шаблону -- достаточно просто вызвать их напрямую
+  # для всех 1-6, без отдельной проверки существования юнита.
   for pid in 1 2 3 4 5 6; do
     unit="autotune-profile@${pid}.service"
-    systemctl list-unit-files "$unit" >/dev/null 2>&1 || continue
     total=$((total + 1))
     systemctl is-active --quiet "$unit" 2>/dev/null && active=$((active + 1))
     systemctl is-failed --quiet "$unit" 2>/dev/null && failed=$((failed + 1))
@@ -885,7 +908,13 @@ profile_manage_menu() {
   esac
   while true; do
     local has_autotune=""
-    systemctl list-unit-files "autotune-profile@${pid}.service" >/dev/null 2>&1 && has_autotune=1
+    # Та же статическая проверка, что и в autotune_status_tag() выше --
+    # systemctl list-unit-files не резолвит инстанцированные шаблонные
+    # юниты (видит только сам шаблон на диске), из-за чего эта проверка
+    # молча проваливалась для всех профилей 1-6, живой баг 2026-09-05.
+    case " 1 2 3 4 5 6 " in
+      *" $pid "*) has_autotune=1 ;;
+    esac
     echo ""
     echo "=== ${TITLES[$pid]} (профиль $pid) ==="
     echo "Текущее: $(display_strategy_tag "$pid") $(autotune_status_tag "$pid")"
