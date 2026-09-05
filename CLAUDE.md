@@ -1757,6 +1757,121 @@ project names here — same public-repo constraint as README.md.
   query `is-active`/`is-failed`/`show` directly, which do resolve
   instances against their template correctly.
 
+## z0r main menu overhaul: status board up top, "Управление"/"Подбор стратегии"/"Модули" collapsed, per-profile items moved to 1-9 (2026-09-05, later same day)
+
+- Direct request with a full mockup, refined twice more in the same
+  conversation. Net effect: almost every top-level item number changed
+  again, on the same day as the 16-24 insertion above — the previous
+  scheme lasted only a few hours in production. Old → new mapping:
+  ```
+  1-9        profile_manage_menu N          (was 16-24)
+  10         Zapret сервис                  (was 26)
+  11         Autopromoter (zenith-promoter) (was 27, itself was 18 earlier the same day)
+  12         Инструменты подбора [подменю]  (was 10/11/12/13/14/28, now nested 1-6)
+  13         Запустить меню z2r             (was 15)
+  14         Модули [подменю]               (was 29-34, now nested 1-6)
+  15         Удаление [подменю]             (was 35)
+  111/999/0  unchanged, per the standing "never renumbered" rule
+  ```
+  Every in-script "пункт N"/"N -> M" comment and user-facing string was
+  swept and updated in the same pass (grep `пункт [0-9]`/`-> [0-9]` in
+  `z0r` before trusting a number if this note goes stale) — including
+  several ALREADY-stale references that had survived one or more prior
+  renumbering passes uncaught (e.g. two `dnscrypt_wire_resolver()`
+  messages still said "пунктом 15" from an even older scheme, predating
+  the 25-numbering that itself just got replaced — same recurring lesson
+  as `blob_tune.sh`'s and `uninstall_autobench_self()`'s stale
+  cross-references noted elsewhere in this file: a renumbering pass only
+  catches references someone thought to grep for, not references nobody
+  remembered existed).
+- **Two frequently-used top-level number ranges got new meanings across
+  this single day** — `1-9` went from "bare digit tests that profile via
+  `test_profile`" (the original, years-old behavior) to
+  "`profile_manage_menu N`" earlier the same day (16-24), then to being
+  the profile numbers directly (1-9) later the same day. The
+  `1|2|...|9) test_profile "$choice" ;;` top-level dispatch case is
+  **gone** — typing a bare profile number no longer launches a test by
+  itself. Preserved as `profile_manage_menu`'s own new option `3) Запустить
+  тест/подбор стратегии сейчас (funnel)` (calls the same `test_profile`),
+  found and fixed as a real regression risk during the same design pass,
+  before it shipped — reachable as `<profile> -> 3` instead of a bare
+  digit. `111` (test-all/selected-profiles) and the `*)`-branch parser for
+  comma/space-separated multi-profile lists (`1,3,4`) are untouched — both
+  still only accept ≥2 tokens, same as before this change (a bare single
+  digit was never actually handled by that branch despite an already-wrong
+  comment claiming otherwise, now removed).
+- **`show_status_summary()` expanded from two services (autotune
+  aggregate + zenith-promoter) to nine** (Zapret.service, DNSCrypt-proxy,
+  Zenith, Zenith-WS, Discord_bot, Web_panel, Autopromoter+`.service`,
+  Autogen+`.service`, Autoupdate`.service`) — direct consequence of
+  folding "Модули" into one submenu item (14): those six modules lost
+  their individual top-level `[ON]/[OFF]`, so the status board is now the
+  only place to see them all at a glance without opening the submenu.
+  All the `get_*_status()` functions already existed (added over prior
+  sessions for the old flat "Модули" list) — this only changed where
+  their output is printed, not how it's computed, except for two new
+  additions:
+  - `get_zapret_version()` — a deliberate **stub**, always returns `"?"`.
+    Same reasoning as declining to invent `custom_domain_cli.sh`'s
+    nfqws2 syntax elsewhere in this file: there is no documented way to
+    ask `nfqws2`/zapret2 for a version string, and guessing at an
+    undocumented CLI flag against a live production binary risks a
+    misleading result with no way to verify it here (no exec access to
+    any server). Direct request acknowledged this ("пока можно
+    заглушку") — the field is wired into the header now, ready for a
+    real source once one is confirmed on an actual server, instead of
+    leaving the whole feature unbuilt until then. This project is also
+    gradually preparing to move away from z2r to its own engine, so the
+    placeholder is deliberately cheap to keep around.
+  - `get_dnscrypt_leak_status()` — a **cached** OK/FALL wrapper around
+    the same "functional check" core signal `dnscrypt_leak_check()` uses
+    (the live 2026-08-22-incident-derived dig-based test: does the
+    system resolver answer differently from an explicit dnscrypt query).
+    Direct concern raised and confirmed before building this: the full
+    `dnscrypt_leak_check()` does several real DNS lookups (up to ~10s
+    worst case) and was never meant to run on every menu redraw. This
+    wrapper does NOT duplicate the full diagnostic (resolv.conf/
+    resolvectl/nmcli/canary-domain/IPv6 checks all stay exclusive to the
+    interactive function) — it reuses only the one signal already
+    identified as authoritative, caches the verdict in
+    `autotune_state/dnscrypt_leak_cache` for `DNSCRYPT_LEAK_CACHE_TTL`
+    (600s) file-based, epoch-timestamp-gated, and lowered the `dig`
+    timeout to 2s (from the interactive check's 5s) for the cache-miss
+    path specifically, since this one only needs a fast yes/no, not a
+    full report.
+- **`dnscrypt_leak_check()` itself is still fully reachable**, just moved
+  — the interactive multi-source diagnostic was a real, explicitly
+  requested top-level item (`27` in the mockup) that the cached header
+  row does NOT replace; collapsing "Модули" meant DNSCrypt-proxy no
+  longer has its own top-level slot at all, so the full check moved
+  inside `manage_dnscrypt()`'s own ON-state branch (now `14 -> 1 -> 2`,
+  alongside a `14 -> 1 -> 1` for the pre-existing restart/stop
+  `_service_on_menu`) instead of disappearing or being silently reduced
+  to just the cached summary.
+- **`blob_tune.sh` lost its accidental `$ZENITH_DIR` display gate** while
+  being moved into the new "Инструменты подбора" submenu (`12 -> 6`) —
+  the old flat `show_menu()` happened to print it inside the same `if [
+  -d "$ZENITH_DIR" ]` block as `zenith-promoter`, purely because they sat
+  next to each other in the source, not because `run_blob_tune()` has any
+  actual Zenith dependency (it doesn't — verified by reading the
+  function: pure `z2r_autobench` TLS ClientHello blob perebor). Fixed as
+  a side effect of the move, not a separately-requested change — flagged
+  here in case a server without Zenith installed previously never saw
+  this item at all and it's surprising to suddenly see it appear.
+- **"Autogen"/"Autopromoter" are pure relabels, not new features** —
+  direct request ("просто я решил их переименовать в меню"). "Autogen"
+  is the existing per-profile autotune aggregate (`autotune-profile@1-6`,
+  z2r_autobench's own mechanism, no Zenith involvement at all despite the
+  name's genome-generation-sounding connotation — the user's own stated
+  mapping is "Autogen = автоподбор", not "generation"). "Autopromoter" is
+  the existing `zenith-promoter` (Zenith's autonomous promotion). Neither
+  renaming touched any function/variable name, sudoers grant, or systemd
+  unit — display strings only, confirmed deliberately narrow in scope to
+  avoid unnecessary churn.
+- Sibling-repo sweep for hardcoded z0r item numbers (z0r-panel, Zenith,
+  Zenith-WS) still needed after this — same mechanical process as every
+  prior renumbering in this file.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
