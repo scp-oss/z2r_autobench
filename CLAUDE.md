@@ -1896,6 +1896,44 @@ project names here — same public-repo constraint as README.md.
   manually-tuned blob) rather than an error — matches `blob_tune.sh`'s
   own fallback framing ("конфиг сейчас не в режиме maxru?").
 
+## `rank_strategies.sh --include-clone-strategies=N,M` — точечное включение уже прогретых clone-стратегий (2026-09-06)
+
+- Direct complaint: "выкидываются стратегии с наличием блобов" —
+  `rank_strategies.sh` excludes strategies 31-42 (the
+  `tls_client_hello_clone:blob=clone_deepseek|clone_hcaptcha` ones, see
+  "Strategy numbering" above) for profiles 1/2/3/8 **unconditionally by
+  profile membership**, regardless of whether the specific clone blob
+  has actually been captured already. The only escape hatch was
+  `--include-clone-strategies` — all-or-nothing, reopening all 10
+  (including genuinely unwarmed ones) at once.
+- **Confirmed with the user before touching anything**: there is no
+  known way, from this repo or from the user's own knowledge of the
+  server, to check whether a specific `clone_deepseek`/`clone_hcaptcha`
+  blob has actually been captured — that state lives entirely inside
+  `nfqws2`'s own internal cache, never documented anywhere in this
+  codebase. Consistent with this project's standing rule (see
+  `custom_domain_cli.sh`'s own section: never invent nfqws2 syntax/
+  internals from scratch) — did NOT attempt to guess at a cache file
+  path or log format to build an automatic "is this blob warm" check.
+- **Fix instead: `--include-clone-strategies=31,36`** (comma-separated
+  strategy numbers) — `is_clone_dependent_strategy()` now also checks
+  this list and treats a listed number as NOT clone-dependent for
+  exclusion purposes, while every other clone strategy stays protected
+  by the existing default. This shifts the "is it actually warmed"
+  judgment to the one place that can genuinely answer it — a human who
+  tested that specific strategy live and saw real traffic pass — instead
+  of either guessing automatically or reopening all 10 blindly. The
+  plain `--include-clone-strategies` (no `=`) flag is untouched, same
+  old all-10 behavior, for whoever still wants that.
+- Both exclusion call sites (`--funnel` candidate list, non-funnel main
+  loop) go through the same `is_clone_dependent_strategy()` — one fix,
+  not two — so there was no risk of patching one path and missing the
+  other.
+- Not wired into any `z0r` menu item — this was already a CLI-only flag
+  before this fix, and the panel's own `rank_strategies.sh` sudoers
+  grant is scoped to `--domain *` (funnel_runner.py) specifically, which
+  never touches this flag at all.
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

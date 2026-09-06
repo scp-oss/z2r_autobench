@@ -22,6 +22,11 @@
 #
 # Запуск: sudo ./rank_strategies.sh --profile 1 --passes 3 [--attempts N] [--settle SEC] [--funnel]
 #         sudo ./rank_strategies.sh --domain example.com --funnel --passes 3
+#         sudo ./rank_strategies.sh --profile 1 --funnel --include-clone-strategies=31,36
+#                                — вернуть в тест только уже вручную
+#                                  подтверждённые clone-стратегии (см.
+#                                  комментарий у CLONE_DEPENDENT_STRATEGIES
+#                                  ниже), не открывая все 10 сразу
 
 set -uo pipefail
 
@@ -33,6 +38,7 @@ ATTEMPTS_PER_STRATEGY="${ATTEMPTS_PER_STRATEGY:-2}"
 PROFILE="1"
 FUNNEL=0
 INCLUDE_CLONE=0
+INCLUDE_CLONE_LIST=""
 DOMAIN=""
 
 while [ $# -gt 0 ]; do
@@ -43,6 +49,7 @@ while [ $# -gt 0 ]; do
     --settle) SETTLE_SECONDS="$2"; shift 2 ;;
     --funnel) FUNNEL=1; shift ;;
     --include-clone-strategies) INCLUDE_CLONE=1; shift ;;
+    --include-clone-strategies=*) INCLUDE_CLONE_LIST="${1#*=}"; shift ;;
     --domain) DOMAIN="$2"; shift 2 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
@@ -61,7 +68,22 @@ done
 # реально не делает ничего. Проверено вживую на боевом сервере (strategy=36 на
 # профиле 1 сломала работавший доступ на телефоне). Исключаем по
 # умолчанию; --include-clone-strategies возвращает старое поведение
-# (например, если blob уже прогрет вручную и известно, что работает).
+# (все 10 разом, включая непрогретые).
+#
+# --include-clone-strategies=N,M,... — точечная версия, добавлена
+# 2026-09-06 по прямому запросу: "выкидываются стратегии с наличием
+# блобов" — раньше единственный способ вернуть в тест уже прогретую
+# (реально работающую) clone-стратегию был снять защиту СРАЗУ со всех
+# 10, включая непрогретые. Нет способа автоматически проверить отсюда,
+# захвачен ли конкретный blob прямо сейчас (это внутренний кэш самого
+# nfqws2/upstream zapret2, нигде в этом репозитории не задокументирован
+# и не воспроизводится — гадать не будем, тот же принцип, что и везде
+# в этом файле про "не изобретаем nfqws2 на глаз"). Вместо
+# автоматической проверки — человек, который САМ вручную убедился (видел
+# рабочий обход живым трафиком), что конкретная стратегия работает,
+# явно перечисляет её номер здесь — тогда именно она (и только она)
+# перестаёт считаться clone-зависимой для целей исключения, а остальные
+# 9 остаются под защитой по умолчанию.
 CLONE_DEPENDENT_STRATEGIES="31 32 33 34 35 36 38 39 41 42"
 clone_dependent_profile() {
   case "$1" in 1|2|3|8) return 0 ;; *) return 1 ;; esac
@@ -69,9 +91,13 @@ clone_dependent_profile() {
 is_clone_dependent_strategy() {
   local s="$1"
   case " $CLONE_DEPENDENT_STRATEGIES " in
-    *" $s "*) return 0 ;;
+    *" $s "*) ;;
     *) return 1 ;;
   esac
+  case " ${INCLUDE_CLONE_LIST//,/ } " in
+    *" $s "*) return 1 ;;
+  esac
+  return 0
 }
 
 if [ "$(id -u)" != "0" ]; then
@@ -183,7 +209,11 @@ trap revert_to_entry_strategy EXIT
 SKIP_CLONE=0
 if [ "$INCLUDE_CLONE" != "1" ] && clone_dependent_profile "$PROFILE"; then
   SKIP_CLONE=1
-  echo "Профиль $PROFILE: пропускаю стратегии, зависящие от непрогретого clone-блоба ($CLONE_DEPENDENT_STRATEGIES) — --include-clone-strategies, чтобы всё же включить их."
+  if [ -n "$INCLUDE_CLONE_LIST" ]; then
+    echo "Профиль $PROFILE: пропускаю стратегии, зависящие от непрогретого clone-блоба ($CLONE_DEPENDENT_STRATEGIES), КРОМЕ явно перечисленных: $INCLUDE_CLONE_LIST."
+  else
+    echo "Профиль $PROFILE: пропускаю стратегии, зависящие от непрогретого clone-блоба ($CLONE_DEPENDENT_STRATEGIES) — --include-clone-strategies (все разом) или --include-clone-strategies=N,M (только конкретные), чтобы всё же включить их."
+  fi
 fi
 
 echo "=== rank_strategies.sh: старт $(date) ==="
