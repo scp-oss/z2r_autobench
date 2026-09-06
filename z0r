@@ -396,6 +396,23 @@ get_zapret_version() {
   echo "?"
 }
 
+# Текущий TLS ClientHello blob для шапки меню -- read-only, та же самая
+# извлечение-логика, что уже использует blob_tune.sh (см. его собственный
+# комментарий "FAKE_DIR/BLOB_PREFIX -- из живого конфига, не хардкод",
+# CLAUDE.md "/opt/zapret2 vs /opt/zator") -- скопировано, а не вызвано
+# через сам blob_tune.sh, потому что тот запускает дорогой перебор со
+# сменой стратегий и рестартами zapret2 -- совершенно не то, что нужно на
+# каждой отрисовке меню. "default", если конфиг сейчас не в режиме
+# --blob=maxru:@... вообще (обычный, не подобранный вручную blob).
+get_current_blob() {
+  local cfg="/opt/zapret2/config" fake_dir blob
+  [ -f "$cfg" ] || { echo "?"; return; }
+  fake_dir="$(sed -n -E 's#.*--blob=maxru:@([^[:space:]]+/fake)/[^[:space:]]+.*#\1#p' "$cfg" | head -n1)"
+  [ -z "$fake_dir" ] && { echo "default"; return; }
+  blob="$(sed -n -E "s#.*--blob=maxru:@${fake_dir}/([^[:space:]]+).*#\\1#p" "$cfg" | head -n1)"
+  echo "${blob:-default}"
+}
+
 get_daemon_status() {
   [ -f /etc/systemd/system/autotune-daemon.service ] || { echo "NONE"; return; }
   systemctl is-active --quiet autotune-daemon 2>/dev/null && echo "ON" || echo "OFF"
@@ -737,7 +754,7 @@ show_status_summary() {
   printf "  %-15s %s   [vers %s]\n" "Zapret.service" "$(color_tag "$(get_zapret_status)")" "$(get_zapret_version)" >&2
   printf "  %-15s %s\n" "DNSCrypt-proxy" "$(color_tag "$(get_dnscrypt_leak_status)")" >&2
   printf "  %-15s %s\n" "Zenith" "$(color_tag "$(get_zenith_status)")" >&2
-  printf "  %-15s %s\n" "Zenith-WS" "$(color_tag "$(get_ws_relay_status)")" >&2
+  printf "  %-15s %s %s\n" "Zenith-WS" "$(color_tag "$(get_ws_relay_status)")" "$(_wsrelay_status_tags)" >&2
   printf "  %-15s %s\n" "Discord_bot" "$(color_tag "$(get_voice_bot_status)")" >&2
   printf "  %-15s %s\n" "Web_panel" "$(color_tag "$(get_panel_status)")" >&2
   if [ -d "$ZENITH_DIR" ]; then
@@ -763,7 +780,7 @@ show_status_summary() {
 
 show_menu() {
   echo "=== z0r ===" >&2
-  echo "[Provider: $(get_provider)]" >&2
+  echo "[Provider: $(get_provider)] [blob:$(get_current_blob)]" >&2
   echo "" >&2
   show_status_summary
   echo "" >&2
@@ -3316,6 +3333,20 @@ _wsrelay_cidr_file() {
 
 _wsrelay_redirect_enabled() {
   bash "$WSRELAY_DIR/relay/setup_redirect.sh" enabled --cidr-file "$(_wsrelay_cidr_file "$1")" >/dev/null 2>&1
+}
+
+# [TG:ON] [WA:ON] рядом с Zenith-WS в шапке меню (show_status_summary) --
+# добавлено 2026-09-06 по прямому запросу ("имеется в виду редиректы").
+# Читает то же самое `setup_redirect.sh enabled`, что и wsrelay_toggle_redirect
+# выше -- не отдельная проверка, iptables остаётся единственным источником
+# истины (см. докстринг выше про "не дублируем логику парсинга второй раз").
+# Пусто, если Zenith-WS вообще не установлен -- нечего показывать.
+_wsrelay_status_tags() {
+  [ -d "$WSRELAY_DIR" ] || return 0
+  local tg wa tgc wac
+  _wsrelay_redirect_enabled tg && { tg=ON; tgc="$C_GREEN"; } || { tg=OFF; tgc="$C_RED"; }
+  _wsrelay_redirect_enabled wa && { wa=ON; wac="$C_GREEN"; } || { wa=OFF; wac="$C_RED"; }
+  printf '%s[TG:%s]%s %s[WA:%s]%s' "$tgc" "$tg" "$C_RESET" "$wac" "$wa" "$C_RESET"
 }
 
 _wsrelay_set_env_flag() {

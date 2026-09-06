@@ -1872,6 +1872,30 @@ project names here — same public-repo constraint as README.md.
   Zenith-WS) still needed after this — same mechanical process as every
   prior renumbering in this file.
 
+## `[TG:ON] [WA:ON]` next to Zenith-WS, `[blob:...]` next to Provider (2026-09-06)
+
+- Two small header additions, direct request right after the menu
+  overhaul above shipped. Neither adds new state or a new subprocess
+  call per redraw beyond what was already cheap elsewhere in this file.
+- `_wsrelay_status_tags()` — reuses `_wsrelay_redirect_enabled()`
+  (already existed for `wsrelay_toggle_redirect`'s own ON/OFF display,
+  itself a thin wrapper over Zenith-WS's `setup_redirect.sh enabled
+  --cidr-file`) rather than re-parsing the CIDR files or iptables state
+  a second time — same "don't duplicate the same fact in two files"
+  principle this file already states elsewhere (custom_domain_cli.sh,
+  domain_list_sync.sh). Empty string (nothing shown) if `$WSRELAY_DIR`
+  doesn't exist — Zenith-WS not installed at all, nothing to report.
+- `get_current_blob()` — same read-only extraction blob_tune.sh's own
+  `FAKE_DIR`/`CURRENT_BLOB_FILE` logic already does (`sed` against the
+  live `--blob=maxru:@.../fake/NAME.bin` in `/opt/zapret2/config`),
+  copied here rather than invoked through `blob_tune.sh` itself — that
+  script's whole reason to exist is an expensive perebor (strategy
+  sweep + `zapret2` restart per candidate), calling it just to read the
+  current blob on every menu redraw would be absurd. Prints `default`
+  when the config isn't in `maxru` mode at all (an ordinary, not
+  manually-tuned blob) rather than an error — matches `blob_tune.sh`'s
+  own fallback framing ("конфиг сейчас не в режиме maxru?").
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production
