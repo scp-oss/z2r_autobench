@@ -3331,6 +3331,19 @@ _wsrelay_cidr_file() {
   esac
 }
 
+# 2026-09-09: WhatsApp держит постоянное соединение не только на 443, но
+# и на 5222 (легаси always-on messaging порт) -- живой случай, найденный
+# изолированным tcpdump во время реального зависшего сообщения (см.
+# Zenith-WS/CLAUDE.md и cidr/whatsapp_ipv4.txt). REDIRECT матчит порты по
+# `--dports` (setup_redirect.sh) -- без этого 5222-трафик к уже покрытым
+# Meta-адресам всё равно не долетал бы до relay. Telegram нужен только 443.
+_wsrelay_dports_for() {
+  case "$1" in
+    wa) echo "443,5222" ;;
+    *) echo "443" ;;
+  esac
+}
+
 _wsrelay_redirect_enabled() {
   bash "$WSRELAY_DIR/relay/setup_redirect.sh" enabled --cidr-file "$(_wsrelay_cidr_file "$1")" >/dev/null 2>&1
 }
@@ -3378,14 +3391,14 @@ wsrelay_toggle_redirect() {
     read -re -p "Выключить REDIRECT? [y/N]: " ans
     case "$ans" in
       y|Y)
-        bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file "$which")"
+        bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file "$which")" --dports "$(_wsrelay_dports_for "$which")"
         _wsrelay_set_env_flag "$(_wsrelay_redirect_key "$which")" disabled
         echo "REDIRECT выключен."
         ;;
       *) : ;;
     esac
   else
-    if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply --cidr-file "$(_wsrelay_cidr_file "$which")"; then
+    if bash "$WSRELAY_DIR/relay/setup_redirect.sh" apply --cidr-file "$(_wsrelay_cidr_file "$which")" --dports "$(_wsrelay_dports_for "$which")"; then
       _wsrelay_set_env_flag "$(_wsrelay_redirect_key "$which")" enabled
       echo "REDIRECT включён."
     fi
@@ -3484,7 +3497,7 @@ _wsrelay_do_stop() {
   # --cidr-file трогает только Telegram (свой дефолт), WhatsApp-правила
   # (если применялись) оставались висеть в nat OUTPUT после "остановки".
   bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)" 2>/dev/null || true
-  bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" 2>/dev/null || true
+  bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" --dports "$(_wsrelay_dports_for wa)" 2>/dev/null || true
   systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
   echo "Остановлен, REDIRECT (Telegram и WhatsApp) снят."
 }
@@ -3504,7 +3517,7 @@ uninstall_ws_relay() {
       # --cidr-file трогает только Telegram, WhatsApp-правила остались бы
       # висеть в nat OUTPUT даже после удаления самого Zenith-WS.
       bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)" 2>/dev/null || true
-      bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" 2>/dev/null || true
+      bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" --dports "$(_wsrelay_dports_for wa)" 2>/dev/null || true
       systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
       rm -f "/etc/systemd/system/${WSRELAY_SERVICE}.service"
       systemctl daemon-reload
