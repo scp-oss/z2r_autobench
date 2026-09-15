@@ -3471,6 +3471,7 @@ manage_ws_relay() {
       echo "  3) WhatsApp REDIRECT $(color_tag "$wa_r")"
       echo "  4) web.telegram.org $(color_tag "$tg_w")"
       echo "  5) web.WhatsApp $(color_tag "$wa_w")"
+      echo "  6) RKN IP-sync (ночная проверка, см. cidr/rkn_ip_sync.sh) $(color_tag "$(_rkn_ipsync_status)")"
       echo "  0) Назад"
       read -re -p "> " tgch
       case "$tgch" in
@@ -3479,10 +3480,115 @@ manage_ws_relay() {
         3) wsrelay_toggle_redirect wa ;;
         4) wsrelay_toggle_worker tg ;;
         5) wsrelay_toggle_worker wa ;;
+        6) rkn_ipsync_menu ;;
         *) : ;;
       esac
       ;;
   esac
+}
+
+# Юниты (relay/rkn-ip-sync.{service,timer}) ставятся/обновляются тем же
+# приёмом, что wsrelay_enable() уже использует для ws-transparent-relay.service
+# -- sed плейсхолдера /opt/Zenith-WS на реальный $WSRELAY_DIR + cmp перед
+# перезаписью (регенерируем БЕЗУСЛОВНО при каждом toggle/install, не только
+# при первой установке -- тот же self-healing принцип, что у
+# ensure_wsrelay_user/ensure_panel_runtime_grants, см. CLAUDE.md). .timer
+# без плейсхолдера в тексте -- обычный cp.
+_rkn_ipsync_install() {
+  local tmp_unit; tmp_unit="$(mktemp)"
+  sed "s#/opt/Zenith-WS#${WSRELAY_DIR}#g" "$WSRELAY_DIR/relay/rkn-ip-sync.service" > "$tmp_unit"
+  if [ ! -f "/etc/systemd/system/rkn-ip-sync.service" ] || ! cmp -s "$tmp_unit" "/etc/systemd/system/rkn-ip-sync.service"; then
+    mv -f "$tmp_unit" "/etc/systemd/system/rkn-ip-sync.service"
+  else
+    rm -f "$tmp_unit"
+  fi
+  cp -f "$WSRELAY_DIR/relay/rkn-ip-sync.timer" "/etc/systemd/system/rkn-ip-sync.timer"
+  systemctl daemon-reload
+}
+
+_rkn_ipsync_status() {
+  [ -f "/etc/systemd/system/rkn-ip-sync.timer" ] || { echo NONE; return; }
+  systemctl is-enabled --quiet rkn-ip-sync.timer 2>/dev/null && echo ON || echo OFF
+}
+
+rkn_ipsync_toggle() {
+  local st; st="$(_rkn_ipsync_status)"
+  case "$st" in
+    NONE)
+      read -re -p "Установить и включить ночной таймер RKN IP-sync (03:00 +-30мин, см. relay/rkn-ip-sync.timer)? [y/N]: " ans
+      case "$ans" in
+        y|Y) _rkn_ipsync_install; systemctl enable --now rkn-ip-sync.timer; echo "Установлено и включено." ;;
+        *) echo "Отмена." ;;
+      esac
+      ;;
+    ON)
+      systemctl disable --now rkn-ip-sync.timer
+      echo "Выключено (юниты остаются на диске, включить обратно можно тем же пунктом)."
+      ;;
+    OFF)
+      # Регенерируем юнит безусловно перед включением -- если что-то в
+      # /etc/systemd/system уже устарело относительно текущего checkout'а
+      # (напр. правился вручную до появления этого пункта меню, как в
+      # живом случае, который и привёл к этому пункту), включение само
+      # подтянет актуальную версию, а не оставит старую молча.
+      _rkn_ipsync_install
+      systemctl enable --now rkn-ip-sync.timer
+      echo "Включено."
+      ;;
+  esac
+}
+
+# Использует общий _wsrelay_set_env_flag/_wsrelay_get_env_flag (тот же
+# wsrelay.env, что уже хранит все секреты/настройки Zenith-WS) -- не
+# заводим отдельный конфиг-файл под одну переменную.
+rkn_ipsync_set_timeout() {
+  local cur new
+  cur="$(_wsrelay_get_env_flag ZWS_RKN_SYNC_TIMEOUT 3)"
+  read -re -p "Таймаут на один IP в секундах (сейчас ${cur}с, Enter -- не менять): " new
+  [ -n "$new" ] || { echo "Не изменено."; return; }
+  case "$new" in
+    ''|*[!0-9]*) echo "Нужно целое положительное число секунд, не '$new' -- не изменено." >&2; return 1 ;;
+  esac
+  _wsrelay_set_env_flag ZWS_RKN_SYNC_TIMEOUT "$new"
+  echo "Таймаут установлен: ${new}с -- подхватится следующим запуском сервиса (ручным или по таймеру), рестарт самого таймера не нужен."
+}
+
+rkn_ipsync_menu() {
+  while true; do
+    local st timeout conc
+    st="$(_rkn_ipsync_status)"
+    timeout="$(_wsrelay_get_env_flag ZWS_RKN_SYNC_TIMEOUT 3)"
+    conc="$(_wsrelay_get_env_flag ZWS_RKN_SYNC_CONCURRENCY 20)"
+    echo ""
+    echo "=== RKN IP-sync (cidr/rkn_ip_sync.sh) ==="
+    echo "  Синк внешнего списка RKN-заблокированных IP + живая проверка каждого"
+    echo "  нового кандидата (SYN-тест, в обход REDIRECT) -- результат в"
+    echo "  cidr/rkn_ip_blocked.txt, сам по себе ничего не применяет к REDIRECT."
+    echo "  1) Ночной таймер (03:00 +-30мин) $(color_tag "$st")"
+    echo "  2) Таймаут на IP: ${timeout}с -- изменить"
+    echo "  3) Запустить сейчас, не дожидаясь ночи"
+    echo "  4) Лог (journalctl -f, Ctrl+C для выхода)"
+    echo "  0) Назад"
+    echo ""
+    echo "  (Параллелизм сейчас: ${conc} -- правится напрямую в wsrelay.env,"
+    echo "  ZWS_RKN_SYNC_CONCURRENCY, отдельного пункта меню под него пока нет.)"
+    read -re -p "RKN IP-sync > " ch
+    case "$ch" in
+      1) rkn_ipsync_toggle ;;
+      2) rkn_ipsync_set_timeout ;;
+      3)
+        if [ "$(_rkn_ipsync_status)" = "NONE" ]; then
+          echo "Юниты ещё не установлены -- сначала пункт 1." >&2
+        else
+          systemctl start rkn-ip-sync.service
+          echo "Запущено в фоне -- пункт 4 покажет прогресс."
+        fi
+        ;;
+      4) journalctl -u rkn-ip-sync.service -f ;;
+      0|q|Q|"") return 0 ;;
+      *) echo "Неизвестный выбор." ;;
+    esac
+  done
 }
 # Рестарт НЕ трогает iptables REDIRECT (см. _service_on_menu докстринг) --
 # это уже применённое сетевое правило, не завязанное на сам процесс.
@@ -3499,7 +3605,12 @@ _wsrelay_do_stop() {
   bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)" 2>/dev/null || true
   bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" --dports "$(_wsrelay_dports_for wa)" 2>/dev/null || true
   systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
-  echo "Остановлен, REDIRECT (Telegram и WhatsApp) снят."
+  # Таймер RKN IP-sync -- отдельный от relay юнит, но живёт в рамках
+  # того же Zenith-WS, "остановка" не должна оставлять его тикать сам по
+  # себе (тот же класс бага, что REDIRECT-списки выше, просто про другой
+  # юнит).
+  systemctl disable --now rkn-ip-sync.timer 2>/dev/null || true
+  echo "Остановлен, REDIRECT (Telegram и WhatsApp) снят, RKN IP-sync таймер выключен."
 }
 _wsrelay_do_check_updates() {
   _check_git_updates "$WSRELAY_DIR" "Zenith-WS"
@@ -3519,7 +3630,10 @@ uninstall_ws_relay() {
       bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file tg)" 2>/dev/null || true
       bash "$WSRELAY_DIR/relay/setup_redirect.sh" remove --cidr-file "$(_wsrelay_cidr_file wa)" --dports "$(_wsrelay_dports_for wa)" 2>/dev/null || true
       systemctl disable --now "$WSRELAY_SERVICE" 2>/dev/null || true
-      rm -f "/etc/systemd/system/${WSRELAY_SERVICE}.service"
+      systemctl disable --now rkn-ip-sync.timer 2>/dev/null || true
+      rm -f "/etc/systemd/system/${WSRELAY_SERVICE}.service" \
+            "/etc/systemd/system/rkn-ip-sync.service" \
+            "/etc/systemd/system/rkn-ip-sync.timer"
       systemctl daemon-reload
       rm -rf "$WSRELAY_DIR"
       echo "Zenith-WS удалён. Юзер wsrelay не тронут — удали вручную при необходимости: userdel wsrelay"
