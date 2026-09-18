@@ -1765,9 +1765,49 @@ voice_bot_install_files() {
   echo "     его песочницу, юзера zenith-voice-bot без него не будет."
 }
 
+# Живой инцидент на проде: PermissionError: [Errno 13] Permission denied:
+# '/opt/z2r_autobench/logs/voice_bot_raw.tsv' -- юнит бота работает от
+# zenith-voice-bot, а $LOG_DIR -- ОБЩАЯ директория: в неё же пишут
+# rank_strategies.sh/rank_quic.sh/rank_voice.sh, все от root (через
+# autotune-profile@N.service/z0r). os.makedirs(exist_ok=True) в самом боте
+# молча проходит (директория уже есть) -- падает именно open(..., "a"):
+# у zenith-voice-bot просто нет write+execute на саму директорию, поэтому он
+# не может даже СОЗДАТЬ свой первый файл, хотя дозапись в уже созданный им
+# файл дальше была бы штатной (владел бы им сам).
+#
+# НЕ делаем chown -R zenith-voice-bot:zenith-voice-bot "$LOG_DIR" -- это
+# переписало бы владельца ВСЕХ уже лежащих там файлов остальных
+# root-запускаемых инструментов на этого одного непривилегированного бота.
+# Вместо этого -- отдельная группа: владелец директории и всех
+# существующих файлов остаётся root как был, zenith-voice-bot только
+# добавляется в новую группу, которой отдаём саму директорию (не файлы) в
+# group-owner с g+w -- этого достаточно, чтобы создать НОВЫЙ файл; дальше
+# он уже принадлежит zenith-voice-bot, и дозапись в него никаких
+# permission-проблем больше не создаёт. setgid (g+s) -- чтобы новый файл
+# наследовал группу директории. Sticky-бит (+t) -- та же защита, что у
+# /tmp (drwxrwxrwt): без него g+w на общей директории с ЧУЖИМИ
+# (root-owned) файлами формально давал бы этой группе право
+# переименовать/удалить чужие файлы, не владея ими.
+#
+# Идемпотентно, безопасно перезапускать на каждый заход.
+ensure_voice_bot_log_grants() {
+  id zenith-voice-bot >/dev/null 2>&1 || return 0
+  local group="z2r-logs-writers"
+  if ! getent group "$group" >/dev/null 2>&1; then
+    groupadd --system "$group"
+  fi
+  usermod -aG "$group" zenith-voice-bot
+  mkdir -p "$LOG_DIR"
+  chgrp "$group" "$LOG_DIR"
+  chmod g+w,g+s,+t "$LOG_DIR"
+}
+
 manage_voice_bot() {
   local st; st="$(get_voice_bot_status)"
   echo "Discord_bot: $st"
+  if [ "$st" != "NONE" ]; then
+    ensure_voice_bot_log_grants
+  fi
   case "$st" in
     NONE)
       read -re -p "Склонировать и подготовить z2r_test-voice-bot в $VOICE_BOT_DIR? [y/N]: " ans
