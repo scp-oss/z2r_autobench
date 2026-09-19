@@ -1161,6 +1161,82 @@ project names here — same public-repo constraint as README.md.
   the block stops matching anything and goes inert, harmlessly, without
   ever touching config structure again.
 
+## telegram_calls_cli.sh — independent UDP profile for Telegram voice/video calls (since 2026-09-19)
+
+- Live incident: Telegram voice calls fail to establish AT ALL through
+  VLESS→zapret2, but work fine via an unrelated bypass path that skips
+  the server entirely — same pattern as the Discord voice issue this
+  engagement already fixed (`VOICE_UDP`, profile 6). Two Explore agents
+  confirmed the cause independently: **no repo in this project has any
+  mechanism to bypass DPI for Telegram's call UDP traffic.** Zenith-WS's
+  own `zapret2/strategies.md` already flagged this explicitly — its
+  REDIRECT/relay mechanism is TCP:443-only (MTProto signaling +
+  web.telegram.org), and its own comment there says voice calls are "not
+  considered here — a separate, not-yet-covered task, closer in nature
+  to VOICE_UDP than to TG_MTPROTO." Confirmed with the user: build a new
+  independent UDP profile (the VOICE_UDP-style architecture), not a
+  UDP relay in Zenith-WS (the latter would need TPROXY-style interception
+  of dynamically-negotiated P2P/reflector ports — a much bigger,
+  riskier build with no way to verify it here without live server
+  access).
+- Same "never invent nfqws2 syntax" discipline as `custom_domain_cli.sh`
+  (read that file's own docstring first — this one is a direct
+  adaptation of its clone-a-real-block technique, just for UDP/IP
+  addressing instead of TCP/domain). Clones the real, already-working
+  `VOICE_UDP` block (`circular_locked:key=6` — profile numbers 1-9 map
+  directly to their `key=N`, confirmed via
+  `autotune_daemon.sh:161-162`'s `PROFILE_TITLE[6]="VOICE_UDP"`) out of
+  the live config, patches exactly two things in the copy: the
+  addressing directive (Discord's target → Telegram's official CIDR
+  list) and `circular_locked:key=6` → a freshly allocated number
+  (`--template-profile N` overrides the donor if `key=6` ever turns out
+  ambiguous on some server, same escape hatch `custom_domain_cli.sh`
+  already needed for `key=3`).
+- **Addressing directive: looks for `--ipset=` FIRST**, falling back to
+  `--hostlist=` (custom_domain_cli.sh's default order is reversed, since
+  that tool clones TCP/domain-matched profiles) — UDP call traffic has
+  no SNI/domain, so the donor almost certainly matches by destination
+  IP/CIDR the same way `zenith-ws/zapret2/TG_MTPROTO.block.conf` already
+  documents (`--ipset=.../telegram_ipv4.txt`). Refuses cleanly if
+  neither directive is found in the donor block, same principle as
+  `custom_domain_cli.sh`'s own hostlist-not-found refusal.
+- **CIDR file is z2r_autobench's own independent copy**
+  (`$Z2R_BASE/extra_strats/cidr/telegram_calls_ipv4.txt`), fetched
+  inline from `core.telegram.org/resources/cidr.txt` (`add
+  --refresh-cidr`, or automatically if the file doesn't exist yet) —
+  same source/format `zenith-ws/cidr/fetch_telegram_cidr.sh` already
+  validated, but z2r_autobench must not depend on whether Zenith-WS is
+  even installed on a given server, so this is a separate file, not a
+  symlink/reference into that repo.
+- **No automated strategy test exists for this profile, and none is
+  planned.** Unlike Discord (`z2r_test-voice-bot`, a real client that can
+  join a voice channel by itself), there is no equivalent Telegram
+  client capable of placing/receiving a call from a script — building
+  one would need a real MTProto client with call support, an order of
+  magnitude harder than anything else in this repo, and unverifiable
+  blind without live server access. `rank_strategies.sh --funnel` also
+  can't apply here — its probe is HTTP(S)-based (`probe_url`), and this
+  profile has neither HTTP nor a domain to test against. Strategy
+  selection is **manual**: `set_strategy_cli.sh max <profile>` /
+  `set_strategy_cli.sh set <profile> udp <N>` in a loop, real phone call
+  after each candidate, note which N actually connects.
+- **Open/unverified risk, same class as `custom_domain_cli.sh`'s own
+  `--qnum` caveat**: the clone carries every directive of the VOICE_UDP
+  donor block as-is, including any Discord-specific `--filter-udp=` port
+  range or `--qnum` it may declare. Telegram calls negotiate their UDP
+  port dynamically (undocumented anywhere in this project) — there's no
+  way to know in advance whether the donor's port range is even
+  relevant to Telegram's traffic. `add`'s preview prints an explicit
+  warning about this; a human needs to actually read the block before
+  `--yes`, not just check that the IP/key substitution looks right.
+- `add`/`remove`/`status` mirror `custom_domain_cli.sh`'s shape
+  (preview-then-`--yes` gate, mandatory backup before write, same
+  `config.promote.lock`, `remove` only empties the ipset file rather
+  than touching config structure). Not wired into any `z0r` menu item —
+  `custom_domain_cli.sh` itself has no menu entry either, same
+  precedent; `set_strategy_cli.sh` (already generic across any numeric
+  profile) is the whole interface needed for the manual test loop.
+
 ## domain_list_sync.sh — read-only bridge to official curated domain lists (since 2026-08-31)
 
 - Live finding while closing the `auto_promoter.py` youtubei.googleapis.com
