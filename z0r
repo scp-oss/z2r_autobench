@@ -922,9 +922,36 @@ manual_switch_strategy() {
 # паттерн предупреждения, что zenith_promoter_toggle() -- это тоже
 # автономный процесс, который сам рестартует zapret2 без подтверждения
 # на каждое срабатывание.
+# Живой баг на MTS: profile_toggle_autotune() ниже всегда предполагал,
+# что сам ШАБЛОН autotune-profile@.service уже лежит в
+# /etc/systemd/system/ -- ни это, ни любая другая точка в z0r никогда
+# его туда не копировали (в отличие от manage_voice_bot()/manage_panel(),
+# у которых есть свой `cp -f .../*.service /etc/systemd/system/...`).
+# На серверах, где это когда-то сделали руками в обход кода, баг не был
+# виден -- тот же класс "тихого несинхронизированного фикса", что уже
+# не раз всплывал в этом проекте (см. CLAUDE.md). Результат на MTS:
+# `systemctl enable --now autotune-profile@1` тихо отваливался с "Unit
+# ... could not be found", а профили молча оставались [OFF] (0/6).
+#
+# cmp-сравнение, не голый `[ -f ... ]`-гейт -- тот же идиом, что
+# install_daemon_service()/install_zenith_service() уже используют:
+# перекопирует, если файл в репозитории обновился (напр. правки
+# StartLimitBurst/интервалов), не только при первом отсутствии.
+ensure_autotune_profile_template_installed() {
+  local unit_src="$SCRIPT_DIR/autotune-profile@.service"
+  local unit_dst="/etc/systemd/system/autotune-profile@.service"
+  [ -f "$unit_src" ] || { echo "Не найден $unit_src — что-то не так с чекаутом репозитория." >&2; return 1; }
+  if [ ! -f "$unit_dst" ] || ! cmp -s "$unit_src" "$unit_dst"; then
+    cp -f "$unit_src" "$unit_dst"
+    systemctl daemon-reload
+    echo "Установлен/обновлён $unit_dst."
+  fi
+}
+
 profile_toggle_autotune() {
   local pid="$1" unit
   unit="autotune-profile@${pid}.service"
+  ensure_autotune_profile_template_installed || return 1
   if systemctl is-active --quiet "$unit" 2>/dev/null; then
     systemctl disable --now "$unit"
     echo "$unit остановлен и отключён -- стратегия профиля $pid (${TITLES[$pid]}) заморожена на текущем значении."
