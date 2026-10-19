@@ -196,6 +196,51 @@ project names here — same public-repo constraint as README.md.
   the exact incident above) — `rank_voice.sh` doesn't need this (never
   touches `locked.tsv`, sandbox-only).
 
+## `probe_url_heavy()` — second gate before accepting a retune winner (found 2026-10-19/20)
+
+- Live incident, profile=1 (YT_TLS), Provider B: `retune_profile()`'s
+  existing post-apply verification (see "per-profile processes" above —
+  `check_profile_tls()` right after applying the funnel's winner) is
+  itself just `probe_url()` underneath — the same `--range
+  "0-${MIN_BYTES_THRESHOLD}" --max-time "$THROUGHPUT_TIMEOUT"` (4s/64KB)
+  call used everywhere else. strategy=43 passed this cleanly on both
+  TLS1.2 and TLS1.3 and got promoted — but a real, unrestricted
+  `curl https://www.youtube.com/` under that same strategy took ~30s
+  (timed out at the caller's own limit). Same root cause class as the
+  `youtubei.googleapis.com` entry under "Test domains" below (a probe
+  that's too narrow to see a real failure mode) but a different
+  dimension of narrowness: that fix was about testing the wrong *URL*;
+  this one is about a strategy that serves the first 64KB fast
+  (passes) while having degraded *sustained* throughput from desync
+  packet fragmentation overhead — invisible to any small `--range`
+  probe, only visible on a full fetch of a realistically-sized page.
+- Fix: `probe_url_heavy()` (new, `z2r_autobench_lib.sh`) — same
+  TLS1.2-then-TLS1.3 + `PROBE_REQUIRE_BOTH_TLS` shape as `probe_url()`,
+  but a full fetch (no `--range`) with a realistic
+  `HEAVY_PROBE_TIMEOUT` (default 15s) and success judged on HTTP status
+  code (2xx/3xx) rather than a byte-count threshold. `check_profile_tls_heavy()`
+  (new, `autotune_daemon.sh`) wraps it the same way `check_profile_tls()`
+  wraps `probe_url()`. Wired into `retune_profile()`'s existing verify
+  block as an ADDITIONAL check, gated on the light check already having
+  passed — only when both pass does the new strategy stay promoted;
+  either one failing triggers the same existing rollback-to-previous +
+  backoff path (see "per-profile processes" above), no new failure
+  branch needed.
+- **Deliberately NOT added to the regular light health-check
+  (`check_profile_tls()`/`CHECK_INTERVAL` cadence)** — this file's own
+  opening comment is explicit that the frequent check must stay cheap
+  ("НЕ трогаем ничего, пока текущая применённая стратегия проходит
+  лёгкий health-check"), and a full-page fetch every `CHECK_INTERVAL`
+  (default 300s) for every profile would meaningfully increase routine
+  bandwidth/load for a condition that only matters at the one moment a
+  *new* candidate is about to be trusted. The expensive full retune
+  path is the right (and only) place for an expensive confirmation —
+  same reasoning that already justifies the existing light-vs-heavy
+  split between health-check and retune.
+- Verified live on two servers (Provider A, Provider B) same incident:
+  applied, `autotune-profile@{1..6}` restarted cleanly on both, no
+  syntax errors, services came up `active`.
+
 ## All six `autotune-profile@N.service` silently dead for 5 days (found 2026-08-31)
 
 - Live incident on Server A: while chasing a recurring "YouTube 'no

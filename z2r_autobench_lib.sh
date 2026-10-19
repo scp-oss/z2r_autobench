@@ -211,6 +211,42 @@ probe_url() {
   [ "$ok12" -eq 1 ] || [ "$ok13" -eq 1 ]
 }
 
+HEAVY_PROBE_TIMEOUT="${HEAVY_PROBE_TIMEOUT:-15}"
+
+probe_url_heavy() {
+  # Полная (без --range) загрузка страницы -- проверка устойчивой пропускной
+  # способности, не только быстрого старта. Добавлено после живого
+  # инцидента 2026-10-19/20 (profile=1 YT_TLS, Provider B): strategy=43
+  # проходила обычный probe_url() (64КБ за 4с на обеих версиях TLS), но
+  # полная загрузка www.youtube.com реально виснула ~30с -- деградированная
+  # УСТОЙЧИВАЯ пропускная способность от фрагментации десинка, которую
+  # маленький --range-запрос не видит. Используется ТОЛЬКО в
+  # retune_profile() перед финальным применением кандидата -- не в обычном
+  # лёгком health-check (CHECK_INTERVAL), чтобы не делать его дороже, как и
+  # задумано изначально (см. комментарий в начале autotune_daemon.sh).
+  local url="$1"
+  local ok12=0 ok13=0
+  local code12 code13
+
+  code12="$(curl --tls-max 1.2 --connect-timeout 3 --max-time "$HEAVY_PROBE_TIMEOUT" \
+      -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+  code13="$(curl --tlsv1.3 --connect-timeout 3 --max-time "$HEAVY_PROBE_TIMEOUT" \
+      -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+
+  case "$code12" in 2??|3??) ok12=1 ;; esac
+  case "$code13" in 2??|3??) ok13=1 ;; esac
+
+  if [ "$PROBE_REQUIRE_BOTH_TLS" = "1" ]; then
+    if [ "$ok12" -eq 1 ] && [ "$ok13" -eq 1 ]; then
+      return 0
+    fi
+    echo "probe_url_heavy: $url -- полная загрузка не прошла (TLS1.2 code=$code12, TLS1.3 code=$code13, таймаут ${HEAVY_PROBE_TIMEOUT}с)" >&2
+    return 1
+  fi
+
+  [ "$ok12" -eq 1 ] || [ "$ok13" -eq 1 ]
+}
+
 probe_http_url() {
   local url="$1"
   local bytes

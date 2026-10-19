@@ -387,6 +387,22 @@ check_profile_tls() {
   extra_check_ok "$pid"
 }
 
+check_profile_tls_heavy() {
+  # Тяжёлая проверка -- см. probe_url_heavy() в z2r_autobench_lib.sh.
+  # Вызывается ТОЛЬКО из retune_profile() перед финальным принятием нового
+  # кандидата, не из обычного health-check цикла.
+  local pid="$1"
+  local url="${PROFILE_URL[$pid]:-}"
+  if [ "$pid" = "2" ]; then
+    url="$(get_gv_test_url 2>/dev/null)"
+    [ -z "$url" ] && return 1
+  fi
+  if [ "$pid" = "9" ]; then
+    return 0
+  fi
+  probe_url_heavy "$url"
+}
+
 check_profile_quic() {
   local gv_url
   gv_url="$(resolve_googlevideo_url 2>/dev/null)"
@@ -521,6 +537,13 @@ retune_profile() {
       check_profile_voice || verify_ok=0
     else
       check_profile_tls "$pid" || verify_ok=0
+      # Доп. гейт перед финальным принятием кандидата -- см. probe_url_heavy()
+      # / инцидент 2026-10-19/20 (profile=1 strategy=43: лёгкий пробник
+      # проходил, полная загрузка реально виснула). Только здесь, не в
+      # обычном лёгком health-check.
+      if [ "$verify_ok" -eq 1 ]; then
+        check_profile_tls_heavy "$pid" || verify_ok=0
+      fi
     fi
 
     if [ "$verify_ok" -eq 1 ]; then
