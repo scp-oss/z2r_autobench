@@ -1456,6 +1456,25 @@ ensure_docker() {
   command -v docker >/dev/null 2>&1
 }
 
+# Установщик zator в конце запускает nfqws2 сам, через init.d, в обход
+# systemd -- zapret2.service после установки «inactive (dead)», хотя процесс
+# работает. Хуже: первый же «systemctl restart zapret2» видит «already
+# running», не порождает дочерний процесс, systemd считает сервис упавшим и
+# ExecStop убивает тот nfqws2 -- обход пропадает (стенд МТС 2026-11-13).
+# Передаём процесс под управление systemd: стоп через init.d, старт юнитом.
+z2r_adopt_systemd() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl cat zapret2.service >/dev/null 2>&1 || return 0
+  systemctl is-active --quiet zapret2 && return 0
+  echo "zapret2 запущен в обход systemd -- перезапускаю под systemd..."
+  /opt/zapret2/init.d/sysv/zapret2 stop >/dev/null 2>&1 || true
+  if systemctl start zapret2 && systemctl is-active --quiet zapret2; then
+    echo "zapret2.service: active."
+  else
+    echo "!!! zapret2.service не стартовал -- смотри journalctl -u zapret2" >&2
+  fi
+}
+
 install_z2r() {
   if z2r_installed; then
     read -re -p "z2r уже установлен (/opt/zapret2 есть). Переустановить/обновить поверх? [y/N]: " ans
@@ -1479,12 +1498,14 @@ install_z2r() {
   echo "Пробую основное зеркало (GitHub)..."
   if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" ) && run_z2r_installer_unattended /tmp/z2r; then
     echo "z2r установлен (основное зеркало)."
+    z2r_adopt_systemd
     return 0
   fi
 
   echo "Основное зеркало недоступно, пробую резервное (git.px.rkn.quest)..."
   if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && run_z2r_installer_unattended /opt/z2r; then
     echo "z2r установлен (резервное зеркало)."
+    z2r_adopt_systemd
     return 0
   fi
 
