@@ -2143,11 +2143,21 @@ zenith_install_files() {
     apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
     apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
   fi
-  if ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
-    echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
+  # Каталог уже есть (повторная установка модуля, ручной клон нужной ветки) --
+  # раньше git clone падал с «уже существует» и печатал ложное «GitHub
+  # недоступен?» (стенд МТС 2026-11-13). Свой git-репозиторий -- обновляем и
+  # продолжаем; чужой непустой каталог -- честная ошибка.
+  if [ -d "$ZENITH_DIR/.git" ]; then
+    echo "Zenith уже склонирован в $ZENITH_DIR ($(git -C "$ZENITH_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)) -- обновляю."
+    git -C "$ZENITH_DIR" pull -q --ff-only 2>/dev/null || echo "  (git pull не прошёл -- продолжаю с текущей версией)" >&2
+  elif [ -e "$ZENITH_DIR" ] && [ -n "$(ls -A "$ZENITH_DIR" 2>/dev/null)" ]; then
+    echo "$ZENITH_DIR существует и не является git-репозиторием Zenith -- убери/переименуй его и повтори." >&2
+    return 1
+  elif ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
+    echo "Не удалось склонировать $ZENITH_REPO_URL (проверь доступ к GitHub)." >&2
     return 1
   fi
-  cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
+  [ -f "$ZENITH_DIR/.env" ] || cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
 
   # Имя/провайдер ноды -- автоматически, не руками (по прямому запросу:
   # готовимся к деплою на МТС, там должно пройти без ручной доводки).
