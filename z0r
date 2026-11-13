@@ -39,6 +39,9 @@
 #                                — установить+включить autotune-daemon.service
 #                                  (без меню, для git clone && запусти-и-готово)
 #   sudo ./z0r --install-z2r    — поставить сам z2r (ядро DPI-обхода), если его нет
+#   sudo ./z0r --install-modules 1,2
+#                                — поставить модули без меню (1 autotune, 2 Zenith,
+#                                  3 панель, 4 бот, 5 DNSCrypt, 6 Zenith-WS)
 #   sudo ./z0r --install-z2r-offline
 #                                — то же самое, но из офлайн-архива автора
 #                                  (Google Drive+пароль zator) -- когда GitHub
@@ -185,7 +188,14 @@ while [ $# -gt 0 ]; do
     --install-service) MODE="install"; shift ;;
     --install-z2r) MODE="install-z2r"; shift ;;
     --install-z2r-offline) MODE="install-z2r-offline"; shift ;;
+    # Установка модулей без меню (номера как в first_run_install_modules:
+    # 1 autotune, 2 Zenith, 3 панель, 4 бот, 5 DNSCrypt, 6 Zenith-WS) --
+    # для развёртывания/проверки на чистом сервере (стенд МТС 2026-11-13).
+    --install-modules) MODE="install-modules"; Z0R_MODULES="$2"; shift 2 ;;
     --uninstall) MODE="uninstall"; shift ;;
+    # Полное удаление: все модули, ядро z2r и сам z2r_autobench (каждый шаг
+    # со своим подтверждением) -- для чистого переразвёртывания.
+    --uninstall-all) MODE="uninstall-all"; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -1374,7 +1384,12 @@ run_z2r_installer_unattended() {
   ( cd "$dir" && IFACE="$iface" Z2R_BASE="$base" expect -c '
     encoding system utf-8
     set timeout 30
+    set idle 0
+    set finished 0
     set iface $env(IFACE)
+    # Без TERM zator печатает "TERM environment variable not set" и НЕ рисует
+    # меню -- тогда ниже нечего ловить (стенд МТС 2026-11-13).
+    if {![info exists env(TERM)] || $env(TERM) eq ""} { set env(TERM) xterm }
     spawn sh $env(Z2R_BASE)
 
     expect {
@@ -1404,6 +1419,39 @@ run_z2r_installer_unattended() {
       "auto download ip/host list" { send "\r"; exp_continue }
       "~3мб места)? 1 - Да, Enter - нет" { send "\r"; exp_continue }
       "press enter to continue" { send "\r"; exp_continue }
+      # zator (AloofLibra/zator, с 2026-11) спрашивает по-русски с дефолтом в
+      # скобках: «Ваш выбор [2]:», «... [y/N]:» -- принимаем дефолт. Без этого
+      # expect на неизвестном вопросе выходил по timeout из блока, а
+      # «catch wait» дальше ждал установщик вечно (живой случай: стенд МТС
+      # 2026-11-13, «Установить Web-панель управления? Ваш выбор [2]:»).
+      # Телеметрия автора zator: дефолт там «да» (Enter). Автоматический
+      # прогон НЕ даёт согласие за человека -- отвечаем «n»; включить можно
+      # потом вручную в меню z2r. (Живой случай на стенде МТС 2026-11-13:
+      # без этого Enter молча включил отправку статистики.)
+      # Сам prompt «Разрешить? (Enter - да, n - нет)» zator печатает через
+      # read -p ... 2>/dev/null -- его не видно, ловим строку вопроса выше.
+      "анонимную статистику" { set idle 0; sleep 1; send "n\r"; exp_continue }
+      # В конце установщик zator открывает своё главное меню -- выходим (0),
+      # иначе Enter-по-таймауту крутил бы меню до лимита и прогон завершался
+      # ошибкой при фактически успешной установке.
+      "Выберите необходимое действие:" { set idle 0; sleep 1; send "0\r"; exp_continue }
+      # После выхода из меню загрузчик z2r может не завершиться сам -- раньше
+      # это досиживало до лимита тишины, давало exit 3, и z0r уходил на
+      # резервное зеркало и ОФЛАЙН-АРХИВ, ставя старую версию поверх свежей
+      # (стенд МТС 2026-11-13). Выход из меню = установка закончена.
+      "Выход выполнен" { set finished 1; set timeout 10; exp_continue }
+      -re {Ваш выбор \[[^\]]*\]: ?$} { set idle 0; send "\r"; exp_continue }
+      -re {\[[yYдД]/[nNнН]\]:? ?$} { set idle 0; send "\r"; exp_continue }
+      -re {\[[nNнН]/[yYдД]\]:? ?$} { set idle 0; send "\r"; exp_continue }
+      # Неизвестный вопрос/долгая загрузка: тишина timeout секунд -> Enter
+      # (ответ по умолчанию), но не больше 20 раз подряд -- дальше честная
+      # ошибка вместо бесконечного зависания.
+      timeout {
+        if {$finished} { exit 0 }
+        incr idle
+        if {$idle > 20} { puts stderr "\nz0r: установщик z2r молчит слишком долго -- прерываю (неизвестный вопрос?)"; exit 3 }
+        send "\r"; exp_continue
+      }
       eof
     }
     catch wait result
@@ -1430,6 +1478,41 @@ ensure_docker() {
   command -v docker >/dev/null 2>&1
 }
 
+# Установщик zator в конце запускает nfqws2 сам, через init.d, в обход
+# systemd -- zapret2.service после установки «inactive (dead)», хотя процесс
+# работает. Хуже: первый же «systemctl restart zapret2» видит «already
+# running», не порождает дочерний процесс, systemd считает сервис упавшим и
+# ExecStop убивает тот nfqws2 -- обход пропадает (стенд МТС 2026-11-13).
+# Передаём процесс под управление systemd: стоп через init.d, старт юнитом.
+# Телеметрия автора zator при АВТОМАТИЧЕСКОЙ установке -- всегда выключена.
+# Ответ «n» в expect ненадёжен: Enter'ы, посланные по тишине во время долгих
+# операций, копятся в буфере терминала, и вопрос «Разрешить? (Enter - да)»
+# забирает их раньше нашего «n» (стенд МТС 2026-11-13: «Спасибо! Статистика
+# включена» напечатано до «n»). Человек может включить её сам в меню z2r.
+z2r_force_telemetry_off() {
+  local cfg
+  for cfg in /opt/zator/z2r_lib/telemetry.config /opt/zapret2/z2r_lib/telemetry.config; do
+    [ -f "$cfg" ] || continue
+    if grep -q '^tel_enabled=1' "$cfg"; then
+      sed -i 's/^tel_enabled=.*/tel_enabled=0/' "$cfg"
+      echo "Телеметрия zator выключена (автоматическая установка не даёт согласие за человека; включить -- меню z2r)."
+    fi
+  done
+}
+
+z2r_adopt_systemd() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl cat zapret2.service >/dev/null 2>&1 || return 0
+  systemctl is-active --quiet zapret2 && return 0
+  echo "zapret2 запущен в обход systemd -- перезапускаю под systemd..."
+  /opt/zapret2/init.d/sysv/zapret2 stop >/dev/null 2>&1 || true
+  if systemctl start zapret2 && systemctl is-active --quiet zapret2; then
+    echo "zapret2.service: active."
+  else
+    echo "!!! zapret2.service не стартовал -- смотри journalctl -u zapret2" >&2
+  fi
+}
+
 install_z2r() {
   if z2r_installed; then
     read -re -p "z2r уже установлен (/opt/zapret2 есть). Переустановить/обновить поверх? [y/N]: " ans
@@ -1453,12 +1536,25 @@ install_z2r() {
   echo "Пробую основное зеркало (GitHub)..."
   if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" ) && run_z2r_installer_unattended /tmp/z2r; then
     echo "z2r установлен (основное зеркало)."
+    z2r_force_telemetry_off
+    z2r_adopt_systemd
+    return 0
+  fi
+  # Установщик вернул ошибку, но ядро стоит и nfqws2 работает -- это
+  # установка, а не недоступный GitHub; зеркала/офлайн-архив тут только
+  # перезаписали бы свежую версию старой.
+  if z2r_installed && pgrep -x nfqws2 >/dev/null 2>&1; then
+    echo "!!! Установщик z2r завершился с ошибкой, но z2r установлен и nfqws2 работает -- считаю установку состоявшейся." >&2
+    z2r_force_telemetry_off
+    z2r_adopt_systemd
     return 0
   fi
 
   echo "Основное зеркало недоступно, пробую резервное (git.px.rkn.quest)..."
   if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && run_z2r_installer_unattended /opt/z2r; then
     echo "z2r установлен (резервное зеркало)."
+    z2r_force_telemetry_off
+    z2r_adopt_systemd
     return 0
   fi
 
@@ -2050,11 +2146,21 @@ zenith_install_files() {
     apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
     apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
   fi
-  if ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
-    echo "Не удалось склонировать $ZENITH_REPO_URL — GitHub недоступен?" >&2
+  # Каталог уже есть (повторная установка модуля, ручной клон нужной ветки) --
+  # раньше git clone падал с «уже существует» и печатал ложное «GitHub
+  # недоступен?» (стенд МТС 2026-11-13). Свой git-репозиторий -- обновляем и
+  # продолжаем; чужой непустой каталог -- честная ошибка.
+  if [ -d "$ZENITH_DIR/.git" ]; then
+    echo "Zenith уже склонирован в $ZENITH_DIR ($(git -C "$ZENITH_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)) -- обновляю."
+    git -C "$ZENITH_DIR" pull -q --ff-only 2>/dev/null || echo "  (git pull не прошёл -- продолжаю с текущей версией)" >&2
+  elif [ -e "$ZENITH_DIR" ] && [ -n "$(ls -A "$ZENITH_DIR" 2>/dev/null)" ]; then
+    echo "$ZENITH_DIR существует и не является git-репозиторием Zenith -- убери/переименуй его и повтори." >&2
+    return 1
+  elif ! git clone "$ZENITH_REPO_URL" "$ZENITH_DIR"; then
+    echo "Не удалось склонировать $ZENITH_REPO_URL (проверь доступ к GitHub)." >&2
     return 1
   fi
-  cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
+  [ -f "$ZENITH_DIR/.env" ] || cp "$ZENITH_DIR/.env.example" "$ZENITH_DIR/.env"
 
   # Имя/провайдер ноды -- автоматически, не руками (по прямому запросу:
   # готовимся к деплою на МТС, там должно пройти без ручной доводки).
@@ -2094,6 +2200,39 @@ zenith_install_files() {
 # поэтому не сворачивается в чек-лист первого запуска -- вызывается сразу
 # после zenith_install_files(), что из manage_zenith(), что из первого
 # запуска, чтобы настройка не потерялась где-то "на потом".
+# После мастера нода должна реально заработать, а не только «подключиться»
+# (стенд МТС 2026-11-13: мастер писал «Подключено», но локальная БД не
+# поднята, песочница не настроена, autorun не стоит -- нода молчала).
+# Promoter (продвижение в БОЕВОЙ конфиг без человека) -- НЕ включаем: это
+# решение человека, ниже только подсказка.
+zenith_post_install() {
+  echo ""
+  echo "--- Zenith: запуск ноды ---"
+  if [ "$(zenith_db_mode)" != "api" ]; then
+    if [ "$(get_zenith_status)" = "ON" ]; then
+      echo "Локальная БД уже работает."
+    else
+      echo "Поднимаю локальную БД..."
+      zenith_toggle || echo "!!! БД не поднялась -- пункт меню Zenith -> вкл/выкл БД." >&2
+    fi
+  fi
+  if [ -x "$ZENITH_DIR/sandbox/setup_sandbox.sh" ]; then
+    echo "Настраиваю песочницу (отдельная очередь NFQUEUE для тестов геномов)..."
+    if bash "$ZENITH_DIR/sandbox/setup_sandbox.sh" >/dev/null; then
+      [ -x "$ZENITH_DIR/sandbox/install_zapret2_hook.sh" ] && bash "$ZENITH_DIR/sandbox/install_zapret2_hook.sh" >/dev/null && \
+        { systemctl is-active --quiet zapret2 && systemctl restart zapret2; }
+      bash "$ZENITH_DIR/sandbox/start_sandbox.sh" >/dev/null 2>&1 && echo "Песочница запущена (очередь $(cat "$ZENITH_DIR/sandbox/queue_num" 2>/dev/null))." \
+        || echo "!!! start_sandbox.sh не поднялся -- смотри $ZENITH_DIR/sandbox/README.md" >&2
+    else
+      echo "!!! setup_sandbox.sh завершился с ошибкой" >&2
+    fi
+  fi
+  if install_zenith_service zenith-autorun; then
+    systemctl enable --now zenith-autorun >/dev/null 2>&1 && echo "zenith-autorun включён (генерация кандидатов по расписанию)."
+  fi
+  echo "zenith-promoter (автопродвижение в боевой конфиг) НЕ включён -- осознанно, включается в меню Zenith -> Автономный режим -> 2."
+}
+
 zenith_configure_wizard() {
     # Два вопроса вместо трёх пунктов меню -- см. README Zenith "Два
     # режима БД". Раньше был выбор 1/2/3 сразу (локальная/hub-and-
@@ -2752,6 +2891,15 @@ uninstall_zenith() {
       if [ "$(zenith_db_mode)" != "api" ] && [ "$(zenith_db_backend)" != "native" ]; then
         ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
       fi
+      # Флаг в .env может не соответствовать факту (смешанная старая установка:
+      # ZENITH_DB_BACKEND=native, но контейнер/том тоже были). Тогда том
+      # переживал удаление, и новая установка подхватывала старую БД
+      # (стенд МТС 2026-11-13). Удаляем по факту наличия.
+      if command -v docker >/dev/null 2>&1; then
+        docker rm -f zenith-mysql >/dev/null 2>&1 || true
+        docker volume ls -q 2>/dev/null | grep -qx 'zenith_mysql_data' && docker volume rm zenith_mysql_data >/dev/null 2>&1 \
+          && echo "docker-том zenith_mysql_data удалён."
+      fi
       rm -rf "$ZENITH_DIR"
       echo "Zenith удалён."
       ;;
@@ -2760,19 +2908,26 @@ uninstall_zenith() {
 }
 
 uninstall_daemon() {
-  if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
-    echo "autotune-daemon.service не установлен — нечего удалять."
+  # Кроме единого autotune-daemon.service есть шаблон autotune-profile@.service
+  # и его экземпляры @1..@6 (по одному на профиль). Раньше они не удалялись
+  # и продолжали работать, ссылаясь на уже удалённые скрипты (стенд МТС
+  # 2026-11-13).
+  local units inst
+  units="$(systemctl list-units --all --plain --no-legend 'autotune-profile@*' 2>/dev/null | awk '{print $1}')"
+  if [ ! -f /etc/systemd/system/autotune-daemon.service ] && [ -z "$units" ] && [ ! -f /etc/systemd/system/autotune-profile@.service ]; then
+    echo "autotune-daemon / autotune-profile@ не установлены — нечего удалять."
     return 0
   fi
-  read -re -p "Найден autotune-daemon.service — удалить? [y/N]: " ans
+  read -re -p "Найден autotune (autotune-daemon и/или autotune-profile@N) — удалить? [y/N]: " ans
   case "$ans" in
     y|Y)
       systemctl disable --now autotune-daemon 2>/dev/null || true
-      rm -f /etc/systemd/system/autotune-daemon.service
+      for inst in $units; do systemctl disable --now "$inst" 2>/dev/null || true; done
+      rm -f /etc/systemd/system/autotune-daemon.service /etc/systemd/system/autotune-profile@.service
       systemctl daemon-reload
-      echo "autotune-daemon.service удалён."
+      echo "autotune удалён (daemon + экземпляры по профилям)."
       ;;
-    *) echo "Отмена, autotune-daemon.service не тронут." ;;
+    *) echo "Отмена, autotune не тронут." ;;
   esac
 }
 
@@ -2908,15 +3063,45 @@ uninstall_z2r() {
   echo "известного нам штатного uninstall — удаляем вручную."
   read -re -p "Точно удалить z2r? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
-    systemctl disable --now zapret2 2>/dev/null || true
-    rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service
-    systemctl daemon-reload
-    # Песочный nfqws2 Zenith'а -- отдельный процесс от zapret2.service выше,
-    # держит открытыми файлы из /opt/zapret2 -- останавливаем ДО rm -rf,
-    # иначе он бесконечно заливает терминал ошибками чтения удалённых
-    # хостлистов (живой инцидент 2026-08-13, см. stop_zenith_sandbox_if_running).
     [ -d "$ZENITH_DIR" ] && stop_zenith_sandbox_if_running
-    rm -rf /opt/zapret2
+    # zator (с 2026-11) -- есть штатное полное удаление (меню z2r: 4 -> 5):
+    # watchdog, zapret2, /opt/zator. Ручное удаление ниже раньше оставляло
+    # /opt/zator, таймер zapret2-list-update и /usr/local/bin/z2r (стенд МТС
+    # 2026-11-13). Ведём меню автора через expect; ручная чистка -- запасной
+    # путь и добивание хвостов.
+    if [ -d /opt/zator ] && command -v z2r >/dev/null 2>&1 && ensure_expect; then
+      echo "Удаляю штатно, через меню zator (4 -> 5, с бэкапом)..."
+      expect -c '
+        encoding system utf-8
+        set timeout 60
+        set menus 0
+        spawn z2r
+        expect {
+          "Выберите необходимое действие:" { incr menus; sleep 1; if {$menus == 1} { send "4\r" } else { send "0\r" }; exp_continue }
+          "Введите 5 - подтвердить удаление" { send "5\r"; exp_continue }
+          "Создать резервную копию" { exp_continue }
+          -re {Ваш выбор: ?$} { send "1\r"; exp_continue }
+          "Enter для продолжения" { send "\r"; exp_continue }
+          timeout { send "\r"; exp_continue }
+          eof
+        }' || echo "!!! штатное удаление zator вернуло ошибку -- добиваю вручную" >&2
+    fi
+    systemctl disable --now zapret2 zapret2-list-update.timer zapret2-list-update.service 2>/dev/null || true
+    rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service \
+          /usr/lib/systemd/system/zapret2-list-update.service /usr/lib/systemd/system/zapret2-list-update.timer \
+          /etc/systemd/system/zapret2-list-update.service /etc/systemd/system/zapret2-list-update.timer
+    systemctl daemon-reload
+    rm -rf /opt/zapret2 /opt/zator
+    rm -f /usr/local/bin/z2r
+    # Таблица правил zapret2 остаётся, если файлы удалены раньше, чем отработал
+    # стоп сервиса (видели на стенде МТС) -- без неё трафик не уходит в NFQUEUE
+    # к несуществующему процессу (queue-bypass), но хвост всё равно убираем.
+    nft delete table inet zapret2 2>/dev/null || true
+    # Юнит валидатора стратегий ставит zator, а его штатное удаление его не
+    # снимает -- оставался работать на удалённом /opt/zator (стенд МТС).
+    systemctl disable --now z2r-strategy-validator.service 2>/dev/null || true
+    rm -f /etc/systemd/system/z2r-strategy-validator.service /etc/systemd/system/multi-user.target.wants/z2r-strategy-validator.service
+    systemctl daemon-reload
     echo "z2r удалён."
   else
     echo "Отмена, z2r не тронут (нужно было ввести именно 'DELETE')."
@@ -3246,7 +3431,12 @@ wsrelay_install_files() {
     apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
     apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
   fi
-  if ! git clone "$WSRELAY_REPO_URL" "$WSRELAY_DIR"; then
+  # Уже склонирован (повторная установка, ручной клон ветки) -- обновляем,
+  # а не падаем на «уже существует» (тот же случай, что у Zenith, стенд МТС).
+  if [ -d "$WSRELAY_DIR/.git" ]; then
+    echo "Zenith-WS уже склонирован в $WSRELAY_DIR ($(git -C "$WSRELAY_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)) -- обновляю."
+    git -C "$WSRELAY_DIR" pull -q --ff-only 2>/dev/null || echo "  (git pull не прошёл -- продолжаю с текущей версией)" >&2
+  elif ! git clone "$WSRELAY_REPO_URL" "$WSRELAY_DIR"; then
     echo "Не удалось склонировать $WSRELAY_REPO_URL — GitHub недоступен?" >&2
     return 1
   fi
@@ -3261,8 +3451,14 @@ wsrelay_install_files() {
   fi
 
   if ! bash "$WSRELAY_DIR/cidr/fetch_telegram_cidr.sh"; then
-    echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
-    return 1
+    # core.telegram.org из РФ сам заблокирован (стенд МТС 2026-11-13) -- в
+    # репозитории лежит сохранённая копия списка, её и используем.
+    if [ -s "$WSRELAY_DIR/cidr/telegram_ipv4.txt" ]; then
+      echo "Не удалось скачать свежий список подсетей Telegram -- использую сохранённый в репозитории ($(grep -cE '^[0-9]' "$WSRELAY_DIR/cidr/telegram_ipv4.txt") подсетей)." >&2
+    else
+      echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
+      return 1
+    fi
   fi
 
   ensure_wsrelay_user
@@ -3364,6 +3560,18 @@ wsrelay_enable() {
 wsrelay_setup_cf_worker() {
   local worker_script="$WSRELAY_DIR/relay/cf_worker/deploy.sh"
   [ -f "$worker_script" ] || { echo "Не найден $worker_script — обнови Zenith-WS (git pull) и зайди снова." >&2; return 1; }
+  # wrangler через nvm (Node >=22; apt Debian даёт v20) -- ставим сами по той
+  # же инструкции, что раньше только печаталась (стенд МТС 2026-11-13).
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1
+  if ! command -v wrangler >/dev/null 2>&1; then
+    echo "wrangler не найден -- ставлю nvm + Node 22 + wrangler..."
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+      curl -fsSL -o /tmp/nvm-install.sh https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh && bash /tmp/nvm-install.sh >/dev/null 2>&1
+    fi
+    . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 && nvm install 22 >/dev/null 2>&1 && npm install -g wrangler >/dev/null 2>&1 \
+      && echo "wrangler установлен: $(wrangler --version 2>/dev/null | head -1)"
+  fi
   if ! command -v wrangler >/dev/null 2>&1; then
     echo "wrangler (Cloudflare CLI) не установлен -- нужен Node >=22, Debian's apt" >&2
     echo "обычно даёт только v20. Поставь и повтори:" >&2
@@ -4053,6 +4261,13 @@ uninstall_dnscrypt() {
     echo "dnscrypt-proxy не установлен -- нечего удалять."
     return 0
   fi
+  # Удаляем только СВОЮ установку: на стенде МТС 2026-11-13 dnscrypt был
+  # настроен вручную (resolv.conf -> 127.0.2.1 с chattr +i, без бэкапа z0r),
+  # удаление пакета оставило сервер вообще без DNS.
+  if ! grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null && [ ! -f /etc/resolv.conf.z0r-dnscrypt.bak ]; then
+    echo "dnscrypt-proxy настроен не через z0r (нет его меток/бэкапа) -- не трогаю."
+    return 0
+  fi
   read -re -p "Остановить, снять переключение DNS (если делали через z0r) и удалить пакет dnscrypt-proxy? [y/N]: " ans
   case "$ans" in
     y|Y)
@@ -4096,6 +4311,14 @@ uninstall_dnscrypt() {
         || opkg remove dnscrypt-proxy >/dev/null 2>&1 \
         || apk del dnscrypt-proxy >/dev/null 2>&1
       echo "dnscrypt-proxy удалён."
+      # Последняя страховка: resolv.conf всё ещё смотрит на локальный
+      # dnscrypt (127.0.2.1) -- после удаления пакета это «нет DNS».
+      if grep -qE '^nameserver[[:space:]]+127\.0\.2\.1' /etc/resolv.conf 2>/dev/null; then
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        local gw; gw="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')"
+        { [ -n "$gw" ] && echo "nameserver $gw"; echo "nameserver 1.1.1.1"; } > /etc/resolv.conf
+        echo "!!! /etc/resolv.conf указывал на удалённый dnscrypt -- прописал ${gw:+$gw и }1.1.1.1, проверь." >&2
+      fi
       ;;
     *) echo "Отмена, dnscrypt-proxy не тронут." ;;
   esac
@@ -4133,6 +4356,11 @@ uninstall_autobench_self() {
   read -re -p "Точно удалить z2r_autobench? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
     echo "Удаляю $INSTALL_DIR..."
+    # Таймер автообновления живёт отдельно и после удаления каталога
+    # пытался бы обновлять несуществующее (стенд МТС 2026-11-13).
+    systemctl disable --now z2r-autoupdate.timer z2r-autoupdate.service 2>/dev/null || true
+    rm -f /etc/systemd/system/z2r-autoupdate.timer /etc/systemd/system/z2r-autoupdate.service
+    systemctl daemon-reload
     if [ -L "$Z0R_BIN_LINK" ] && [ "$(readlink -f "$Z0R_BIN_LINK" 2>/dev/null)" = "$(readlink -f "$INSTALLED_Z0R" 2>/dev/null)" ]; then
       rm -f "$Z0R_BIN_LINK"
       echo "Команда 'z0r' ($Z0R_BIN_LINK) удалена."
@@ -4195,7 +4423,12 @@ first_run_install_modules() {
   echo "  4) Discord_bot      -- тестирование VOICE_UDP"
   echo "  5) DNSCrypt-proxy   -- локальный DoH-резолвер"
   echo "  6) Zenith-WS        -- прозрачный доступ к Telegram"
-  read -re -p "Модули: " modsel
+  if [ -n "${Z0R_MODULES:-}" ]; then
+    modsel="$Z0R_MODULES"
+    echo "Модули: $modsel (из --install-modules)"
+  else
+    read -re -p "Модули: " modsel
+  fi
 
   local norm tok
   local want_daemon=0 want_zenith=0 want_panel=0 want_bot=0 want_dnscrypt=0 want_wsrelay=0
@@ -4219,7 +4452,7 @@ first_run_install_modules() {
   fi
   if [ "$want_zenith" = "1" ]; then
     echo ""; echo "--- Zenith ---"
-    zenith_install_files && zenith_configure_wizard
+    zenith_install_files && zenith_configure_wizard && zenith_post_install
   fi
   if [ "$want_panel" = "1" ]; then
     echo ""; echo "--- web_panel ---"
@@ -4236,7 +4469,7 @@ first_run_install_modules() {
   fi
   if [ "$want_wsrelay" = "1" ]; then
     echo ""; echo "--- Zenith-WS ---"
-    wsrelay_install_files
+    wsrelay_install_files && wsrelay_enable
   fi
 
   echo ""
@@ -4356,9 +4589,19 @@ if [ "$MODE" = "install-z2r" ]; then
   exit $?
 fi
 
+if [ "$MODE" = "install-modules" ]; then
+  first_run_install_modules
+  exit $?
+fi
+
 if [ "$MODE" = "install-z2r-offline" ]; then
   install_z2r_offline
   exit $?
+fi
+
+if [ "$MODE" = "uninstall-all" ]; then
+  uninstall_everything
+  exit 0
 fi
 
 if [ "$MODE" = "uninstall" ]; then
