@@ -39,6 +39,9 @@
 #                                — установить+включить autotune-daemon.service
 #                                  (без меню, для git clone && запусти-и-готово)
 #   sudo ./z0r --install-z2r    — поставить сам z2r (ядро DPI-обхода), если его нет
+#   sudo ./z0r --install-modules 1,2
+#                                — поставить модули без меню (1 autotune, 2 Zenith,
+#                                  3 панель, 4 бот, 5 DNSCrypt, 6 Zenith-WS)
 #   sudo ./z0r --install-z2r-offline
 #                                — то же самое, но из офлайн-архива автора
 #                                  (Google Drive+пароль zator) -- когда GitHub
@@ -185,6 +188,10 @@ while [ $# -gt 0 ]; do
     --install-service) MODE="install"; shift ;;
     --install-z2r) MODE="install-z2r"; shift ;;
     --install-z2r-offline) MODE="install-z2r-offline"; shift ;;
+    # Установка модулей без меню (номера как в first_run_install_modules:
+    # 1 autotune, 2 Zenith, 3 панель, 4 бот, 5 DNSCrypt, 6 Zenith-WS) --
+    # для развёртывания/проверки на чистом сервере (стенд МТС 2026-11-13).
+    --install-modules) MODE="install-modules"; Z0R_MODULES="$2"; shift 2 ;;
     --uninstall) MODE="uninstall"; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
@@ -4306,7 +4313,12 @@ first_run_install_modules() {
   echo "  4) Discord_bot      -- тестирование VOICE_UDP"
   echo "  5) DNSCrypt-proxy   -- локальный DoH-резолвер"
   echo "  6) Zenith-WS        -- прозрачный доступ к Telegram"
-  read -re -p "Модули: " modsel
+  if [ -n "${Z0R_MODULES:-}" ]; then
+    modsel="$Z0R_MODULES"
+    echo "Модули: $modsel (из --install-modules)"
+  else
+    read -re -p "Модули: " modsel
+  fi
 
   local norm tok
   local want_daemon=0 want_zenith=0 want_panel=0 want_bot=0 want_dnscrypt=0 want_wsrelay=0
@@ -4464,6 +4476,11 @@ fi
 
 if [ "$MODE" = "install-z2r" ]; then
   install_z2r
+  exit $?
+fi
+
+if [ "$MODE" = "install-modules" ]; then
+  first_run_install_modules
   exit $?
 fi
 
