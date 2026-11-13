@@ -66,7 +66,7 @@ if ! zapret2_running; then
   exit 1
 fi
 
-acquire_tune_lock "test_custom_domain.sh" 10 || exit 1
+acquire_tune_lock "test_custom_domain.sh" 300 || exit 1  # только ручной запуск -- ждём, а не отказываем сразу
 
 probe_domain_url() {
   # -L — следуем редиректам (напр. xvideos.com -> www.xvideos.com с

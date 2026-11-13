@@ -130,7 +130,12 @@ fi
 # Не начинаем перебор, если кто-то другой (демон или второй ручной запуск)
 # уже крутит стратегии прямо сейчас — иначе оба прогона будут писать в
 # locked.tsv поверх друг друга и оба получат мусорные результаты.
-acquire_tune_lock "rank_strategies.sh --profile $PROFILE${DOMAIN:+ --domain $DOMAIN}" 10 || exit 1
+# Ручной запуск (терминал -- stderr это tty, или панель/воронка -- с --domain)
+# ждёт лок до 5 мин: демон держит его минутами, и 10с почти всегда давали
+# отказ "лок занят". Демон (stderr в лог, без --domain) -- по-прежнему 10с.
+_lock_wait=10
+if [ -n "$DOMAIN" ] || [ -t 2 ]; then _lock_wait=300; fi
+acquire_tune_lock "rank_strategies.sh --profile $PROFILE${DOMAIN:+ --domain $DOMAIN}" "$_lock_wait" || exit 1
 
 if [ -z "$DOMAIN" ]; then
   case "$PROFILE" in

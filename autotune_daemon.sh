@@ -272,8 +272,24 @@ is_dep_skipped() {
   esac
 }
 
+# Профиль выключен в самом боевом конфиге: первая не-комментарная строка
+# блока #Z2R_AUTO_STANDARD_<N>_BEGIN начинается с --skip. Такой профиль
+# nfqws2 не применяет вообще, его health-check заведомо бессмыслен, а
+# переподбор (rank_strategies.sh) минутами держит общий TUNE_LOCK_FILE и
+# блокирует ручные тесты из CLI/панели ("лок занят"). Живой случай
+# 2026-11-13: FB_TLS/FB_HTTP (8/9) с --skip переподбирались каждые ~35 мин.
+is_config_disabled() {
+  local cfg="${ZAPRET_CONFIG:-/opt/zapret2/config}"
+  [ -r "$cfg" ] || return 1
+  awk -v b="#Z2R_AUTO_STANDARD_$1_BEGIN" '
+    $0 == b { inblk = 1; next }
+    inblk && /^[[:space:]]*#/ { next }
+    inblk && NF { exit ($1 == "--skip") ? 0 : 1 }
+    END { if (!inblk) exit 1 }' "$cfg"
+}
+
 is_skipped() {
-  is_user_skipped "$1" || is_dep_skipped "$1"
+  is_user_skipped "$1" || is_dep_skipped "$1" || is_config_disabled "$1"
 }
 
 # Проверяет внешние зависимости, от которых зависят тесты профилей 2 (GV_TLS,
