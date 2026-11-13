@@ -2197,6 +2197,39 @@ zenith_install_files() {
 # поэтому не сворачивается в чек-лист первого запуска -- вызывается сразу
 # после zenith_install_files(), что из manage_zenith(), что из первого
 # запуска, чтобы настройка не потерялась где-то "на потом".
+# После мастера нода должна реально заработать, а не только «подключиться»
+# (стенд МТС 2026-11-13: мастер писал «Подключено», но локальная БД не
+# поднята, песочница не настроена, autorun не стоит -- нода молчала).
+# Promoter (продвижение в БОЕВОЙ конфиг без человека) -- НЕ включаем: это
+# решение человека, ниже только подсказка.
+zenith_post_install() {
+  echo ""
+  echo "--- Zenith: запуск ноды ---"
+  if [ "$(zenith_db_mode)" != "api" ]; then
+    if [ "$(get_zenith_status)" = "ON" ]; then
+      echo "Локальная БД уже работает."
+    else
+      echo "Поднимаю локальную БД..."
+      zenith_toggle || echo "!!! БД не поднялась -- пункт меню Zenith -> вкл/выкл БД." >&2
+    fi
+  fi
+  if [ -x "$ZENITH_DIR/sandbox/setup_sandbox.sh" ]; then
+    echo "Настраиваю песочницу (отдельная очередь NFQUEUE для тестов геномов)..."
+    if bash "$ZENITH_DIR/sandbox/setup_sandbox.sh" >/dev/null; then
+      [ -x "$ZENITH_DIR/sandbox/install_zapret2_hook.sh" ] && bash "$ZENITH_DIR/sandbox/install_zapret2_hook.sh" >/dev/null && \
+        { systemctl is-active --quiet zapret2 && systemctl restart zapret2; }
+      bash "$ZENITH_DIR/sandbox/start_sandbox.sh" >/dev/null 2>&1 && echo "Песочница запущена (очередь $(cat "$ZENITH_DIR/sandbox/queue_num" 2>/dev/null))." \
+        || echo "!!! start_sandbox.sh не поднялся -- смотри $ZENITH_DIR/sandbox/README.md" >&2
+    else
+      echo "!!! setup_sandbox.sh завершился с ошибкой" >&2
+    fi
+  fi
+  if install_zenith_service zenith-autorun; then
+    systemctl enable --now zenith-autorun >/dev/null 2>&1 && echo "zenith-autorun включён (генерация кандидатов по расписанию)."
+  fi
+  echo "zenith-promoter (автопродвижение в боевой конфиг) НЕ включён -- осознанно, включается в меню Zenith -> Автономный режим -> 2."
+}
+
 zenith_configure_wizard() {
     # Два вопроса вместо трёх пунктов меню -- см. README Zenith "Два
     # режима БД". Раньше был выбор 1/2/3 сразу (локальная/hub-and-
@@ -4352,7 +4385,7 @@ first_run_install_modules() {
   fi
   if [ "$want_zenith" = "1" ]; then
     echo ""; echo "--- Zenith ---"
-    zenith_install_files && zenith_configure_wizard
+    zenith_install_files && zenith_configure_wizard && zenith_post_install
   fi
   if [ "$want_panel" = "1" ]; then
     echo ""; echo "--- web_panel ---"
