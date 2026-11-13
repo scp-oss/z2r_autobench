@@ -3422,7 +3422,12 @@ wsrelay_install_files() {
     apt-get update >/dev/null 2>&1 || opkg update >/dev/null 2>&1 || apk update >/dev/null 2>&1
     apt-get install -y git >/dev/null 2>&1 || opkg install git >/dev/null 2>&1 || apk add git >/dev/null 2>&1
   fi
-  if ! git clone "$WSRELAY_REPO_URL" "$WSRELAY_DIR"; then
+  # Уже склонирован (повторная установка, ручной клон ветки) -- обновляем,
+  # а не падаем на «уже существует» (тот же случай, что у Zenith, стенд МТС).
+  if [ -d "$WSRELAY_DIR/.git" ]; then
+    echo "Zenith-WS уже склонирован в $WSRELAY_DIR ($(git -C "$WSRELAY_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)) -- обновляю."
+    git -C "$WSRELAY_DIR" pull -q --ff-only 2>/dev/null || echo "  (git pull не прошёл -- продолжаю с текущей версией)" >&2
+  elif ! git clone "$WSRELAY_REPO_URL" "$WSRELAY_DIR"; then
     echo "Не удалось склонировать $WSRELAY_REPO_URL — GitHub недоступен?" >&2
     return 1
   fi
@@ -3540,6 +3545,18 @@ wsrelay_enable() {
 wsrelay_setup_cf_worker() {
   local worker_script="$WSRELAY_DIR/relay/cf_worker/deploy.sh"
   [ -f "$worker_script" ] || { echo "Не найден $worker_script — обнови Zenith-WS (git pull) и зайди снова." >&2; return 1; }
+  # wrangler через nvm (Node >=22; apt Debian даёт v20) -- ставим сами по той
+  # же инструкции, что раньше только печаталась (стенд МТС 2026-11-13).
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1
+  if ! command -v wrangler >/dev/null 2>&1; then
+    echo "wrangler не найден -- ставлю nvm + Node 22 + wrangler..."
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+      curl -fsSL -o /tmp/nvm-install.sh https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh && bash /tmp/nvm-install.sh >/dev/null 2>&1
+    fi
+    . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 && nvm install 22 >/dev/null 2>&1 && npm install -g wrangler >/dev/null 2>&1 \
+      && echo "wrangler установлен: $(wrangler --version 2>/dev/null | head -1)"
+  fi
   if ! command -v wrangler >/dev/null 2>&1; then
     echo "wrangler (Cloudflare CLI) не установлен -- нужен Node >=22, Debian's apt" >&2
     echo "обычно даёт только v20. Поставь и повтори:" >&2
@@ -4437,7 +4454,7 @@ first_run_install_modules() {
   fi
   if [ "$want_wsrelay" = "1" ]; then
     echo ""; echo "--- Zenith-WS ---"
-    wsrelay_install_files
+    wsrelay_install_files && wsrelay_enable
   fi
 
   echo ""
