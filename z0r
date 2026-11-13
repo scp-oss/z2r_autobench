@@ -1376,6 +1376,9 @@ run_z2r_installer_unattended() {
     set timeout 30
     set idle 0
     set iface $env(IFACE)
+    # Без TERM zator печатает "TERM environment variable not set" и НЕ рисует
+    # меню -- тогда ниже нечего ловить (стенд МТС 2026-11-13).
+    if {![info exists env(TERM)] || $env(TERM) eq ""} { set env(TERM) xterm }
     spawn sh $env(Z2R_BASE)
 
     expect {
@@ -1414,7 +1417,9 @@ run_z2r_installer_unattended() {
       # прогон НЕ даёт согласие за человека -- отвечаем «n»; включить можно
       # потом вручную в меню z2r. (Живой случай на стенде МТС 2026-11-13:
       # без этого Enter молча включил отправку статистики.)
-      "Разрешить? (Enter - да, n - нет)" { set idle 0; send "n\r"; exp_continue }
+      # Сам prompt «Разрешить? (Enter - да, n - нет)» zator печатает через
+      # read -p ... 2>/dev/null -- его не видно, ловим строку вопроса выше.
+      "анонимную статистику" { set idle 0; sleep 1; send "n\r"; exp_continue }
       # В конце установщик zator открывает своё главное меню -- выходим (0),
       # иначе Enter-по-таймауту крутил бы меню до лимита и прогон завершался
       # ошибкой при фактически успешной установке.
@@ -2985,6 +2990,10 @@ uninstall_z2r() {
     systemctl daemon-reload
     rm -rf /opt/zapret2 /opt/zator
     rm -f /usr/local/bin/z2r
+    # Таблица правил zapret2 остаётся, если файлы удалены раньше, чем отработал
+    # стоп сервиса (видели на стенде МТС) -- без неё трафик не уходит в NFQUEUE
+    # к несуществующему процессу (queue-bypass), но хвост всё равно убираем.
+    nft delete table inet zapret2 2>/dev/null || true
     echo "z2r удалён."
   else
     echo "Отмена, z2r не тронут (нужно было ввести именно 'DELETE')."
