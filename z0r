@@ -3442,8 +3442,14 @@ wsrelay_install_files() {
   fi
 
   if ! bash "$WSRELAY_DIR/cidr/fetch_telegram_cidr.sh"; then
-    echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
-    return 1
+    # core.telegram.org из РФ сам заблокирован (стенд МТС 2026-11-13) -- в
+    # репозитории лежит сохранённая копия списка, её и используем.
+    if [ -s "$WSRELAY_DIR/cidr/telegram_ipv4.txt" ]; then
+      echo "Не удалось скачать свежий список подсетей Telegram -- использую сохранённый в репозитории ($(grep -cE '^[0-9]' "$WSRELAY_DIR/cidr/telegram_ipv4.txt") подсетей)." >&2
+    else
+      echo "Не удалось получить список подсетей Telegram — доразберись руками (cidr/fetch_telegram_cidr.sh) перед включением." >&2
+      return 1
+    fi
   fi
 
   ensure_wsrelay_user
