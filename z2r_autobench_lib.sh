@@ -44,14 +44,24 @@ TUNE_LOCK_FILE="${TUNE_LOCK_FILE:-$ORCH_DIR/.tune.lock}"
 # Захватывает лок на текущий процесс (держится до выхода процесса/exec).
 # Использование: acquire_tune_lock "название" [таймаут_сек] || exit 1
 acquire_tune_lock() {
-  local who="${1:-tune}" timeout="${2:-10}"
+  local who="${1:-tune}" timeout="${2:-10}" owner_file="${TUNE_LOCK_FILE}.owner" holder=""
+  # TUNE_LOCK_WAIT переопределяет таймаут для ручных/интерактивных запусков
+  # (CLI, панель): раньше они ждали 10с и почти всегда получали отказ, пока
+  # autotune держит лок на несколько минут переподбора.
+  [ -n "${TUNE_LOCK_WAIT:-}" ] && timeout="$TUNE_LOCK_WAIT"
   mkdir -p "$(dirname "$TUNE_LOCK_FILE")"
   # shellcheck disable=SC2034
   exec {TUNE_LOCK_FD}>"$TUNE_LOCK_FILE"
-  if ! flock -w "$timeout" "$TUNE_LOCK_FD"; then
-    echo "Не удалось захватить $TUNE_LOCK_FILE за ${timeout}s — кто-то ещё сейчас крутит стратегии ($who подождёт до следующего раза)." >&2
-    return 1
+  if ! flock -n "$TUNE_LOCK_FD"; then
+    holder="$(cat "$owner_file" 2>/dev/null || true)"
+    echo "Лок $TUNE_LOCK_FILE занят: ${holder:-неизвестно кем}. Жду до ${timeout}s ($who)..." >&2
+    if ! flock -w "$timeout" "$TUNE_LOCK_FD"; then
+      holder="$(cat "$owner_file" 2>/dev/null || true)"
+      echo "Не удалось захватить $TUNE_LOCK_FILE за ${timeout}s — его держит: ${holder:-неизвестно} ($who подождёт до следующего раза; для ручного запуска можно TUNE_LOCK_WAIT=600)." >&2
+      return 1
+    fi
   fi
+  printf '%s (pid %s) с %s\n' "$who" "${BASHPID:-$$}" "$(date '+%F %T')" > "$owner_file" 2>/dev/null || true
   return 0
 }
 
