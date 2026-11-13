@@ -1474,6 +1474,22 @@ ensure_docker() {
 # running», не порождает дочерний процесс, systemd считает сервис упавшим и
 # ExecStop убивает тот nfqws2 -- обход пропадает (стенд МТС 2026-11-13).
 # Передаём процесс под управление systemd: стоп через init.d, старт юнитом.
+# Телеметрия автора zator при АВТОМАТИЧЕСКОЙ установке -- всегда выключена.
+# Ответ «n» в expect ненадёжен: Enter'ы, посланные по тишине во время долгих
+# операций, копятся в буфере терминала, и вопрос «Разрешить? (Enter - да)»
+# забирает их раньше нашего «n» (стенд МТС 2026-11-13: «Спасибо! Статистика
+# включена» напечатано до «n»). Человек может включить её сам в меню z2r.
+z2r_force_telemetry_off() {
+  local cfg
+  for cfg in /opt/zator/z2r_lib/telemetry.config /opt/zapret2/z2r_lib/telemetry.config; do
+    [ -f "$cfg" ] || continue
+    if grep -q '^tel_enabled=1' "$cfg"; then
+      sed -i 's/^tel_enabled=.*/tel_enabled=0/' "$cfg"
+      echo "Телеметрия zator выключена (автоматическая установка не даёт согласие за человека; включить -- меню z2r)."
+    fi
+  done
+}
+
 z2r_adopt_systemd() {
   command -v systemctl >/dev/null 2>&1 || return 0
   systemctl cat zapret2.service >/dev/null 2>&1 || return 0
@@ -1510,6 +1526,7 @@ install_z2r() {
   echo "Пробую основное зеркало (GitHub)..."
   if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" ) && run_z2r_installer_unattended /tmp/z2r; then
     echo "z2r установлен (основное зеркало)."
+    z2r_force_telemetry_off
     z2r_adopt_systemd
     return 0
   fi
@@ -1518,6 +1535,7 @@ install_z2r() {
   # перезаписали бы свежую версию старой.
   if z2r_installed && pgrep -x nfqws2 >/dev/null 2>&1; then
     echo "!!! Установщик z2r завершился с ошибкой, но z2r установлен и nfqws2 работает -- считаю установку состоявшейся." >&2
+    z2r_force_telemetry_off
     z2r_adopt_systemd
     return 0
   fi
@@ -1525,6 +1543,7 @@ install_z2r() {
   echo "Основное зеркало недоступно, пробую резервное (git.px.rkn.quest)..."
   if curl -fo /opt/z2r "$Z2R_INSTALL_URL_FALLBACK" && run_z2r_installer_unattended /opt/z2r; then
     echo "z2r установлен (резервное зеркало)."
+    z2r_force_telemetry_off
     z2r_adopt_systemd
     return 0
   fi
