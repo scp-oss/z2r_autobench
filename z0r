@@ -1375,6 +1375,7 @@ run_z2r_installer_unattended() {
     encoding system utf-8
     set timeout 30
     set idle 0
+    set finished 0
     set iface $env(IFACE)
     # Без TERM zator печатает "TERM environment variable not set" и НЕ рисует
     # меню -- тогда ниже нечего ловить (стенд МТС 2026-11-13).
@@ -1424,6 +1425,11 @@ run_z2r_installer_unattended() {
       # иначе Enter-по-таймауту крутил бы меню до лимита и прогон завершался
       # ошибкой при фактически успешной установке.
       "Выберите необходимое действие:" { set idle 0; sleep 1; send "0\r"; exp_continue }
+      # После выхода из меню загрузчик z2r может не завершиться сам -- раньше
+      # это досиживало до лимита тишины, давало exit 3, и z0r уходил на
+      # резервное зеркало и ОФЛАЙН-АРХИВ, ставя старую версию поверх свежей
+      # (стенд МТС 2026-11-13). Выход из меню = установка закончена.
+      "Выход выполнен" { set finished 1; set timeout 10; exp_continue }
       -re {Ваш выбор \[[^\]]*\]: ?$} { set idle 0; send "\r"; exp_continue }
       -re {\[[yYдД]/[nNнН]\]:? ?$} { set idle 0; send "\r"; exp_continue }
       -re {\[[nNнН]/[yYдД]\]:? ?$} { set idle 0; send "\r"; exp_continue }
@@ -1431,6 +1437,7 @@ run_z2r_installer_unattended() {
       # (ответ по умолчанию), но не больше 20 раз подряд -- дальше честная
       # ошибка вместо бесконечного зависания.
       timeout {
+        if {$finished} { exit 0 }
         incr idle
         if {$idle > 20} { puts stderr "\nz0r: установщик z2r молчит слишком долго -- прерываю (неизвестный вопрос?)"; exit 3 }
         send "\r"; exp_continue
@@ -1503,6 +1510,14 @@ install_z2r() {
   echo "Пробую основное зеркало (GitHub)..."
   if ( cd /tmp && curl -fO "$Z2R_INSTALL_URL_PRIMARY" ) && run_z2r_installer_unattended /tmp/z2r; then
     echo "z2r установлен (основное зеркало)."
+    z2r_adopt_systemd
+    return 0
+  fi
+  # Установщик вернул ошибку, но ядро стоит и nfqws2 работает -- это
+  # установка, а не недоступный GitHub; зеркала/офлайн-архив тут только
+  # перезаписали бы свежую версию старой.
+  if z2r_installed && pgrep -x nfqws2 >/dev/null 2>&1; then
+    echo "!!! Установщик z2r завершился с ошибкой, но z2r установлен и nfqws2 работает -- считаю установку состоявшейся." >&2
     z2r_adopt_systemd
     return 0
   fi
