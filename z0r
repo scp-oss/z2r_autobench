@@ -2891,6 +2891,15 @@ uninstall_zenith() {
       if [ "$(zenith_db_mode)" != "api" ] && [ "$(zenith_db_backend)" != "native" ]; then
         ( cd "$ZENITH_DIR" && docker compose down -v ) 2>/dev/null
       fi
+      # Флаг в .env может не соответствовать факту (смешанная старая установка:
+      # ZENITH_DB_BACKEND=native, но контейнер/том тоже были). Тогда том
+      # переживал удаление, и новая установка подхватывала старую БД
+      # (стенд МТС 2026-11-13). Удаляем по факту наличия.
+      if command -v docker >/dev/null 2>&1; then
+        docker rm -f zenith-mysql >/dev/null 2>&1 || true
+        docker volume ls -q 2>/dev/null | grep -qx 'zenith_mysql_data' && docker volume rm zenith_mysql_data >/dev/null 2>&1 \
+          && echo "docker-том zenith_mysql_data удалён."
+      fi
       rm -rf "$ZENITH_DIR"
       echo "Zenith удалён."
       ;;
