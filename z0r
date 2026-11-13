@@ -3088,6 +3088,11 @@ uninstall_z2r() {
     # стоп сервиса (видели на стенде МТС) -- без неё трафик не уходит в NFQUEUE
     # к несуществующему процессу (queue-bypass), но хвост всё равно убираем.
     nft delete table inet zapret2 2>/dev/null || true
+    # Юнит валидатора стратегий ставит zator, а его штатное удаление его не
+    # снимает -- оставался работать на удалённом /opt/zator (стенд МТС).
+    systemctl disable --now z2r-strategy-validator.service 2>/dev/null || true
+    rm -f /etc/systemd/system/z2r-strategy-validator.service /etc/systemd/system/multi-user.target.wants/z2r-strategy-validator.service
+    systemctl daemon-reload
     echo "z2r удалён."
   else
     echo "Отмена, z2r не тронут (нужно было ввести именно 'DELETE')."
@@ -4224,6 +4229,13 @@ uninstall_dnscrypt() {
     echo "dnscrypt-proxy не установлен -- нечего удалять."
     return 0
   fi
+  # Удаляем только СВОЮ установку: на стенде МТС 2026-11-13 dnscrypt был
+  # настроен вручную (resolv.conf -> 127.0.2.1 с chattr +i, без бэкапа z0r),
+  # удаление пакета оставило сервер вообще без DNS.
+  if ! grep -qF "$DNSCRYPT_DHCPCD_MARKER" /etc/dhcpcd.conf 2>/dev/null && [ ! -f /etc/resolv.conf.z0r-dnscrypt.bak ]; then
+    echo "dnscrypt-proxy настроен не через z0r (нет его меток/бэкапа) -- не трогаю."
+    return 0
+  fi
   read -re -p "Остановить, снять переключение DNS (если делали через z0r) и удалить пакет dnscrypt-proxy? [y/N]: " ans
   case "$ans" in
     y|Y)
@@ -4267,6 +4279,14 @@ uninstall_dnscrypt() {
         || opkg remove dnscrypt-proxy >/dev/null 2>&1 \
         || apk del dnscrypt-proxy >/dev/null 2>&1
       echo "dnscrypt-proxy удалён."
+      # Последняя страховка: resolv.conf всё ещё смотрит на локальный
+      # dnscrypt (127.0.2.1) -- после удаления пакета это «нет DNS».
+      if grep -qE '^nameserver[[:space:]]+127\.0\.2\.1' /etc/resolv.conf 2>/dev/null; then
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        local gw; gw="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')"
+        { [ -n "$gw" ] && echo "nameserver $gw"; echo "nameserver 1.1.1.1"; } > /etc/resolv.conf
+        echo "!!! /etc/resolv.conf указывал на удалённый dnscrypt -- прописал ${gw:+$gw и }1.1.1.1, проверь." >&2
+      fi
       ;;
     *) echo "Отмена, dnscrypt-proxy не тронут." ;;
   esac
@@ -4304,6 +4324,11 @@ uninstall_autobench_self() {
   read -re -p "Точно удалить z2r_autobench? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
     echo "Удаляю $INSTALL_DIR..."
+    # Таймер автообновления живёт отдельно и после удаления каталога
+    # пытался бы обновлять несуществующее (стенд МТС 2026-11-13).
+    systemctl disable --now z2r-autoupdate.timer z2r-autoupdate.service 2>/dev/null || true
+    rm -f /etc/systemd/system/z2r-autoupdate.timer /etc/systemd/system/z2r-autoupdate.service
+    systemctl daemon-reload
     if [ -L "$Z0R_BIN_LINK" ] && [ "$(readlink -f "$Z0R_BIN_LINK" 2>/dev/null)" = "$(readlink -f "$INSTALLED_Z0R" 2>/dev/null)" ]; then
       rm -f "$Z0R_BIN_LINK"
       echo "Команда 'z0r' ($Z0R_BIN_LINK) удалена."
