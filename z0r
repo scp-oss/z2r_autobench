@@ -1374,6 +1374,7 @@ run_z2r_installer_unattended() {
   ( cd "$dir" && IFACE="$iface" Z2R_BASE="$base" expect -c '
     encoding system utf-8
     set timeout 30
+    set idle 0
     set iface $env(IFACE)
     spawn sh $env(Z2R_BASE)
 
@@ -1404,6 +1405,22 @@ run_z2r_installer_unattended() {
       "auto download ip/host list" { send "\r"; exp_continue }
       "~3мб места)? 1 - Да, Enter - нет" { send "\r"; exp_continue }
       "press enter to continue" { send "\r"; exp_continue }
+      # zator (AloofLibra/zator, с 2026-11) спрашивает по-русски с дефолтом в
+      # скобках: «Ваш выбор [2]:», «... [y/N]:» -- принимаем дефолт. Без этого
+      # expect на неизвестном вопросе выходил по timeout из блока, а
+      # «catch wait» дальше ждал установщик вечно (живой случай: стенд МТС
+      # 2026-11-13, «Установить Web-панель управления? Ваш выбор [2]:»).
+      -re {Ваш выбор \[[^\]]*\]: ?$} { set idle 0; send "\r"; exp_continue }
+      -re {\[[yYдД]/[nNнН]\]:? ?$} { set idle 0; send "\r"; exp_continue }
+      -re {\[[nNнН]/[yYдД]\]:? ?$} { set idle 0; send "\r"; exp_continue }
+      # Неизвестный вопрос/долгая загрузка: тишина timeout секунд -> Enter
+      # (ответ по умолчанию), но не больше 20 раз подряд -- дальше честная
+      # ошибка вместо бесконечного зависания.
+      timeout {
+        incr idle
+        if {$idle > 20} { puts stderr "\nz0r: установщик z2r молчит слишком долго -- прерываю (неизвестный вопрос?)"; exit 3 }
+        send "\r"; exp_continue
+      }
       eof
     }
     catch wait result
