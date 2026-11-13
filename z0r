@@ -2955,15 +2955,36 @@ uninstall_z2r() {
   echo "известного нам штатного uninstall — удаляем вручную."
   read -re -p "Точно удалить z2r? Наберите 'DELETE' для подтверждения: " ans
   if [ "$ans" = "DELETE" ]; then
-    systemctl disable --now zapret2 2>/dev/null || true
-    rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service
-    systemctl daemon-reload
-    # Песочный nfqws2 Zenith'а -- отдельный процесс от zapret2.service выше,
-    # держит открытыми файлы из /opt/zapret2 -- останавливаем ДО rm -rf,
-    # иначе он бесконечно заливает терминал ошибками чтения удалённых
-    # хостлистов (живой инцидент 2026-08-13, см. stop_zenith_sandbox_if_running).
     [ -d "$ZENITH_DIR" ] && stop_zenith_sandbox_if_running
-    rm -rf /opt/zapret2
+    # zator (с 2026-11) -- есть штатное полное удаление (меню z2r: 4 -> 5):
+    # watchdog, zapret2, /opt/zator. Ручное удаление ниже раньше оставляло
+    # /opt/zator, таймер zapret2-list-update и /usr/local/bin/z2r (стенд МТС
+    # 2026-11-13). Ведём меню автора через expect; ручная чистка -- запасной
+    # путь и добивание хвостов.
+    if [ -d /opt/zator ] && command -v z2r >/dev/null 2>&1 && ensure_expect; then
+      echo "Удаляю штатно, через меню zator (4 -> 5, с бэкапом)..."
+      expect -c '
+        encoding system utf-8
+        set timeout 60
+        set menus 0
+        spawn z2r
+        expect {
+          "Выберите необходимое действие:" { incr menus; sleep 1; if {$menus == 1} { send "4\r" } else { send "0\r" }; exp_continue }
+          "Введите 5 - подтвердить удаление" { send "5\r"; exp_continue }
+          "Создать резервную копию" { exp_continue }
+          -re {Ваш выбор: ?$} { send "1\r"; exp_continue }
+          "Enter для продолжения" { send "\r"; exp_continue }
+          timeout { send "\r"; exp_continue }
+          eof
+        }' || echo "!!! штатное удаление zator вернуло ошибку -- добиваю вручную" >&2
+    fi
+    systemctl disable --now zapret2 zapret2-list-update.timer zapret2-list-update.service 2>/dev/null || true
+    rm -f /usr/lib/systemd/system/zapret2.service /etc/systemd/system/zapret2.service \
+          /usr/lib/systemd/system/zapret2-list-update.service /usr/lib/systemd/system/zapret2-list-update.timer \
+          /etc/systemd/system/zapret2-list-update.service /etc/systemd/system/zapret2-list-update.timer
+    systemctl daemon-reload
+    rm -rf /opt/zapret2 /opt/zator
+    rm -f /usr/local/bin/z2r
     echo "z2r удалён."
   else
     echo "Отмена, z2r не тронут (нужно было ввести именно 'DELETE')."
