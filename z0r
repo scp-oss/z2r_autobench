@@ -193,6 +193,9 @@ while [ $# -gt 0 ]; do
     # для развёртывания/проверки на чистом сервере (стенд МТС 2026-11-13).
     --install-modules) MODE="install-modules"; Z0R_MODULES="$2"; shift 2 ;;
     --uninstall) MODE="uninstall"; shift ;;
+    # Полное удаление: все модули, ядро z2r и сам z2r_autobench (каждый шаг
+    # со своим подтверждением) -- для чистого переразвёртывания.
+    --uninstall-all) MODE="uninstall-all"; shift ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -2896,19 +2899,26 @@ uninstall_zenith() {
 }
 
 uninstall_daemon() {
-  if [ ! -f /etc/systemd/system/autotune-daemon.service ]; then
-    echo "autotune-daemon.service не установлен — нечего удалять."
+  # Кроме единого autotune-daemon.service есть шаблон autotune-profile@.service
+  # и его экземпляры @1..@6 (по одному на профиль). Раньше они не удалялись
+  # и продолжали работать, ссылаясь на уже удалённые скрипты (стенд МТС
+  # 2026-11-13).
+  local units inst
+  units="$(systemctl list-units --all --plain --no-legend 'autotune-profile@*' 2>/dev/null | awk '{print $1}')"
+  if [ ! -f /etc/systemd/system/autotune-daemon.service ] && [ -z "$units" ] && [ ! -f /etc/systemd/system/autotune-profile@.service ]; then
+    echo "autotune-daemon / autotune-profile@ не установлены — нечего удалять."
     return 0
   fi
-  read -re -p "Найден autotune-daemon.service — удалить? [y/N]: " ans
+  read -re -p "Найден autotune (autotune-daemon и/или autotune-profile@N) — удалить? [y/N]: " ans
   case "$ans" in
     y|Y)
       systemctl disable --now autotune-daemon 2>/dev/null || true
-      rm -f /etc/systemd/system/autotune-daemon.service
+      for inst in $units; do systemctl disable --now "$inst" 2>/dev/null || true; done
+      rm -f /etc/systemd/system/autotune-daemon.service /etc/systemd/system/autotune-profile@.service
       systemctl daemon-reload
-      echo "autotune-daemon.service удалён."
+      echo "autotune удалён (daemon + экземпляры по профилям)."
       ;;
-    *) echo "Отмена, autotune-daemon.service не тронут." ;;
+    *) echo "Отмена, autotune не тронут." ;;
   esac
 }
 
@@ -4530,6 +4540,11 @@ fi
 if [ "$MODE" = "install-z2r-offline" ]; then
   install_z2r_offline
   exit $?
+fi
+
+if [ "$MODE" = "uninstall-all" ]; then
+  uninstall_everything
+  exit 0
 fi
 
 if [ "$MODE" = "uninstall" ]; then
