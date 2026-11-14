@@ -1989,7 +1989,7 @@ manage_voice_bot() {
       fi
       read -re -p "Сервис установлен, но не запущен. Включить сейчас? [y/N]: " ans
       case "$ans" in
-        y|Y) systemctl enable --now "$VOICE_BOT_SERVICE"; sleep 2; systemctl status "$VOICE_BOT_SERVICE" --no-pager ;;
+        y|Y) systemctl enable --now "$VOICE_BOT_SERVICE"; sleep 2; systemctl status "$VOICE_BOT_SERVICE" --no-pager; voice_region_sweep_install ;;
         *) echo "Ок, не трогаю." ;;
       esac
       ;;
@@ -1998,6 +1998,48 @@ manage_voice_bot() {
       ;;
   esac
 }
+# Таймер прогона живой VOICE_UDP-стратегии по всем голосовым регионам
+# Discord (voice_region_sweep.sh, раз в 6 ч, только отчёт -- без ретюна).
+# Ставится вместе с ботом: без бота /probe некому отвечать.
+voice_region_sweep_install() {
+  local u
+  for u in voice-region-sweep.service voice-region-sweep.timer; do
+    [ -f "$SCRIPT_DIR/$u" ] || { echo "Не найден $SCRIPT_DIR/$u -- обнови z2r_autobench." >&2; return 1; }
+    cp -f "$SCRIPT_DIR/$u" "/etc/systemd/system/$u"
+  done
+  systemctl daemon-reload
+  systemctl enable --now voice-region-sweep.timer >/dev/null 2>&1 \
+    && echo "Таймер voice-region-sweep (регионы Discord, раз в 6 ч) включён."
+}
+
+voice_region_sweep_uninstall() {
+  systemctl disable --now voice-region-sweep.timer >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/voice-region-sweep.service /etc/systemd/system/voice-region-sweep.timer
+  systemctl daemon-reload
+}
+
+# Неинтерактивное включение уже склонированного бота (z0r --install-modules 4
+# повторно) -- те же шаги, что manage_voice_bot для состояния OFF.
+voice_bot_enable_noninteractive() {
+  git -C "$VOICE_BOT_DIR" pull -q --ff-only 2>/dev/null || echo "  (git pull бота не прошёл -- продолжаю с текущей версией)" >&2
+  if ! grep -qE '^DISCORD_TOKEN=.{20,}' "$VOICE_BOT_DIR/.env" 2>/dev/null; then
+    echo "DISCORD_TOKEN в $VOICE_BOT_DIR/.env не заполнен -- заполни (DISCORD_TOKEN, GUILD_ID, TEST_VOICE_CHANNEL_ID, OWNER_USER_ID) и запусти ещё раз." >&2
+    return 1
+  fi
+  if ! id zenith-voice-bot >/dev/null 2>&1; then
+    echo "Юзера zenith-voice-bot нет -- сначала поставь Zenith (модуль 2)." >&2
+    return 1
+  fi
+  ensure_voice_bot_log_grants
+  ensure_voice_bot_sudo_grants
+  cp -f "$SCRIPT_DIR/${VOICE_BOT_SERVICE}.service" "/etc/systemd/system/${VOICE_BOT_SERVICE}.service"
+  systemctl daemon-reload
+  systemctl enable --now "$VOICE_BOT_SERVICE" >/dev/null 2>&1
+  sleep 3
+  echo "Discord_bot: $(systemctl is-active "$VOICE_BOT_SERVICE" 2>/dev/null)"
+  voice_region_sweep_install
+}
+
 _voice_bot_do_restart() {
   systemctl restart "$VOICE_BOT_SERVICE"
   sleep 2
@@ -2005,6 +2047,7 @@ _voice_bot_do_restart() {
 }
 _voice_bot_do_stop() {
   systemctl disable --now "$VOICE_BOT_SERVICE" 2>/dev/null || true
+  voice_region_sweep_uninstall
   echo "Остановлен."
 }
 _voice_bot_do_check_updates() {
@@ -4460,7 +4503,13 @@ first_run_install_modules() {
   fi
   if [ "$want_bot" = "1" ]; then
     echo ""; echo "--- Discord_bot ---"
-    voice_bot_install_files
+    # Уже склонирован -> не клонировать заново (раньше: fatal "уже существует"
+    # и сервис так и не включался), а обновить и включить, если .env заполнен.
+    if [ -d "$VOICE_BOT_DIR/.git" ]; then
+      voice_bot_enable_noninteractive
+    else
+      voice_bot_install_files
+    fi
   fi
   if [ "$want_dnscrypt" = "1" ]; then
     echo ""; echo "--- DNSCrypt-proxy ---"

@@ -1,0 +1,11 @@
+[Unit]
+Description=z2r: VOICE_UDP region sweep every 6 hours
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=6h
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
