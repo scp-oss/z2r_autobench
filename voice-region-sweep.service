@@ -1,0 +1,10 @@
+[Unit]
+Description=z2r: live VOICE_UDP strategy across all Discord voice regions (report only, no retune)
+After=network-online.target z2r-test-voice-bot.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/z2r_autobench/voice_region_sweep.sh
+Nice=10
+TimeoutStartSec=30min

@@ -30,12 +30,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROBE_URL="${PROBE_URL:-http://127.0.0.1:8765/probe}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-45}"
 STRATEGY=""
+JSON_OUT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --strategy) STRATEGY="$2"; shift 2 ;;
     --probe-url) PROBE_URL="$2"; shift 2 ;;
     --probe-timeout) PROBE_TIMEOUT="$2"; shift 2 ;;
+    --json) JSON_OUT="$2"; shift 2 ;;   # + машинный результат (voice_region_sweep.sh)
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -52,6 +54,7 @@ fi
 
 REGIONS="auto brazil hongkong india japan rotterdam singapore southafrica sydney us-central us-east us-south us-west"
 
+RES_FILE="$(mktemp)"; trap 'rm -f "$RES_FILE"' EXIT
 printf '%-14s %-8s %-10s %s\n' "region" "success" "connect_ms" "note"
 printf '%-14s %-8s %-10s %s\n' "------" "-------" "----------" "----"
 
@@ -60,9 +63,10 @@ for region in $REGIONS; do
     -d "{\"strategy_n\": $STRATEGY, \"region\": \"$region\"}")"
   if [ -z "$resp" ]; then
     printf '%-14s %-8s %-10s %s\n' "$region" "?" "?" "пустой ответ / таймаут curl (${PROBE_TIMEOUT}s)"
+    printf '{"region": "%s", "success": null, "connect_ms": null, "note": "empty response / curl timeout"}\n' "$region" >> "$RES_FILE"
     continue
   fi
-  printf '%s' "$resp" | REGION="$region" python3 -c "
+  printf '%s' "$resp" | REGION="$region" RES_FILE="$RES_FILE" python3 -c "
 import json, os, sys
 region = os.environ['REGION']
 try:
@@ -74,6 +78,19 @@ ok = 'true' if d.get('success') else 'false'
 ms = d.get('connect_ms', '?')
 note = d.get('note', '')
 print(f'{region:<14} {ok:<8} {ms!s:<10} {note}')
+with open(os.environ['RES_FILE'], 'a') as f:
+    f.write(json.dumps({'region': region, 'success': bool(d.get('success')), 'connect_ms': d.get('connect_ms'), 'note': note}, ensure_ascii=False) + '\n')
 "
   sleep 1
 done
+
+if [ -n "$JSON_OUT" ]; then
+  STRATEGY="$STRATEGY" RES_FILE="$RES_FILE" python3 - "$JSON_OUT" <<'PYEOF'
+import json, os, socket, sys, time, uuid
+res = [json.loads(l) for l in open(os.environ["RES_FILE"]) if l.strip()]
+s = os.environ.get("STRATEGY", "")
+json.dump({"ts": int(time.time()), "sweep_id": str(uuid.uuid4()), "node": socket.gethostname(),
+           "source": "sweep", "strategy": int(s) if s.isdigit() else None, "results": res},
+          open(sys.argv[1], "w"), ensure_ascii=False, indent=1)
+PYEOF
+fi
