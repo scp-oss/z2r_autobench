@@ -47,7 +47,9 @@ if [ -z "$STRATEGY" ]; then
   STRATEGY="$(awk -F'\t' '$1=="6" && $2=="udp" {print $3}' "$LOCKED_TSV" 2>/dev/null)"
   if [ -z "$STRATEGY" ]; then
     echo "Не удалось определить текущую боевую стратегию профиля 6 из $LOCKED_TSV — укажи --strategy N вручную." >&2
-    exit 1
+    # 3 = «профиль 6 не залочен» (zator в circular-режиме, свежая установка) --
+    # не ошибка, voice_region_sweep.sh в этом случае просто пропускает прогон.
+    exit 3
   fi
   echo "Стратегия не задана явно -- беру текущую боевую: strategy=$STRATEGY (из $LOCKED_TSV)"
 fi

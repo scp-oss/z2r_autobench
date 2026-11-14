@@ -25,7 +25,16 @@ ZENITH_ORCH="${ZENITH_ORCH:-$SCRIPT_DIR/Zenith/orchestrator}"
 mkdir -p "$LOG_DIR"
 tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
 
-"$SCRIPT_DIR/rank_voice_regions.sh" --json "$tmp" "$@" || { echo "voice_region_sweep: rank_voice_regions.sh завершился с ошибкой" >&2; exit 1; }
+# Явная стратегия: аргумент --strategy N или VOICE_SWEEP_STRATEGY в окружении/юните.
+extra=()
+[ -n "${VOICE_SWEEP_STRATEGY:-}" ] && extra=(--strategy "$VOICE_SWEEP_STRATEGY")
+"$SCRIPT_DIR/rank_voice_regions.sh" --json "$tmp" "${extra[@]}" "$@"
+rc=$?
+if [ "$rc" -eq 3 ]; then
+  echo "voice_region_sweep: у профиля 6 (VOICE_UDP) нет залоченной стратегии (zator в circular-режиме) -- проверять нечего, пропускаю. Явно: VOICE_SWEEP_STRATEGY=N или --strategy N."
+  exit 0
+fi
+[ "$rc" -eq 0 ] || { echo "voice_region_sweep: rank_voice_regions.sh завершился с ошибкой ($rc)" >&2; exit 1; }
 
 # Если бот недоступен, все регионы будут "?" -- такой прогон не пишем,
 # иначе в сводке/БД появится ложное «0 из 13».
