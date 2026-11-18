@@ -2055,6 +2055,41 @@ project names here — same public-repo constraint as README.md.
   grant is scoped to `--domain *` (funnel_runner.py) specifically, which
   never touches this flag at all.
 
+## VOICE_UDP: region sweep now picks + locks the best all-region strategy; voice bot permission preflight (2026-11-18)
+
+- Live incident: every `auto_voice_check` reported "ни одна стратегия не сработала" for all 32
+  strategies for days. Root cause was not DPI at all — the voice-test bot had lost View/Connect/Speak
+  on the test channel (channel made private), Discord silently ignores the join, `channel.connect()`
+  times out after 15s for EVERY strategy. Fixed on the Discord side (bots got a role with access to
+  the main + 12 region channels). Code side: `channel_problem()` in `z2r_test-voice-bot/bot.py`
+  checks guild/channel/permissions before `auto_voice_check` and `/voice_rank` and in
+  `run_voice_test()` — one clear owner DM ("нет прав на голосовой канал …") instead of 32 fake
+  failures. Lesson: a sweep where literally everything fails identically (same ~30000ms timeout)
+  is almost always an infra/permission problem, not a strategy problem — check a no-bypass baseline
+  connect first.
+- Same bot: the 6h profile summary read per-profile `autotune_state/status_profile_N.txt` /
+  `daemon_profile_N.log`, but `autotune_daemon.sh` writes one shared `status.txt` + `daemon.log`
+  → every profile showed "нет данных autotune" and PROBLEM/retune alerts never fired (FB_TLS/FB_HTTP
+  were failing 24x/day unnoticed). Now falls back to the shared files (filtered by `profile=N`),
+  shows SKIP_PROFILES profiles as "ведёт zator, autotune для профиля выключен", and includes
+  profiles present in status.txt but not in PROFILE_NAMES (8/9).
+- `voice_best_select.sh` (new): candidates = strategies with zero failures in the LAST continuous
+  autocheck run in `logs/voice_bot_raw.tsv` (rows with <15 min gaps — a fixed time window wrongly
+  mixed in a pre-fix all-failing run), fastest first. If profile 6 is unlocked (zator circular) it
+  immediately locks the fastest so voice works meanwhile, then runs `rank_voice_regions.sh` for the
+  top `VOICE_SELECT_CANDIDATES` (default 6) + current lock, picks max regions OK then min avg
+  connect_ms, locks it via `set_strategy_cli.sh set 6 udp N`, and writes the winner as a normal
+  sweep result (`logs/voice_regions.json` + history + Zenith DB) plus `logs/voice_select.json`.
+  Rationale: a user can join any voice channel = any region, so "works in CDN Auto" is not enough.
+- `voice_region_sweep.sh`: rc 3 (no lock) now `exec`s the selector instead of skipping (this reverses
+  the earlier fix/voice-sweep-no-lock skip); after a normal sweep, any failed region triggers the
+  selector too. Explicit `--strategy N` / `VOICE_SWEEP_STRATEGY` = manual check, never reselects;
+  `VOICE_SWEEP_NO_SELECT=1` disables. `voice-region-sweep.service`: `TimeoutStartSec` 30min → 2h
+  (6 candidates x 13 regions can exceed 30 min; failing regions cost ~30s each).
+- Gotcha hit while deploying: editing a bash script in place while the service is running it
+  (python `open(p,"w")` keeps the inode) can make bash continue at a stale byte offset — restart
+  the unit after such edits, or install via `install`/`mv` (new inode).
+
 ## Publishing hygiene
 
 - This repo (and Zenith) are public. Do not commit the production

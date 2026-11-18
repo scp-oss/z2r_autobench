@@ -5,8 +5,13 @@
 #
 # Зачем: autotune-daemon и раунды Zenith проверяют голос только в «CDN Auto»,
 # регионы раньше смотрел лишь zenith-promoter при продвижении (он выключен).
-# Этот прогон ничего не ретюнит и не продвигает — только показывает, где
-# живая стратегия работает:
+# Сам прогон ничего не ретюнит и не продвигает — показывает, где живая
+# стратегия работает. НО (с 2026-11-18): если профиль 6 не закреплён (zator по
+# кругу) или закреплённая стратегия падает хотя бы в одном регионе, запускается
+# voice_best_select.sh — выбирает среди прошедших автопроверку бота стратегию,
+# которая работает во всех регионах и быстрее остальных, и закрепляет её
+# (пользователь может зайти в любой канал = любой регион). Отключить:
+# VOICE_SWEEP_NO_SELECT=1. Результаты:
 #   logs/voice_regions.json            — последний прогон (его читает бот для 6ч-сводки)
 #   logs/voice_regions_history.jsonl   — история, по строке на прогон
 #   центральная БД, таблица voice_region_checks (через Zenith db.py:
@@ -31,8 +36,10 @@ extra=()
 "$SCRIPT_DIR/rank_voice_regions.sh" --json "$tmp" "${extra[@]}" "$@"
 rc=$?
 if [ "$rc" -eq 3 ]; then
-  echo "voice_region_sweep: у профиля 6 (VOICE_UDP) нет залоченной стратегии (zator в circular-режиме) -- проверять нечего, пропускаю. Явно: VOICE_SWEEP_STRATEGY=N или --strategy N."
-  exit 0
+  # профиль 6 не закреплён (zator по кругу): выбираем и закрепляем стратегию, которая работает во всех
+  # регионах и быстрее остальных (кандидаты — по последней автопроверке бота), см. voice_best_select.sh
+  echo "voice_region_sweep: у профиля 6 (VOICE_UDP) нет закреплённой стратегии -- запускаю выбор лучшей по регионам"
+  exec "$SCRIPT_DIR/voice_best_select.sh"
 fi
 [ "$rc" -eq 0 ] || { echo "voice_region_sweep: rank_voice_regions.sh завершился с ошибкой ($rc)" >&2; exit 1; }
 
@@ -59,4 +66,14 @@ if [ -x "$ZENITH_ORCH/venv/bin/python" ]; then
     || echo "voice_region_sweep: запись в БД не удалась (результат есть в $OUT)" >&2
 else
   echo "voice_region_sweep: Zenith не установлен -- в БД не пишу (результат в $OUT)"
+fi
+
+# закреплённая стратегия работает не во всех регионах -- ищем ту, что работает везде (и быстрее);
+# явная --strategy / VOICE_SWEEP_STRATEGY -- это ручная проверка, тогда ничего не перевыбираем
+if [ "${#extra[@]}" -eq 0 ] && [ $# -eq 0 ] && [ "${VOICE_SWEEP_NO_SELECT:-0}" != 1 ]; then
+  failed="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for r in d["results"] if r["success"] is False))' "$OUT" 2>/dev/null || echo 0)"
+  if [ "${failed:-0}" -gt 0 ]; then
+    echo "voice_region_sweep: закреплённая стратегия не работает в $failed регион(ах) -- запускаю выбор лучшей"
+    "$SCRIPT_DIR/voice_best_select.sh" || true
+  fi
 fi
